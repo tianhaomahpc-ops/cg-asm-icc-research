@@ -525,16 +525,40 @@ int main(int argc, char *argv[])
     fes.GetEssentialTrueDofs(ess_bdr, ess_tdof_list);
 
     // -------- 4) bilinear & linear forms --------------------------------
+    // Source term:
+    //   source_type = 0  ->  f(x,y,z) = 1            [analytically 1D]
+    //   source_type = 1  ->  f(x,y,z) = sin(pi y) sin(pi z)
+    //                        [genuinely 3D solution; useful for plots]
+    int source_type = 0;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "-source_type" && i + 1 < argc) {
+            source_type = std::atoi(argv[i+1]);
+        }
+    }
+
     ConstantCoefficient sigma(1.0);
     ConstantCoefficient one_rhs(1.0);
+    FunctionCoefficient yz_rhs([](const Vector &x) {
+        return std::sin(M_PI * x[1]) * std::sin(M_PI * x[2]);
+    });
 
     ParBilinearForm a(&fes);
     a.AddDomainIntegrator(new DiffusionIntegrator(sigma));
     a.Assemble();
 
     ParLinearForm b(&fes);
-    b.AddDomainIntegrator(new DomainLFIntegrator(one_rhs));
+    if (source_type == 0) {
+        b.AddDomainIntegrator(new DomainLFIntegrator(one_rhs));
+    } else {
+        b.AddDomainIntegrator(new DomainLFIntegrator(yz_rhs));
+    }
     b.Assemble();
+    if (my_rank == 0) {
+        std::cout << "[SOURCE] source_type=" << source_type
+                  << " (" << (source_type == 0 ? "f=1, 1D-symmetric"
+                                              : "f=sin(pi y)sin(pi z), genuinely 3D")
+                  << ")\n";
+    }
 
     // Dirichlet value u = 0 on the x=0 face.
     ParGridFunction u_gf(&fes);
@@ -751,7 +775,161 @@ int main(int argc, char *argv[])
                   << (t1 - t0) << " s\n";
     }
 
+    // [SOLN] block -- statistics of the actual computed solution so we
+    // can check (a) whether the KSP truly converged for this (O,L)
+    // (b) whether the solution matches the analytical u(x,y,z)=x-x^2/2.
+    {
+        // Wrap mfem::Vector X (true dofs) and B as PETSc Vecs.
+        Vec Xpet = nullptr, Bpet = nullptr;
+        VecCreateMPIWithArray(MPI_COMM_WORLD, 1, X.Size(), PETSC_DECIDE,
+                              X.HostRead(), &Xpet);
+        VecCreateMPIWithArray(MPI_COMM_WORLD, 1, B.Size(), PETSC_DECIDE,
+                              B.HostRead(), &Bpet);
+        // raw KSP convergence reason
+        KSPConvergedReason reason;
+        KSPGetConvergedReason(static_cast<KSP>(pcg), &reason);
+        // true residual ||b - A x||_2 (NOT the preconditioned norm)
+        Vec resid;
+        VecDuplicate(Xpet, &resid);
+        MatMult(A_petsc, Xpet, resid);   // resid = A x
+        VecAYPX(resid, -1.0, Bpet);      // resid = B - A x
+        PetscReal r_norm, b_norm;
+        VecNorm(resid, NORM_2, &r_norm);
+        VecNorm(Bpet,  NORM_2, &b_norm);
+        VecDestroy(&resid);
+        // solution statistics
+        PetscReal x_l2, x_min, x_max;
+        PetscScalar x_sum;
+        VecNorm(Xpet, NORM_2, &x_l2);
+        VecMin (Xpet, NULL, &x_min);
+        VecMax (Xpet, NULL, &x_max);
+        VecSum (Xpet, &x_sum);
+        PetscInt nDof; VecGetSize(Xpet, &nDof);
+        double x_mean = (double)(PetscRealPart(x_sum) / (double)nDof);
+        // analytical comparison: u_ref(x,y,z) = x - x^2/2
+        ParGridFunction u_ref_gf(&fes);
+        for (int i = 0; i < fes.GetVSize(); ++i) {
+            const real_t *crd = pmesh.GetVertex(i);
+            u_ref_gf(i) = crd[0] - 0.5 * crd[0] * crd[0];
+        }
+        Vector U_ref(fes.GetTrueVSize());
+        u_ref_gf.GetTrueDofs(U_ref);
+        Vec uref;
+        VecCreateMPIWithArray(MPI_COMM_WORLD, 1, U_ref.Size(), PETSC_DECIDE,
+                              U_ref.HostRead(), &uref);
+        PetscReal uref_l2; VecNorm(uref, NORM_2, &uref_l2);
+        Vec err; VecDuplicate(Xpet, &err);
+        VecWAXPY(err, -1.0, uref, Xpet);   // err = Xpet - uref
+        PetscReal err_l2; VecNorm(err, NORM_2, &err_l2);
+        VecDestroy(&err); VecDestroy(&uref);
+        VecDestroy(&Xpet); VecDestroy(&Bpet);
+
+        const char *rstr =
+            (reason > 0) ? (reason == KSP_CONVERGED_RTOL ? "CONVERGED_RTOL" :
+                            reason == KSP_CONVERGED_ATOL ? "CONVERGED_ATOL" :
+                            "CONVERGED_OTHER")
+                         : (reason == KSP_DIVERGED_ITS   ? "DIVERGED_ITS"  :
+                            reason == KSP_DIVERGED_DTOL  ? "DIVERGED_DTOL" :
+                            "DIVERGED_OTHER");
+        if (my_rank == 0)
+        {
+            std::cout << "[SOLN] reason=" << rstr
+                      << "  iters=" << iters
+                      << "  ||r||/||b||=" << std::scientific << std::setprecision(3)
+                      << (double)(r_norm / b_norm)
+                      << "  ||u||="   << std::scientific << std::setprecision(6) << (double)x_l2
+                      << "  min="     << (double)x_min
+                      << "  max="     << (double)x_max
+                      << "  mean="    << x_mean
+                      << "  ||u-u*||/||u*||=" << std::scientific << std::setprecision(3)
+                      << (double)(err_l2 / uref_l2)
+                      << "\n";
+        }
+    }
+
     a.RecoverFEMSolution(X, b, u_gf);
+
+    // Probe the solution along three orthogonal lines.  Each rank only
+    // owns part of the mesh after METIS partitioning, so the probe must
+    // be COLLECTIVE: each rank finds its own nearest vertex to the query
+    // point, then MPI_Allreduce(MINLOC) picks the global owner, which
+    // broadcasts the value.
+    {
+        auto probe = [&](double xq, double yq, double zq) -> double {
+            double local_best_d2 = 1e300;
+            int    local_best_idx = -1;
+            for (int i = 0; i < pmesh.GetNV(); ++i) {
+                const real_t *c = pmesh.GetVertex(i);
+                double d2 = (c[0]-xq)*(c[0]-xq)
+                          + (c[1]-yq)*(c[1]-yq)
+                          + (c[2]-zq)*(c[2]-zq);
+                if (d2 < local_best_d2) { local_best_d2 = d2; local_best_idx = i; }
+            }
+            struct { double v; int r; } in, out;
+            in.v = local_best_d2;
+            in.r = my_rank;
+            MPI_Allreduce(&in, &out, 1, MPI_DOUBLE_INT, MPI_MINLOC, MPI_COMM_WORLD);
+            double val = (out.r == my_rank && local_best_idx >= 0)
+                         ? u_gf(local_best_idx) : 0.0;
+            MPI_Bcast(&val, 1, MPI_DOUBLE, out.r, MPI_COMM_WORLD);
+            return val;
+        };
+        const int NS = 9;
+        if (my_rank == 0) {
+            std::cout << "[PROBE] source_type=" << source_type << "\n"
+                      << "  Line A  (vary x, y=z=0.5):\n";
+        }
+        for (int i = 0; i <= NS; ++i) {
+            double xq = i / (double)NS;
+            double v  = probe(xq, 0.5, 0.5);
+            if (my_rank == 0) {
+                std::cout << "    u(" << std::fixed << std::setprecision(3) << xq
+                          << ",0.500,0.500) = " << std::setprecision(6) << v << "\n";
+            }
+        }
+        if (my_rank == 0) {
+            std::cout << "  Line B  (vary y, x=0.5, z=0.5):  "
+                         "[if 1D-degenerate every value equals 0.375]\n";
+        }
+        for (int i = 0; i <= NS; ++i) {
+            double yq = i / (double)NS;
+            double v  = probe(0.5, yq, 0.5);
+            if (my_rank == 0) {
+                std::cout << "    u(0.500," << std::fixed << std::setprecision(3) << yq
+                          << ",0.500) = " << std::setprecision(6) << v << "\n";
+            }
+        }
+        if (my_rank == 0) {
+            std::cout << "  Line C  (vary z, x=0.5, y=0.5):  [same expectation]\n";
+        }
+        for (int i = 0; i <= NS; ++i) {
+            double zq = i / (double)NS;
+            double v  = probe(0.5, 0.5, zq);
+            if (my_rank == 0) {
+                std::cout << "    u(0.500,0.500," << std::fixed << std::setprecision(3) << zq
+                          << ") = " << std::setprecision(6) << v << "\n";
+            }
+        }
+    }
+
+    // ParaView output so the user can actually SEE the 3D solution.
+    // Writes a paraview/<tag>/ directory; open paraview/<tag>.pvd.
+    {
+        std::string tag = std::string("nx") + std::to_string(nx)
+                        + "_n"   + std::to_string(num_ranks)
+                        + "_src" + std::to_string(source_type);
+        ParaViewDataCollection pv("u", &pmesh);
+        pv.SetPrefixPath("paraview_" + tag);
+        pv.RegisterField("u", &u_gf);
+        pv.SetLevelsOfDetail(1);
+        pv.SetCycle(0);
+        pv.SetTime(0.0);
+        pv.Save();
+        if (my_rank == 0) {
+            std::cout << "[VIZ] wrote paraview_" << tag
+                      << "/  (open the .pvd file in ParaView)\n";
+        }
+    }
     } // close PETSc-object scope: pcg, A_petsc, A_hypre etc. destroy here
 
     MFEMFinalizePetsc();

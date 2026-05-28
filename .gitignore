@@ -1,5 +1,6 @@
 # Compiled binaries
 asm_bug_demo/asm_demo
+asm_bug_demo/recoverue_demo
 asm_bug_demo/pure_petsc_demo
 asm_bug_demo/pure_petsc_fem
 asm_bug_demo/pure_petsc_load
@@ -10,7 +11,10 @@ asm_bug_demo/*.petscbin.info
 asm_bug_demo/metis_part_*.bin
 asm_bug_demo/mfem_layout_*.bin
 asm_bug_demo/results_*.csv
+asm_bug_demo/bench_*.csv
 asm_bug_demo/*.log
+asm_bug_demo/slices.png
+asm_bug_demo/paraview_*
 
 # OS / editor dross
 .DS_Store

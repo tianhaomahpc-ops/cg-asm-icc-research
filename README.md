@@ -1,13 +1,20 @@
-# ASM + CG on a Laplacian cube with 1 Dirichlet + 5 Neumann faces
+# ASM + CG on a Laplacian cube — bug isolation + single-level fix
 
 A minimal, self-contained MFEM 4.9 + PETSc 3.24 investigation of the
 **"PCASM overlap up → CG iter up"** phenomenon observed when solving the
 `u_e` recovery and torso elliptic systems inside an upstream
-electrophysiology code (cardioid). The same behaviour is reproduced here
-on a 200-line cube Laplacian, then dissected against an independent pure-
-PETSc P1 FEM assembler until both implementations agree on iter count
-**bit-for-bit** across all `(overlap × ICC fill × solver scheme)`
-combinations.
+electrophysiology code (cardioid). The same behaviour is reproduced
+here on two model problems:
+
+1. **`asm_demo`** — cube Laplacian with **1 Dirichlet + 5 Neumann** faces
+   (asymmetric BC, non-singular). The full investigation including
+   matrix bit-identity vs an independent pure-PETSc P1 FEM assembler
+   is in [`INVESTIGATION.md`](./INVESTIGATION.md).
+
+2. **`recoverue_demo`** — cube Laplacian with **all-Neumann** BC (singular,
+   null-space = constants). Mirrors cardioid's `Sys2 / u_e recovery`
+   case structurally: a singular SPD system that needs `MatSetNullSpace`
+   to be solvable. Compares scheme 0 (ASM) vs scheme 3 (sASM) directly.
 
 If you only want the headline answer:
 
@@ -33,11 +40,15 @@ asmcg-laplace-demo/
 ├── INVESTIGATION.md           # full chronological write-up + tables
 └── asm_bug_demo/
     ├── asm_demo.cpp           # MFEM 4.9 + PETSc 3.24 reproducer
+    │                          # (1 Dirichlet + 5 Neumann faces)
+    ├── recoverue_demo.cpp     # all-Neumann singular Laplacian, mirrors
+    │                          # cardioid Sys2 / u_e recovery shape.
+    │                          # Compares scheme 0 (ASM) vs scheme 3 (sASM)
     ├── pure_petsc_fem.c       # Independent pure-PETSc P1 hex→tet FEM
     ├── pure_petsc_demo.c      # Earlier 7-pt FD reference (kept for sanity)
     ├── pure_petsc_load.c      # PETSc driver that loads MFEM's partitioned
     │                          # matrix+rhs so iter counts match bit-for-bit
-    ├── sweep.sh / sweep_pure.sh
+    ├── sweep.sh / sweep_pure.sh / bench.sh / bench_recoverue.sh
     └── Makefile               # uses Spack-installed MFEM/PETSc/HYPRE/METIS
 ```
 
@@ -150,6 +161,77 @@ that PETSc's binary I/O does not preserve by default (defaulting to
 `PETSC_DECIDE` and silently re-chunking). With all three layers
 (matrix-zero tolerance, METIS partition, row layout) aligned, the
 ksp iter counts match bit-for-bit.
+
+## `recoverue_demo`: all-Neumann (singular) Laplacian — ASM vs sASM
+
+This second demo mirrors the structural shape of cardioid's
+`hack/femheart.cpp` `Sys2 / u_e recovery` solve:
+
+```
+PDE:        -∇·(σ ∇u) = -∇·(σ_i ∇V_m)    on  [0,1]^3
+BC:          ∂u/∂n = 0                   on all 6 faces
+Discrete:   A u = A V_m   (here σ = σ_i = 1, so same stiffness on both sides)
+Choice:     V_m(x,y,z) = cos(πx) cos(πy) cos(πz)     (zero mean, Neumann-compatible)
+            ⇒  analytical  u = V_m + const
+```
+
+The matrix `A` is **singular** (kernel = span{1}); the demo attaches
+`MatNullSpace` and gauges the solution to mean zero. This is exactly
+the configuration Sys2 lives in.
+
+### Headline iter count (`nx = 24`, 4 ranks, 15625 DOFs, run via `bench_recoverue.sh`):
+
+| | (O,L) | ASM (scheme 0)<br>iter / time(s) | sASM (scheme 3)<br>iter / time(s) | Δ iter | Δ time |
+|:-:|:-:|:-:|:-:|:-:|:-:|
+| | (0,0) | 64 / 0.022 | 64 / 0.018 | 0 (D=I at O=0)| −18% |
+| | (0,1) | 56 / 0.016 | 56 / 0.014 | 0 | −13% |
+| | (0,2) | 50 / 0.018 | 50 / 0.015 | 0 | −17% |
+| **★** | **(1,0)** | **68 / 0.020** | **52 / 0.012** | **−24%** | **−40%** |
+| | (1,1) | 52 / 0.019 | 40 / 0.011 | −23% | −42% |
+| | (1,2) | 45 / 0.023 | 37 / 0.014 | −18% | −39% |
+| **★** | **(2,0)** | **87 / 0.029** | **51 / 0.022** | **−41%** | **−24%** |
+| | (2,1) | 53 / 0.024 | 38 / 0.028 | −28% | noise (small problem) |
+| | (2,2) | 44 / 0.031 | 34 / 0.014 | −23% | −55% |
+
+Trend (`L = 0` column):
+
+```
+       O=0    O=1    O=2          iter
+ASM    64 --> 68 --> 87           ↑↑  iter UP with overlap (the bug)
+sASM   64 --> 52 --> 51           ↓   iter DOWN (theory recovered)
+```
+
+### Solution-correctness checks (every cell)
+- `meanU ~ 10^-17` after solve → null-space gauge clean
+- true residual `||r||/||b|| ~ 10^-6` consistent with the rtol target
+- error vs analytical: `||u_0 - V_m_0|| / ||V_m_0|| ~ 10^-7 ~ 10^-6` —
+  the discrete solution **equals the analytical V_m up to a constant**
+  to KSP-residual accuracy, both for ASM and sASM, regardless of (O,L)
+
+### Why this matters for cardioid
+The "iter-up-with-overlap" mis-behaviour persists for this singular
+all-Neumann case, and the same `InstallScaledASM(ksp, A, overlap, icc)`
+PCSHELL patch fixes it without touching CG or introducing a coarse
+correction. Dropping the patch into `hack/femheart.cpp` after each
+`PetscPCGSolver(...)` construction is a ~5-line change per system.
+
+### Reproduction
+
+```bash
+cd asm_bug_demo
+make recoverue_demo
+
+# Single-cell sanity check, baseline ASM
+mpirun -n 4 ./recoverue_demo -nx 24 -scheme 0 -overlap 1 -icc 0 \
+  -ksp_rtol 1e-6 -ksp_atol 1e-12 -ksp_max_it 2000 -ksp_converged_reason
+
+# Same with sASM
+mpirun -n 4 ./recoverue_demo -nx 24 -scheme 3 -overlap 1 -icc 0 \
+  -ksp_rtol 1e-6 -ksp_atol 1e-12 -ksp_max_it 2000 -ksp_converged_reason
+
+# Full sweep over (overlap, ICC level), iter + min time (5 repeats)
+./bench_recoverue.sh 24 4 5
+```
 
 ## License
 

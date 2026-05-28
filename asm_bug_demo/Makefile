@@ -14,8 +14,10 @@ CXX      := $(MFEM_CXX)
 CXXFLAGS := $(MFEM_FLAGS)
 LDFLAGS  := $(MFEM_LIBS)
 
-TARGET   := asm_demo
-SRC      := asm_demo.cpp
+TARGET     := asm_demo
+SRC        := asm_demo.cpp
+REC_TGT    := recoverue_demo
+REC_SRC    := recoverue_demo.cpp
 
 # Pure-PETSc demo: no MFEM, no Hypre needed.  Pull just the PETSc
 # include and library paths out of MFEM's MFEM_EXT_LIBS.
@@ -31,10 +33,13 @@ PURE_LOAD_SRC := pure_petsc_load.c
 PURE_INC    := -I$(PETSC_DIR_DERIVED)/include
 PURE_LIB    := -Wl,-rpath,$(PETSC_DIR_DERIVED)/lib -L$(PETSC_DIR_DERIVED)/lib -lpetsc
 
-all: $(TARGET) $(PURE_TARGET) $(PURE_FEM_TGT) $(PURE_LOAD_TGT)
+all: $(TARGET) $(REC_TGT) $(PURE_TARGET) $(PURE_FEM_TGT) $(PURE_LOAD_TGT)
 
 $(TARGET): $(SRC)
 	$(CXX) $(CXXFLAGS) $(SRC) -o $@ $(LDFLAGS)
+
+$(REC_TGT): $(REC_SRC)
+	$(CXX) $(CXXFLAGS) $(REC_SRC) -o $@ $(LDFLAGS)
 
 $(PURE_TARGET): $(PURE_SRC)
 	$(MPICC) -O3 -std=c11 $(PURE_INC) $(PURE_SRC) -o $@ $(PURE_LIB)
@@ -46,6 +51,6 @@ $(PURE_LOAD_TGT): $(PURE_LOAD_SRC)
 	$(MPICC) -O3 -std=c11 $(PURE_INC) $(PURE_LOAD_SRC) -o $@ $(PURE_LIB)
 
 clean:
-	$(RM) $(TARGET) $(PURE_TARGET) $(PURE_FEM_TGT) $(PURE_LOAD_TGT) *.o
+	$(RM) $(TARGET) $(REC_TGT) $(PURE_TARGET) $(PURE_FEM_TGT) $(PURE_LOAD_TGT) *.o
 
 .PHONY: all clean

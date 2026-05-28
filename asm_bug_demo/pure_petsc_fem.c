@@ -462,6 +462,63 @@ int main(int argc, char **argv)
                scheme, (int)iters, (int)reason, (double)rnorm, t1 - t0);
     }
 
+    /* ------- [SOLN] statistics, mirrors the MFEM side ------- */
+    {
+        Vec resid; PetscCall(VecDuplicate(x, &resid));
+        PetscCall(MatMult(A, x, resid));
+        PetscCall(VecAYPX(resid, -1.0, b));   /* resid = b - Ax */
+        PetscReal r_norm, b_norm;
+        PetscCall(VecNorm(resid, NORM_2, &r_norm));
+        PetscCall(VecNorm(b,     NORM_2, &b_norm));
+        PetscCall(VecDestroy(&resid));
+        PetscReal x_l2, x_min, x_max;
+        PetscScalar x_sum;
+        PetscCall(VecNorm(x, NORM_2, &x_l2));
+        PetscCall(VecMin (x, NULL,    &x_min));
+        PetscCall(VecMax (x, NULL,    &x_max));
+        PetscCall(VecSum (x, &x_sum));
+        PetscInt nDof; PetscCall(VecGetSize(x, &nDof));
+        double x_mean = (double)(PetscRealPart(x_sum) / (double)nDof);
+        /* Build u_ref = x_coord - x_coord^2 / 2 on the DMDA grid */
+        Vec uref; PetscCall(VecDuplicate(x, &uref));
+        {
+            PetscScalar ***ua;
+            PetscCall(DMDAVecGetArray(da, uref, &ua));
+            PetscInt xs, ys, zs, xm, ym, zm;
+            PetscCall(DMDAGetCorners(da, &xs, &ys, &zs, &xm, &ym, &zm));
+            double h = 1.0 / (double)nx;
+            for (PetscInt k = zs; k < zs + zm; ++k)
+              for (PetscInt j = ys; j < ys + ym; ++j)
+                for (PetscInt i = xs; i < xs + xm; ++i) {
+                    double xc = (double)i * h;
+                    ua[k][j][i] = xc - 0.5 * xc * xc;
+                }
+            PetscCall(DMDAVecRestoreArray(da, uref, &ua));
+        }
+        PetscReal uref_l2; PetscCall(VecNorm(uref, NORM_2, &uref_l2));
+        Vec err;  PetscCall(VecDuplicate(x, &err));
+        PetscCall(VecWAXPY(err, -1.0, uref, x));   /* err = x - uref */
+        PetscReal err_l2; PetscCall(VecNorm(err, NORM_2, &err_l2));
+        PetscCall(VecDestroy(&uref));
+        PetscCall(VecDestroy(&err));
+        const char *rstr =
+            (reason > 0) ? (reason == KSP_CONVERGED_RTOL ? "CONVERGED_RTOL" :
+                            reason == KSP_CONVERGED_ATOL ? "CONVERGED_ATOL" :
+                            "CONVERGED_OTHER")
+                         : (reason == KSP_DIVERGED_ITS   ? "DIVERGED_ITS"  :
+                            reason == KSP_DIVERGED_DTOL  ? "DIVERGED_DTOL" :
+                            "DIVERGED_OTHER");
+        if (rank == 0) {
+            printf("[SOLN] reason=%s  iters=%d  ||r||/||b||=%.3e"
+                   "  ||u||=%.6e  min=%.6e  max=%.6e  mean=%.6e"
+                   "  ||u-u*||/||u*||=%.3e\n",
+                   rstr, (int)iters,
+                   (double)(r_norm / b_norm),
+                   (double)x_l2, (double)x_min, (double)x_max, x_mean,
+                   (double)(err_l2 / uref_l2));
+        }
+    }
+
     PetscCall(KSPDestroy(&ksp));
     PetscCall(MatDestroy(&A));
     PetscCall(VecDestroy(&b));
