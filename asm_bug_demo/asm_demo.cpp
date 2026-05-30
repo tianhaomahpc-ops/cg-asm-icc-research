@@ -260,8 +260,18 @@ extern "C" PetscErrorCode SASMDestroy(PC pc)
 // D^{-1/2} * M_BASIC^{-1} * D^{-1/2}.
 static void InstallScaledASM(KSP ksp, Mat A,
                              PetscInt overlap, PetscInt icc_levels,
-                             int my_rank)
+                             int my_rank,
+                             int cheby_deg = 0)
 {
+    // cheby_deg == 0 : block solve = preonly + ICC(icc_levels)   [scheme 3]
+    // cheby_deg >= 1 : block solve = cheby_deg steps of Chebyshev,
+    //                  preconditioned by ICC(icc_levels)         [scheme 4]
+    //   A fixed-degree Chebyshev iteration with frozen eigenvalue bounds
+    //   and a symmetric (ICC) smoother is a fixed SPD linear operator, so
+    //   the outer CG remains valid.  This makes the *inexact* local solve
+    //   closer to the exact block inverse without the O(n_i^3) cost (or the
+    //   extra fill / memory) of higher-level ICC -- attacking the second
+    //   half of the "overcounting x inexactness" disease cheaply.
     // 1. Build the inner PCASM, fully self-contained (no prefix).
     if (my_rank == 0) { std::cout << "\n  [sASM step 1] create inner pc... " << std::flush; }
     PC inner_pc = nullptr;
@@ -274,20 +284,35 @@ static void InstallScaledASM(KSP ksp, Mat A,
     PCSetUp(inner_pc);
     if (my_rank == 0) { std::cout << "ok\n  [sASM step 2] sub-KSP cfg... " << std::flush; }
 
-    // 2. Force sub-KSPs to preonly + ICC(icc_levels), matching the rest of
-    //    the experiment.  We do not call PCSetFromOptions on the inner PC
-    //    so the comparison stays hermetic.
+    // 2. Configure the sub-KSPs.
     {
         KSP     *sub_ksps = nullptr;
         PetscInt n_local  = 0, first = 0;
         PCASMGetSubKSP(inner_pc, &n_local, &first, &sub_ksps);
         for (PetscInt i = 0; i < n_local; ++i)
         {
-            KSPSetType(sub_ksps[i], KSPPREONLY);
             PC sub_pc = nullptr;
-            KSPGetPC(sub_ksps[i], &sub_pc);
-            PCSetType(sub_pc, PCICC);
-            PCFactorSetLevels(sub_pc, icc_levels);
+            if (cheby_deg <= 0)
+            {
+                KSPSetType(sub_ksps[i], KSPPREONLY);
+                KSPGetPC(sub_ksps[i], &sub_pc);
+                PCSetType(sub_pc, PCICC);
+                PCFactorSetLevels(sub_pc, icc_levels);
+            }
+            else
+            {
+                // Fixed-degree Chebyshev over ICC, eigenvalues estimated
+                // once at setup then frozen (fixed linear operator).
+                KSPSetType(sub_ksps[i], KSPCHEBYSHEV);
+                KSPSetTolerances(sub_ksps[i], PETSC_DEFAULT, PETSC_DEFAULT,
+                                 PETSC_DEFAULT, cheby_deg);
+                KSPSetNormType(sub_ksps[i], KSP_NORM_NONE);
+                KSPSetInitialGuessNonzero(sub_ksps[i], PETSC_FALSE);
+                KSPChebyshevEstEigSet(sub_ksps[i], 0.0, 0.1, 0.0, 1.1);
+                KSPGetPC(sub_ksps[i], &sub_pc);
+                PCSetType(sub_pc, PCICC);
+                PCFactorSetLevels(sub_pc, icc_levels);
+            }
         }
         PCSetUpOnBlocks(inner_pc);
     }
@@ -454,11 +479,12 @@ int main(int argc, char *argv[])
             "0:CG+ASM_BASIC",
             "1:GMRES+ASM_RESTRICT (RAS)",
             "2:BCGS +ASM_RESTRICT (RAS)",
-            "3:CG+sASM (PCSHELL D^-1/2 BASIC D^-1/2)" };
+            "3:CG+sASM (PCSHELL D^-1/2 BASIC D^-1/2)",
+            "4:CG+sASM + Chebyshev block solve" };
         std::cout << "================================================\n"
                   << "  asm_demo  (ranks=" << num_ranks
                   << ", fix_level=" << fix_level
-                  << ", scheme=" << (scheme>=0 && scheme<=3 ? scheme_name[scheme] : "?")
+                  << ", scheme=" << (scheme>=0 && scheme<=4 ? scheme_name[scheme] : "?")
                   << ", nx=" << nx << ")\n"
                   << "================================================\n";
     }
@@ -736,26 +762,29 @@ int main(int argc, char *argv[])
     // the user's -ksp_* options land on the KSP, then (b) overwrite the
     // outer PC with our PCSHELL.  Done in this order, the PCSHELL is the
     // final PC seen by KSPSolve and our installation is not clobbered.
-    if (scheme == 3)
+    if (scheme == 3 || scheme == 4)
     {
-        if (my_rank == 0) { std::cout << "[s3] customize..." << std::flush; }
+        // scheme 3 = sASM + preonly/ICC block solve
+        // scheme 4 = sASM + Chebyshev(deg) block solve  (deg from
+        //            -localcheby, default 2)
         pcg.Customize(true);                       // runs KSPSetFromOptions
-        if (my_rank == 0) { std::cout << "ok\n[s3] cast to KSP..." << std::flush; }
         KSP   ksp_raw = static_cast<KSP>(pcg);
         Mat   A_raw   = nullptr;
         KSPGetOperators(ksp_raw, &A_raw, NULL);
-        if (my_rank == 0) { std::cout << "ok\n[s3] read opts..." << std::flush; }
 
         PetscInt overlap = 0, icc_lev = 0;
         PetscOptionsGetInt(NULL, NULL, "-pc_asm_overlap",         &overlap, NULL);
         PetscOptionsGetInt(NULL, NULL, "-sub_pc_factor_levels",   &icc_lev, NULL);
-        if (my_rank == 0)
+
+        int cheby_deg = 0;
+        if (scheme == 4)
         {
-            std::cout << "ok overlap=" << overlap
-                      << " icc_lev=" << icc_lev << "\n[s3] install..." << std::flush;
+            cheby_deg = 2;
+            for (int i = 1; i < argc; ++i)
+                if (std::string(argv[i]) == "-localcheby" && i + 1 < argc)
+                    cheby_deg = std::atoi(argv[i+1]);
         }
-        InstallScaledASM(ksp_raw, A_raw, overlap, icc_lev, my_rank);
-        if (my_rank == 0) { std::cout << "ok\n" << std::flush; }
+        InstallScaledASM(ksp_raw, A_raw, overlap, icc_lev, my_rank, cheby_deg);
     }
 
     double t0 = MPI_Wtime();

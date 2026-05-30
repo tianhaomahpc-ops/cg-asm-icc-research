@@ -235,7 +235,132 @@ exactly.
 
 ---
 
-## 7. How to reproduce
+## 7. A cheaper, faster single-level variant: sASM + Chebyshev block solve (scheme 4)
+
+### 7.1 Motivation, straight from the diagnosis
+
+Section 3/6 established the disease as a **product** of two factors:
+
+```
+   iter-up-with-overlap   =   (BASIC overcounting)   x   (inexact ICC(0) local solve)
+```
+
+and proved (BASIC + *exact* Cholesky block solve makes iter go **down** with
+overlap, e.g. 40 -> 30 -> 23) that removing **either** factor cures it.
+`scheme 3` (sASM) removes the first factor for free. The natural next step is
+to also shrink the **second** factor — but exact Cholesky is `O(n_i^3)` in
+memory/time and unusable at cardioid scale. The cheap surrogate is a
+**fixed low-degree Chebyshev iteration over ICC(0)** on each subdomain block:
+
+```
+   scheme 4  =  CG  +  D^{-1/2} ( sum_i R_i^T  S_i  R_i ) D^{-1/2}
+   with       S_i  =  k steps of Chebyshev preconditioned by ICC(L) on block i
+```
+
+A *fixed* number of Chebyshev steps with **frozen** eigenvalue bounds and a
+symmetric (ICC) smoother is a fixed SPD linear operator, so the outer CG stays
+valid. It adds **no fill / no extra memory** beyond ICC(L), only a couple of
+block mat-vecs, and — crucially — the block Chebyshev runs on `PETSC_COMM_SELF`,
+so it performs **zero global reductions**. Default degree `k = 2`
+(`-localcheby N` to override).
+
+### 7.2 (a) Full (O, L) sweep — scheme 4 is stable and correct everywhere
+
+`nx = 48`, 4 ranks, MFEM `asm_demo`. `sch0` = BASIC, `sch3` = sASM,
+`sch4` = sASM + Chebyshev(2). All `sch4` cells converge (`CONVERGED_RTOL`) to
+the same discretization error (`||u-u*||/||u*|| = 5.42e-05`) as the baseline,
+so the solution is correct at every overlap.
+
+| O | L | sch0 (BASIC) | sch3 (sASM) | **sch4 (sASM+Cheby2)** |
+|:-:|:-:|:-:|:-:|:-:|
+| 0 | 0 | 132 | 132 | **85** |
+| 0 | 1 | 102 | 102 | **73** |
+| 0 | 2 | 87  | 87  | **66** |
+| 1 | 0 | 148 | 104 | **68** |
+| 1 | 1 | 102 | 75  | **54** |
+| 1 | 2 | 92  | 70  | **47** |
+| 2 | 0 | **179** | 103 | **65** |
+| 2 | 1 | 117 | 73  | **48** |
+| 2 | 2 | 90  | 67  | **42** |
+
+Notes:
+- At `O = 0` we have `sch0 == sch3` exactly (multiplicity `D = I`, so
+  sASM degenerates to BASIC) — a correctness self-check.
+- `sch0` overlap trend at `L=0`: 132 -> 148 -> **179** (the bug, climbing).
+- `sch4` overlap trend at `L=0`: 85 -> 68 -> **65** (cured, and lowest).
+- `sch4` helps even at `O = 0` (85 vs 132) because the Chebyshev attacks the
+  *inexactness* factor, which is present at every overlap.
+
+**Cross-check vs. the independent pure-PETSc implementation** (same MFEM-METIS
+matrix loaded via `pure_petsc_load`, scheme 4 added there too): all 9 (O, L)
+cells match **bit-for-bit**.
+
+```
+scheme 4: MFEM(asm_demo)  vs  pure-PETSc(pure_petsc_load)   ->   9/9 EQUAL
+```
+
+### 7.3 (b) Hard proof of reduced synchronization (`-log_view`, noise-free)
+
+Wall-clock time on a loaded laptop is unreliable (same config varies up to
+1.7x run-to-run; a bigger problem can even appear "faster"). So the time
+argument is made with a **deterministic** metric instead: the global-reduction
+count from PETSc `-log_view`. Each reduction is one `MPI_Allreduce` — the
+latency-bound global synchronization that dominates CG at HPC scale.
+
+`nx = 48`, 4 ranks, `O = 2, L = 0` (the baseline's worst overlap):
+
+| config | iter | MPI Reductions | VecTDot | = 2·iter + 2 ? |
+|:--|:-:|:-:|:-:|:-:|
+| BASELINE BASIC+ICC(0) | 179 | **668** | 360 | yes (360) |
+| sASM+ICC(0)           | 103 | 443 | 208 | yes (208) |
+| sASM+Cheby2/ICC(0)    | 65  | 329 | 132 | yes (132) |
+| **sASM+Cheby2/ICC(1)**| 48  | **278** | 98 | yes (98) |
+
+Two facts are proven here:
+
+1. **`VecTDot = 2·iter + 2` holds exactly for every config**, including
+   scheme 4. The CG dot-products (the global reductions) track only the
+   **outer** iteration count — the inner Chebyshev block solves add **zero**
+   global reductions (they run on `PETSC_COMM_SELF`). So scheme 4 trades
+   *local* flops for *fewer global syncs*; it never inflates the sync count.
+2. At `O = 2`, scheme 4 (`sASM+Cheby2/ICC1`) cuts
+   - **iterations 179 -> 48  (3.7x fewer)**, and
+   - **global synchronizations 668 -> 278  (2.4x fewer)**.
+
+Because `MPI_Allreduce` is latency-bound and gets relatively more expensive as
+the rank count grows, this 2.4x reduction in synchronizations is the concrete,
+machine-independent basis for the "reduces time at scale" claim — exactly the
+regime cardioid runs in (N12 = thousands of ranks).
+
+### 7.4 Honest scope of the contribution
+
+This is a **synthesis, not a new algorithm**. Multiplicity/partition-of-unity
+scaled additive Schwarz exists; Chebyshev-smoothed Schwarz / polynomial block
+smoothers exist. The reusable intellectual content here is the **diagnosis**
+(disease = overcounting x inexactness, multiplicatively coupled) which then
+*prescribes* the cheapest fix: attack each factor with the cheapest tool —
+`D^{-1/2}` scaling for overcounting (free, symmetric), a fixed low-degree
+Chebyshev block solve for inexactness (no extra memory, no extra global sync).
+Stronger published relatives (RASHO, SORAS) reach better spectral constants
+with harmonic/Robin local problems at higher implementation cost; deflation of
+the constant mode is powerful but is a (1-dimensional) coarse space, i.e.
+two-level.
+
+### 7.5 Recommendation for cardioid Sys2 / Sys3
+
+| scenario | recommended | why |
+|:--|:--|:--|
+| minimal change, safest | **sASM + ICC(1)** (scheme 3, L=1) | one PCSHELL, ~2x fewer iters, symmetric, zero risk |
+| memory-tight, large scale | **sASM + Cheby2/ICC(0)** (scheme 4) | no extra fill, ~2.6x fewer iters, fewer global syncs |
+| push iters lowest | sASM + Cheby2/ICC(1) (scheme 4) | ~3x fewer iters |
+| latency-bound network | any of the above + `-ksp_type pipecg` | overlaps the allreduce with the mat-vec |
+
+Start with scheme 3 + ICC(1) (certain, low-risk win); if profiling shows
+`MPI_Allreduce` dominates (very likely at thousands of ranks), upgrade to
+scheme 4 to cut the outer iteration count — and thus the synchronization
+count — further.
+
+## 8. How to reproduce
 
 ```bash
 cd asm_bug_demo
@@ -245,23 +370,35 @@ make                              # builds asm_demo, pure_petsc_fem, pure_petsc_
 # Baseline (reproduces the cardioid-style iter trend)
 ./sweep.sh 1 0 24 4               # fix_level=1, scheme=0 (CG+BASIC)
 
-# Fixes (pick any of three)
+# Fixes (pick any)
 ./sweep.sh 1 1 24 4               # GMRES + RAS
 ./sweep.sh 1 2 24 4               # BCGS + RAS
-./sweep.sh 1 3 24 4               # CG + sASM (the recommended one)
+./sweep.sh 1 3 24 4               # CG + sASM (recommended, symmetric)
+
+# scheme 4 = CG + sASM + Chebyshev(2) block solve (cheapest iter/sync)
+mpirun -n 4 ./asm_demo -fix_level 1 -scheme 4 -nx 48 \
+   -ksp_norm_type preconditioned -ksp_initial_guess_nonzero false \
+   -ksp_rtol 1e-6 -ksp_atol 1e-12 -ksp_max_it 2000 \
+   -pc_type asm -pc_asm_type basic -pc_asm_overlap 2 \
+   -sub_ksp_type preonly -sub_pc_type icc -sub_pc_factor_levels 1
+#   -localcheby 3   # to use degree-3 Chebyshev instead of the default 2
+
+# Prove the synchronization reduction with a noise-free metric:
+#   append -log_view and read "MPI Reductions:" and the VecTDot Count.
 
 # Independent verification with pure PETSc P1 FEM (no MFEM)
 ./sweep_pure.sh 0 24 4            # baseline; reproduces the bug independently
 ./sweep_pure.sh 3 24 4            # sASM; reproduces the fix independently
 
-# Bit-identity test (MFEM-METIS partition pushed into pure PETSc)
-mpirun -n 4 ./asm_demo  -fix_level 2 -scheme 0 -nx 24 \
+# Bit-identity test (MFEM-METIS partition pushed into pure PETSc); works for
+# scheme 0/3/4.  Seed the matrix dump with asm_demo, then load in pure PETSc:
+mpirun -n 4 ./asm_demo  -fix_level 2 -scheme 4 -nx 48 \
    -ksp_norm_type preconditioned -ksp_initial_guess_nonzero false \
-   -ksp_rtol 1e-6 -ksp_atol 1e-12 -ksp_max_it 1000 \
+   -ksp_rtol 1e-6 -ksp_atol 1e-12 -ksp_max_it 2000 \
    -pc_type asm -pc_asm_type basic -pc_asm_overlap 1 \
    -sub_ksp_type preonly -sub_pc_type icc -sub_pc_factor_levels 0
-mpirun -n 4 ./pure_petsc_load -nx 24 -scheme 0 ...same KSP options...
-# both reports identical iters, identical final pnorm
+mpirun -n 4 ./pure_petsc_load -nx 48 -scheme 4 ...same KSP options...
+# both report identical iters, identical final pnorm
 ```
 
 The Spack-installed toolchain paths are hard-coded in `asm_bug_demo/Makefile`:

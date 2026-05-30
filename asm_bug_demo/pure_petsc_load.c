@@ -52,8 +52,12 @@ static PetscErrorCode sASMDestroy(PC pc)
     return PETSC_SUCCESS;
 }
 static PetscErrorCode InstallScaledASM(KSP ksp, Mat A,
-                                       PetscInt overlap, PetscInt icc_levels)
+                                       PetscInt overlap, PetscInt icc_levels,
+                                       PetscInt cheby_deg)
 {
+    // cheby_deg == 0 : block solve = preonly + ICC(icc_levels)   [scheme 3]
+    // cheby_deg >= 1 : block solve = cheby_deg Chebyshev steps over ICC,
+    //                  frozen eigenvalue bounds -> fixed SPD linear op  [scheme 4]
     PC      inner = NULL;
     PetscMPIInt rank;
     PetscCall(MPI_Comm_rank(PetscObjectComm((PetscObject)A), &rank));
@@ -69,10 +73,22 @@ static PetscErrorCode InstallScaledASM(KSP ksp, Mat A,
         PetscCall(PCASMGetSubKSP(inner, &n_local, &first, &subksp));
         for (PetscInt i = 0; i < n_local; ++i) {
             PC sub = NULL;
-            PetscCall(KSPSetType(subksp[i], KSPPREONLY));
-            PetscCall(KSPGetPC(subksp[i], &sub));
-            PetscCall(PCSetType(sub, PCICC));
-            PetscCall(PCFactorSetLevels(sub, icc_levels));
+            if (cheby_deg <= 0) {
+                PetscCall(KSPSetType(subksp[i], KSPPREONLY));
+                PetscCall(KSPGetPC(subksp[i], &sub));
+                PetscCall(PCSetType(sub, PCICC));
+                PetscCall(PCFactorSetLevels(sub, icc_levels));
+            } else {
+                PetscCall(KSPSetType(subksp[i], KSPCHEBYSHEV));
+                PetscCall(KSPSetTolerances(subksp[i], PETSC_DEFAULT,
+                          PETSC_DEFAULT, PETSC_DEFAULT, cheby_deg));
+                PetscCall(KSPSetNormType(subksp[i], KSP_NORM_NONE));
+                PetscCall(KSPSetInitialGuessNonzero(subksp[i], PETSC_FALSE));
+                PetscCall(KSPChebyshevEstEigSet(subksp[i], 0.0, 0.1, 0.0, 1.1));
+                PetscCall(KSPGetPC(subksp[i], &sub));
+                PetscCall(PCSetType(sub, PCICC));
+                PetscCall(PCFactorSetLevels(sub, icc_levels));
+            }
         }
         PetscCall(PCSetUpOnBlocks(inner));
     }
@@ -294,11 +310,18 @@ int main(int argc, char **argv)
     PetscCall(KSPSetTolerances(ksp, 1e-6, 1e-12, PETSC_DEFAULT, 1000));
     PetscCall(KSPSetFromOptions(ksp));
 
-    if (scheme == 3) {
+    if (scheme == 3 || scheme == 4) {
         PetscInt overlap = 0, icc_lev = 0;
         PetscOptionsGetInt(NULL, NULL, "-pc_asm_overlap",       &overlap, NULL);
         PetscOptionsGetInt(NULL, NULL, "-sub_pc_factor_levels", &icc_lev, NULL);
-        PetscCall(InstallScaledASM(ksp, A, overlap, icc_lev));
+        PetscInt cheby_deg = 0;
+        if (scheme == 4) {
+            cheby_deg = 2;
+            for (int i = 1; i < argc; ++i)
+                if (!strcmp(argv[i], "-localcheby") && i + 1 < argc)
+                    cheby_deg = atoi(argv[i+1]);
+        }
+        PetscCall(InstallScaledASM(ksp, A, overlap, icc_lev, cheby_deg));
     }
 
     double t0 = MPI_Wtime();
