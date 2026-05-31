@@ -360,7 +360,81 @@ Start with scheme 3 + ICC(1) (certain, low-risk win); if profiling shows
 scheme 4 to cut the outer iteration count — and thus the synchronization
 count — further.
 
-## 8. How to reproduce
+## 8. Monodomain regime: why a cheap PC wins, and the fancy machinery is wasted
+
+Everything above (overcounting, sASM, Chebyshev block solve) targets the
+**elliptic** systems `Sys2 / Sys3` (pure stiffness `K`, ill-conditioned,
+`kappa ~ O(h^-2)`, 100–350 iters). The **monodomain** diffusion step is a
+*different* matrix and needs the *opposite* recommendation.
+
+### 8.1 The matrix structure
+
+With operator splitting (reaction handled by an ODE integrator, e.g.
+Rush–Larsen, no linear solve), the Crank–Nicolson diffusion step gives
+
+```
+   A  =  (1/dt) M  +  (1/2) K          (theta = 1/2, M = mass, K = stiffness)
+```
+
+This is **mass-dominated** for small `dt`. Its condition number is
+`kappa(A) ~ 1 + O(dt / h^2)`, i.e. bounded and small — unlike the pure `K`
+whose `kappa ~ O(h^-2)` blows up under refinement. The cardioid data already
+showed this: `Sys1 (Monodomain)` converges in **2–5 iters** while the elliptic
+`Sys2/Sys3` need 100–350.
+
+`asm_demo` now models it via `-dt VALUE`:
+`dt <= 0` → pure `K` (elliptic, default); `dt > 0` → `(1/dt) M + (1/2) K`.
+
+### 8.2 The comparison (P1, nx=48, 4 ranks; `iter (MPI Reductions)`)
+
+| regime | Jacobi | Block-Jacobi/ICC(0) | sASM-O1 (sch3) | sASM+Cheby-O1 (sch4) |
+|:--|:--|:--|:--|:--|
+| pure-K (elliptic) | 223 (793) | 132 (520) | 104 (445) | **68 (337)** |
+| dt = 1e-2         | 77 (355)  | 33 (223)  | 27 (214)  | 17 (184) |
+| dt = 1e-3         | 22 (190)  | 12 (160)  | 9 (160)   | 8 (157) |
+| **dt = 1e-4** (cardiac-realistic) | **6 (142)** | **6 (142)** | 4 (145) | 4 (145) |
+
+### 8.3 What it shows
+
+1. **As `dt -> 0` (mass-dominated), every method collapses to single-digit
+   iterations and the gaps vanish.** The elliptic-regime advantage of the
+   sophisticated preconditioners *evaporates*: pure-K gap Jacobi/sch4 = 223/68
+   (3.3x) shrinks to 6/4 (1.5x) at `dt = 1e-4`.
+
+2. **At `dt = 1e-4`, Jacobi (6) == Block-Jacobi (6).** A mass-dominated matrix
+   is nearly diagonally dominant, so the plain diagonal is already as good as a
+   block-ICC solve. The block solve buys nothing.
+
+3. **The counter-intuitive part:** at `dt = 1e-4`, sASM/scheme 4 record *more*
+   total reductions (145) than Jacobi/Block-Jacobi (142) for a single solve —
+   their PCSHELL setup + Chebyshev eigenvalue estimation cost out-weighs the
+   tiny `6 -> 4` iteration saving. (With fixed `dt` the matrix is constant and
+   that setup amortizes over thousands of steps, but even then sASM saves only
+   `2*iter+2 = 14 -> 10 = 4` reductions per solve while *adding* overlap halo
+   exchange that Jacobi/Block-Jacobi do not have.)
+
+### 8.4 Recommendation, by system
+
+| system | matrix | kappa | iters | best PC |
+|:--|:--|:--|:--|:--|
+| **Monodomain (C-N)** | `(1/dt) M + (1/2) K` | `~1 + O(dt/h^2)`, small | 4–6 | **Jacobi or Block-Jacobi/ICC(0)** — zero PC communication, trivial setup; add `-ksp_type pipecg` at scale |
+| Sys2 / Sys3 (`u_e` / torso) | pure `K` | `O(h^-2)`, large | 100–350 | **sASM / scheme 4** (sections 3–7), or AMG |
+
+For the monodomain step at ≤3000 cores: **use plain Jacobi-PCG (or
+Block-Jacobi/ICC(0)) — no overlap, no sASM, no Chebyshev.** The matrix is so
+well-conditioned that the cheap preconditioner with zero inter-process PC
+communication wins; spend the sophisticated-preconditioner budget on the
+genuinely hard elliptic `Sys2/Sys3` solves instead. This matches the cardiac
+HPC literature consensus that the parabolic monodomain step is "cheap" and the
+elliptic bidomain step is "expensive".
+
+Reproduce: `mpirun -n 4 ./asm_demo -fix_level 1 -scheme 0 -nx 48 -dt 1e-4
+-pc_type jacobi -ksp_norm_type preconditioned -ksp_rtol 1e-6 -ksp_max_it 2000`
+(append `-log_view`, read `MPI Reductions:`). Vary `-dt` and swap
+`-pc_type jacobi` / `-pc_type bjacobi -sub_pc_type icc` / `-scheme 3 ...` /
+`-scheme 4 ...`.
+
+## 9. How to reproduce
 
 ```bash
 cd asm_bug_demo

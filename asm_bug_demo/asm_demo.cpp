@@ -556,9 +556,16 @@ int main(int argc, char *argv[])
     //   source_type = 1  ->  f(x,y,z) = sin(pi y) sin(pi z)
     //                        [genuinely 3D solution; useful for plots]
     int source_type = 0;
+    double dt = -1.0;   // <=0 : pure stiffness K (elliptic, default).
+                        // >0  : Crank-Nicolson monodomain matrix
+                        //       A = (1/dt) M + (1/2) K  (mass-dominated as
+                        //       dt -> 0, mirrors the parabolic diffusion step)
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "-source_type" && i + 1 < argc) {
             source_type = std::atoi(argv[i+1]);
+        }
+        if (std::string(argv[i]) == "-dt" && i + 1 < argc) {
+            dt = std::atof(argv[i+1]);
         }
     }
 
@@ -568,9 +575,32 @@ int main(int argc, char *argv[])
         return std::sin(M_PI * x[1]) * std::sin(M_PI * x[2]);
     });
 
+    // Build the system matrix.
+    //   dt <= 0 : A = K            (pure Laplacian, elliptic — Sys2/Sys3 shape)
+    //   dt  > 0 : A = (1/dt) M + (1/2) K   (Crank-Nicolson monodomain step;
+    //             theta = 1/2; coefficients on M, K fold chi*C_m, sigma = 1)
     ParBilinearForm a(&fes);
-    a.AddDomainIntegrator(new DiffusionIntegrator(sigma));
+    const bool monodomain = (dt > 0.0);
+    if (monodomain)
+    {
+        ConstantCoefficient mass_coef(1.0 / dt);   // (1/dt) on the mass term
+        ConstantCoefficient diff_coef(0.5);        // theta = 1/2 on stiffness
+        a.AddDomainIntegrator(new MassIntegrator(mass_coef));
+        a.AddDomainIntegrator(new DiffusionIntegrator(diff_coef));
+    }
+    else
+    {
+        a.AddDomainIntegrator(new DiffusionIntegrator(sigma));
+    }
     a.Assemble();
+    if (my_rank == 0)
+    {
+        if (monodomain)
+            std::cout << "[MATRIX] Crank-Nicolson monodomain  A = (1/dt) M + (1/2) K"
+                      << ", dt=" << dt << "  (mass-dominated, well-conditioned)\n";
+        else
+            std::cout << "[MATRIX] pure stiffness  A = K  (elliptic, ill-conditioned)\n";
+    }
 
     ParLinearForm b(&fes);
     if (source_type == 0) {
