@@ -125,6 +125,8 @@ extern "C" PetscErrorCode SASMDestroy(PC pc) {
 
 static void InstallScaledASM(KSP ksp, Mat A,
                              PetscInt overlap, PetscInt icc_levels,
+                             bool exact_local,
+                             PetscInt cheb_iters,    // 0 = ICC, >0 = K-step Chebyshev+Jacobi
                              int my_rank)
 {
     PC inner = nullptr;
@@ -139,11 +141,32 @@ static void InstallScaledASM(KSP ksp, Mat A,
         PetscInt n_loc = 0, first = 0;
         PCASMGetSubKSP(inner, &n_loc, &first, &subksp);
         for (PetscInt i = 0; i < n_loc; ++i) {
-            KSPSetType(subksp[i], KSPPREONLY);
             PC sub = nullptr;
-            KSPGetPC(subksp[i], &sub);
-            PCSetType(sub, PCICC);
-            PCFactorSetLevels(sub, icc_levels);
+            if (cheb_iters > 0) {
+                // K-step polynomial (Chebyshev) iteration as the local
+                // smoother:  no triangular solves, just SpMV + AXPY +
+                // diagonal preconditioner.  Memory = O(n); per-apply
+                // work = K * SpMV.  Cheap eigenvalue estimate from a
+                // few GMRES steps at setup.
+                KSPSetType(subksp[i], KSPCHEBYSHEV);
+                KSPSetNormType(subksp[i], KSP_NORM_NONE);
+                KSPSetTolerances(subksp[i], PETSC_DEFAULT, PETSC_DEFAULT,
+                                 PETSC_DEFAULT, cheb_iters);
+                // [lmin/lmax] estimated by GMRES; ratio 0.1..1.1 is the
+                // PETSc / HYPRE default Chebyshev-smoother config.
+                KSPChebyshevEstEigSet(subksp[i], 0.0, 0.1, 0.0, 1.1);
+                KSPGetPC(subksp[i], &sub);
+                PCSetType(sub, PCJACOBI);
+            } else {
+                KSPSetType(subksp[i], KSPPREONLY);
+                KSPGetPC(subksp[i], &sub);
+                if (exact_local) {
+                    PCSetType(sub, PCCHOLESKY);
+                } else {
+                    PCSetType(sub, PCICC);
+                    PCFactorSetLevels(sub, icc_levels);
+                }
+            }
         }
         PCSetUpOnBlocks(inner);
     }
@@ -208,10 +231,13 @@ int main(int argc, char *argv[])
     int num_ranks = Mpi::WorldSize();
 
     // Knobs (parsed by hand BEFORE PETSc init).
-    int nx      = 24;
-    int scheme  = 0;     // 0 = ASM, 3 = sASM
-    int overlap = 1;
-    int icc_lev = 0;
+    int  nx       = 24;
+    int  scheme   = 0;    // 0 = ASM, 3 = sASM, 4 = BoomerAMG, 5 = GAMG
+    int  overlap  = 1;
+    int  icc_lev  = 0;
+    int  cheb_K   = 0;    // 0 = ICC, >0 = K-step Chebyshev+Jacobi
+    bool exact    = false;
+    bool use_ns   = true; // false => DO NOT attach MatNullSpace
     {
         int out = 1;
         for (int i = 1; i < argc; ++i) {
@@ -220,6 +246,9 @@ int main(int argc, char *argv[])
             if (a == "-scheme"  && i+1 < argc) { scheme  = std::atoi(argv[++i]); continue; }
             if (a == "-overlap" && i+1 < argc) { overlap = std::atoi(argv[++i]); continue; }
             if (a == "-icc"     && i+1 < argc) { icc_lev = std::atoi(argv[++i]); continue; }
+            if (a == "-cheb"    && i+1 < argc) { cheb_K  = std::atoi(argv[++i]); continue; }
+            if (a == "-exact")                 { exact   = true; continue; }
+            if (a == "-no_ns")                 { use_ns  = false; continue; }
             argv[out++] = argv[i];
         }
         argc = out;
@@ -229,13 +258,20 @@ int main(int argc, char *argv[])
     PetscOptionsSetValue(NULL, "-options_left", "no");
 
     if (my_rank == 0) {
+        const char *name = "?";
+        switch (scheme) {
+            case 0: name = "CG + ASM (PCASM BASIC + ICC)";     break;
+            case 3: name = "CG + sASM (PCSHELL D^-1/2 ...)";   break;
+            case 5: name = "CG + HYPRE BoomerAMG";             break;
+            case 6: name = "CG + PETSc GAMG (agg multigrid)";  break;
+        }
         std::cout << "================================================\n"
                   << "  recoverue_demo  nx=" << nx
-                  << "  ranks=" << num_ranks
-                  << "  scheme=" << scheme
-                  << " (" << (scheme == 0 ? "CG+ASM" : "CG+sASM") << ")"
+                  << "  ranks=" << num_ranks << "\n"
+                  << "  scheme=" << scheme << " (" << name << ")\n"
                   << "  overlap=" << overlap
-                  << "  icc=" << icc_lev << "\n"
+                  << "  icc=" << icc_lev
+                  << "  exact_local=" << (exact ? "yes" : "no") << "\n"
                   << "  all-Neumann singular Laplacian   "
                   << "u = cos(pi x) cos(pi y) cos(pi z)\n"
                   << "================================================\n";
@@ -299,22 +335,28 @@ int main(int argc, char *argv[])
         PetscParMatrix A_petsc;
         HypreToPetscAIJ(A_hypre, A_petsc, "recoverue_A", my_rank);
 
-        // ----- 9. Attach the constant null space to A  (this is the
-        //         critical bit for the singular all-Neumann system)
+        // ----- 9. (Optionally) attach the constant null space to A.
+        //         use_ns = true:  classic, correct way for singular SPD.
+        //         use_ns = false: leave A as-is (no projection inside KSP).
         MatNullSpace nsp = nullptr;
-        MatNullSpaceCreate(MPI_COMM_WORLD, PETSC_TRUE,
-                           0, NULL, &nsp);
-        MatSetNullSpace         ((Mat)A_petsc, nsp);
-        MatSetTransposeNullSpace((Mat)A_petsc, nsp);
+        if (use_ns) {
+            MatNullSpaceCreate(MPI_COMM_WORLD, PETSC_TRUE,
+                               0, NULL, &nsp);
+            MatSetNullSpace         ((Mat)A_petsc, nsp);
+            MatSetTransposeNullSpace((Mat)A_petsc, nsp);
 
-        // Project RHS so it lives in range(A) (KSP does this internally
-        // anyway, but doing it here keeps the [SOLN] residual clean).
-        {
             Vec B_petsc = nullptr;
             VecCreateMPIWithArray(MPI_COMM_WORLD, 1, B.Size(),
                                   PETSC_DECIDE, B.HostRead(), &B_petsc);
             MatNullSpaceRemove(nsp, B_petsc);
             VecDestroy(&B_petsc);
+            if (my_rank == 0) {
+                std::cout << "[NS] attached constant null space "
+                             "(PETSc projects r and b)\n";
+            }
+        } else if (my_rank == 0) {
+            std::cout << "[NS] no null space attached "
+                         "(KSP runs blind on a singular SPD matrix)\n";
         }
 
         // ----- 10. Set up CG + (ASM or sASM)
@@ -334,10 +376,42 @@ int main(int argc, char *argv[])
             PetscOptionsSetValue(NULL, "-pc_asm_type",            "basic");
             std::string ov = std::to_string(overlap);
             PetscOptionsSetValue(NULL, "-pc_asm_overlap",         ov.c_str());
-            PetscOptionsSetValue(NULL, "-sub_ksp_type",           "preonly");
-            PetscOptionsSetValue(NULL, "-sub_pc_type",            "icc");
-            std::string il = std::to_string(icc_lev);
-            PetscOptionsSetValue(NULL, "-sub_pc_factor_levels",   il.c_str());
+            if (cheb_K > 0) {
+                // K-step Chebyshev+Jacobi as sub-solver
+                PetscOptionsSetValue(NULL, "-sub_ksp_type",           "chebyshev");
+                PetscOptionsSetValue(NULL, "-sub_ksp_norm_type",      "none");
+                std::string mk = std::to_string(cheb_K);
+                PetscOptionsSetValue(NULL, "-sub_ksp_max_it",         mk.c_str());
+                PetscOptionsSetValue(NULL, "-sub_ksp_chebyshev_esteig",
+                                                                      "0,0.1,0,1.1");
+                PetscOptionsSetValue(NULL, "-sub_pc_type",            "jacobi");
+            } else {
+                PetscOptionsSetValue(NULL, "-sub_ksp_type",           "preonly");
+                if (exact) {
+                    PetscOptionsSetValue(NULL, "-sub_pc_type",         "cholesky");
+                } else {
+                    PetscOptionsSetValue(NULL, "-sub_pc_type",         "icc");
+                    std::string il = std::to_string(icc_lev);
+                    PetscOptionsSetValue(NULL, "-sub_pc_factor_levels", il.c_str());
+                }
+            }
+        // scheme 4 is reserved for "sASM + Chebyshev block solve" (see
+        // asm_demo.cpp).  In recoverue_demo this combination is reached
+        // via  -scheme 3 -cheb K  (orthogonal sub-solver knob).
+        } else if (scheme == 5) {
+            // Industrial-grade multigrid:  HYPRE BoomerAMG.
+            // Iter count for elliptic problems is essentially O(1)
+            // independent of mesh size.  Best general-purpose option.
+            // We use HYPRE's defaults; on this Spack-installed HYPRE 3.1
+            // some advanced parameters were not recognised.
+            PetscOptionsSetValue(NULL, "-pc_type",       "hypre");
+            PetscOptionsSetValue(NULL, "-pc_hypre_type", "boomeramg");
+        } else if (scheme == 6) {
+            // PETSc's native algebraic multigrid (smoothed aggregation).
+            PetscOptionsSetValue(NULL, "-pc_type",                  "gamg");
+            PetscOptionsSetValue(NULL, "-pc_gamg_type",             "agg");
+            PetscOptionsSetValue(NULL, "-pc_gamg_agg_nsmooths",     "1");
+            PetscOptionsSetValue(NULL, "-pc_gamg_threshold",        "0.02");
         } else {
             // scheme 3: still set asm options so InstallScaledASM's
             // internal inner_pc could be configured by user CLI, but the
@@ -353,7 +427,7 @@ int main(int argc, char *argv[])
             KSP ksp_raw = static_cast<KSP>(pcg);
             Mat A_raw = nullptr;
             KSPGetOperators(ksp_raw, &A_raw, NULL);
-            InstallScaledASM(ksp_raw, A_raw, overlap, icc_lev, my_rank);
+            InstallScaledASM(ksp_raw, A_raw, overlap, icc_lev, exact, cheb_K, my_rank);
         }
 
         // ----- 11. Solve, time it
@@ -416,7 +490,7 @@ int main(int argc, char *argv[])
                       << "\n";
         }
 
-        MatNullSpaceDestroy(&nsp);
+        if (nsp) MatNullSpaceDestroy(&nsp);
     } // close PETSc object scope
 
     MFEMFinalizePetsc();

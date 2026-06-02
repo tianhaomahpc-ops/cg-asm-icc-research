@@ -233,6 +233,96 @@ mpirun -n 4 ./recoverue_demo -nx 24 -scheme 3 -overlap 1 -icc 0 \
 ./bench_recoverue.sh 24 4 5
 ```
 
+### Additional knobs in `recoverue_demo`
+
+- `-exact`: replace ICC(`icc_lev`) sub-solver with exact Cholesky on each
+  subdomain. Tests the "what if local solver were exact" question; with
+  it, ASM iter decreases monotonically with overlap (recovers the
+  classical Schwarz-theory prediction). For ICC(0), 64 → 68 → 87 (UP);
+  for Cholesky, 36 → 26 → 22 (DOWN).
+- `-cheb K`: replace ICC sub-solver with `K`-step Chebyshev iteration
+  preconditioned by Jacobi (no triangular solves, just SpMV + AXPY).
+  Same memory footprint as the matrix (no L/U factors), GPU-friendly.
+  Works with scheme 3 (sASM + Cheby(K)) and scheme 0 (ASM + Cheby(K)).
+- `-no_ns`: do **not** attach the constant null space to A. For the
+  default setup (zero initial guess, compatible RHS), iter count is
+  bit-identical to the with-nullspace case — KSP's projection becomes
+  a no-op because Krylov iterates already live in `range(A)`. Useful
+  to measure the cost of the per-step `MatNullSpaceRemove` Allreduce.
+
+### Schemes available in `recoverue_demo`
+
+| `-scheme N` | Method | Notes |
+|:-:|:-:|:--|
+| 0 | CG + PCASM BASIC + sub-PC | Inexact-local cardioid baseline |
+| 3 | CG + sASM (PCSHELL) + sub-PC | scaled additive Schwarz (single-level fix) |
+| 5 | CG + HYPRE BoomerAMG | only works if the installed HYPRE accepts `HYPRE_BoomerAMGCreate`; the Spack `hypre-3.1.0` on this laptop does not |
+| 6 | CG + PETSc GAMG | Native PETSc smoothed-aggregation AMG; works out of the box |
+
+### Weak scaling — single-level vs multigrid
+
+(`recoverue` all-Neumann, 4 ranks fixed, `nx = 24 / 48 / 72`, DOFs = 15k / 117k / 389k)
+
+| method | nx=24 | nx=48 | nx=72 | iter ratio |
+|:--|---:|---:|---:|:-:|
+| `ASM  + ICC(0)`   O=1 | 68 / 0.04s | 126 / 1.05s | 172 / 2.58s | 2.5× |
+| `sASM + ICC(0)`   O=1 | 52 / 0.02s |  93 / 0.72s | 131 / 0.79s | 2.5× |
+| `sASM + Cheby(3)` O=1 | 52 / 0.03s |  96 / 1.00s | 149 / 4.00s | 2.9× |
+| `sASM + Cheby(5)` O=1 | 43 / 0.03s |  73 / 0.81s | 111 / 4.72s | 2.6× |
+| `GAMG`                |  **7** / 0.17s |   **7** / 0.68s |   **7** / 0.89s | **1.0×** ★ |
+
+Single-level methods (ASM, sASM, sASM+Cheby) all scale as
+`iter ~ P^{1/3} ~ nx` because of the classical `H^{-2}` term in the
+spectral bound. AMG (GAMG / BoomerAMG / PCHPDDM) breaks that wall and
+gives `iter ~ O(1)` independent of mesh size.
+
+The Chebyshev sub-solver was tested on the laptop CPU: on CPU it is
+slower per-apply than ICC (3-5 SpMVs vs 1 forward/back-solve), so it
+doesn't win in wall-time on this machine. **Its real advantage is on
+GPU**, where ICC's sparse triangular solve is the bottleneck. The
+mathematical idea — Cheby(`K`) approximating `A_i^{-1}` — is sound;
+the win is hardware-dependent.
+
+### Null-space ON vs OFF — does `MatSetNullSpace` change iter count?
+
+For the standard setup (zero initial guess, RHS compatible by construction):
+
+| config (scheme 0, nx=24) | `iters` with NS | `iters` w/o NS | `meanU` with NS | `meanU` w/o NS | `||u-u*||/||u*||` |
+|:--|:-:|:-:|:-:|:-:|:-:|
+| O=0 L=0 | **64** | **64** | 2.2e-16 | -1.2e-3 | 1.2e-6 |
+| O=0 L=2 | **50** | **50** | 1.3e-16 | -3.3e-3 | 1.6e-6 |
+| O=1 L=0 | **68** | **68** | 8.4e-17 |  5.2e-4 | 3.0e-7 |
+| O=1 L=2 | **45** | **45** | 2.8e-16 |  4.4e-4 | 1.1e-6 |
+| O=2 L=0 | **87** | **87** | 1.1e-17 |  1.3e-3 | 7.3e-7 |
+| O=2 L=2 | **44** | **44** | 2.9e-16 |  1.7e-3 | 9.1e-7 |
+
+**Iter is bit-identical** across all 6 (overlap, ICC level) combinations.
+Reason: in the chosen setup,
+- `x_0 = 0`,
+- `b = A V_m` with `V_m` of zero mean, so `b ⊥ ker(A)`,
+
+every Krylov vector `A^k r_0` lives in `range(A)`, so the null-space
+projection KSP performs at each step is a no-op (in exact arithmetic;
+in float, KSP cleans up `~10^-16` drift). The convergence test sees
+the same residual either way.
+
+When **does** `MatSetNullSpace` actually change iter count or
+correctness?
+
+- Non-zero initial guess containing a constant component (e.g. cardioid
+  `iter_mode=true` carries over the previous time-step constant drift)
+- RHS slightly off-compatible (numerical sum errors)
+- AMG-type preconditioners where the coarse solver is a direct LU
+  (which then fails on the singular coarse matrix without the
+  null-space hint).
+  **For BoomerAMG / GAMG / HPDDM, `MatSetNullSpace` is mandatory** even
+  though it does not directly accelerate single-level Krylov on a
+  compatible-RHS problem.
+
+Bottom line: keep `MatSetNullSpace` for correctness across time-steps
+and as future-proofing for AMG; it does **not** change the per-solve
+iter count in the cardioid `recoverue_` baseline.
+
 ## License
 
 Mixed:
