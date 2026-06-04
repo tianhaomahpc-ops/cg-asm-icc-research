@@ -20,3 +20,10 @@ asm_bug_demo/paraview_*
 .DS_Store
 *.swp
 *~
+
+# PPT build artefacts
+slides/node_modules/
+slides/package-lock.json
+slides/package.json
+slides/*.pdf
+slides/slide-*.jpg
