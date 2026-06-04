@@ -434,7 +434,212 @@ Reproduce: `mpirun -n 4 ./asm_demo -fix_level 1 -scheme 0 -nx 48 -dt 1e-4
 `-pc_type jacobi` / `-pc_type bjacobi -sub_pc_type icc` / `-scheme 3 ...` /
 `-scheme 4 ...`.
 
-## 9. How to reproduce
+## 9. Large-scale monodomain: eliminating global synchronization
+
+> **STATUS: NOT YET ADOPTED — design notes only.** The ideas in this section
+> are theoretically grounded and the per-iteration synchronization counts were
+> verified on this 4-rank laptop, but the actual *time* benefit only appears at
+> large rank counts and has **not been measured at ~3000 cores**. Treat this as
+> a roadmap to validate later, not a recommendation to switch to today. At small
+> rank counts plain CG (section 8) is still fastest.
+
+Section 8 said: for the mass-dominated monodomain step, use a cheap PC
+(Jacobi / Block-Jacobi), iteration count is already only 4–6. The natural
+follow-up: at ~3000 cores, is there anything left to improve? Yes — but the
+lever changes completely.
+
+### 9.0 Why global synchronization becomes the enemy at scale
+
+Each timestep solves `A x = b` with `A = M/dt + (1/2) K`. One CG iteration does:
+
+| operation | communication type | cost at ~3000 cores |
+|:--|:--|:--|
+| SpMV (sparse mat-vec)   | **neighbour point-to-point** halo exchange | ~1–5 us, ~flat in rank count |
+| dot product (for CG alpha/beta) | **global `MPI_Allreduce`** over all ranks | ~10–30 us, *grows* with rank count (log P tree); a hard synchronization barrier |
+
+CG does **2 dot products = 2 global syncs per iteration**. At 3000 cores those
+two allreduces cost an order of magnitude more than the local SpMV and dominate
+the solve. The iteration count is already 4–6 and cannot be pushed lower by a
+stronger PC — so the only remaining lever is to **remove or hide the global
+synchronization**. The five techniques below all attack that, from different
+angles. (Per-iteration sync counts measured here on 4 ranks, monodomain
+`dt=1e-4`, Jacobi: CG = 6 iters x 2 allreduce; Chebyshev = 21 iters x **0**
+allreduce; Richardson = 8 iters x **0** allreduce — confirmed by running
+Chebyshev to 2000 iters and seeing the `MPI Reductions` count stay flat at the
+one-time setup value.)
+
+### 9.1 Temporal extrapolation initial guess
+
+**What it is.** Any iterative solver starts from a guess `x_0`; the iteration
+count depends on the initial error `||x_0 - x*||`. In time-stepping the
+solution evolves smoothly, so `V^{n+1}` is close to `V^n`. Instead of starting
+from `x_0 = 0`, extrapolate from previous solutions:
+
+```
+   0th order:  x_0 = V^n
+   1st order:  x_0 = 2 V^n - V^{n-1}        (linear extrapolation of the trend)
+   2nd order:  x_0 = 3 V^n - 3 V^{n-1} + V^{n-2}
+```
+
+The linear guess predicts where V is heading from its recent trajectory; for a
+smoothly propagating wavefront the initial error drops from O(1) to O(dt^2).
+
+**Why it helps at scale.** Closer start -> fewer iterations (CG 6 -> 2–3). Every
+iteration saved removes 2 global allreduces.
+
+**How.** Store one extra vector `V^{n-1}`; each step set the solution to
+`2 V^n - V^{n-1}` (one local AXPY, no communication) before the solve; use
+`-ksp_initial_guess_nonzero true`.
+
+**Cost.** Essentially free (one extra vector, one AXPY). Slightly less accurate
+during the sharp depolarization upstroke, but still helps. **Do this first —
+best effort/reward.**
+
+### 9.2 Synchronization-free stationary solver (Chebyshev / Richardson) — the main lever
+
+**What it is.** CG is a *Krylov* method: it computes optimal step lengths
+`alpha, beta` from **inner products** of residual vectors, and those inner
+products *require* a global allreduce. That is intrinsic to CG.
+
+A *stationary* iteration uses **fixed, precomputed coefficients** instead of
+optimal ones, so it needs **no inner products and no allreduce**.
+
+(a) **Richardson (= damped preconditioned Jacobi):**
+```
+   x_{k+1} = x_k + omega * M_pc^{-1} (b - A x_k)
+```
+Each step = 1 SpMV (halo only) + 1 diagonal solve (local) + 1 AXPY (local).
+**No dot products -> zero allreduce.** Converges when the spectral radius of
+`(I - omega M_pc^{-1} A) < 1`; for the well-conditioned mass-dominated matrix
+this is small, so a handful of steps suffice (measured: 8). Optimal
+`omega = 2/(lambda_min + lambda_max)`; for a well-conditioned matrix
+`omega ~ 1`, which is why `omega = 1` worked.
+
+(b) **Chebyshev (= polynomial-accelerated Richardson):** uses a sequence of
+coefficients from Chebyshev polynomials tuned to the eigenvalue interval
+`[lambda_min, lambda_max]` of `M_pc^{-1}A` — the optimal stationary polynomial.
+It needs the eigenvalue bounds, estimated **once** at setup (a few Lanczos /
+GMRES steps that do a few allreduces *once*, not per timestep); then every
+timestep runs a fixed-degree Chebyshev sweep with **zero allreduce**. It needs
+more iterations than CG (21 vs 6) because the fixed polynomial cannot adapt to
+the right-hand side, but it does zero global synchronization.
+
+**Why it helps at scale (the arithmetic).** Per timestep:
+```
+   CG:         6 iter x (1 SpMV + 2 allreduce) =  6 SpMV + 12 allreduce
+   Richardson: 8 iter x (1 SpMV + 0 allreduce) =  8 SpMV +  0 allreduce
+```
+With illustrative ~3000-core costs (allreduce ~15 us, SpMV ~2 us):
+`CG ~ 6*2 + 12*15 = 192 us` (allreduce-dominated) vs `Richardson ~ 8*2 = 16 us`.
+Richardson trades 8 cheap local SpMVs for eliminating 12 expensive global
+syncs and wins by ~10x at that scale.
+
+**How.** `-ksp_type chebyshev -ksp_chebyshev_esteig 0,0.1,0,1.1
+-ksp_norm_type none -ksp_max_it <frozen count>` (the `-ksp_norm_type none`
+removes even the residual-norm allreduce — run a fixed count). Or
+`-ksp_type richardson -ksp_richardson_scale <omega> -ksp_norm_type none`.
+
+**Cost / caveat.** More iterations (8–21 vs 6 -> more SpMV halo exchanges), so
+this only wins when allreduce >> SpMV, i.e. at large scale — **at 4 cores CG
+still wins**; the crossover is roughly hundreds-to-thousands of ranks depending
+on the network. Richardson is sensitive to `omega` (too large -> divergence)
+and the optimal `omega` shifts with anisotropy, so it is risky; **Chebyshev is
+more robust** (only needs eigenvalue bounds, estimated once) and is the
+preferred zero-sync solver. Run a *conservative* frozen iteration count, or
+keep an occasional residual check.
+
+### 9.3 Pipelined CG (if staying within CG)
+
+**What it is.** Standard CG has a strict dependency: dot product -> **block on
+allreduce** -> use result -> next vector -> dot product -> block again. During
+each allreduce the rank idles while all 3000 ranks finish the reduction.
+Pipelined CG (Ghysels & Vanroose 2014, PETSc `KSPPIPECG`) **reorders** the
+algorithm so the global allreduce can **overlap** with the SpMV and PC work: it
+issues a non-blocking `MPI_Iallreduce` and does the SpMV while the reduction is
+in flight. Same CG, same iteration count, same convergence.
+
+**Why it helps.** Does not reduce the *number* of allreduces but **hides their
+latency** behind useful work, and merges the per-iteration 2 reductions into 1.
+At 3000 cores where allreduce latency is large, the hiding is significant.
+(Measured here: reductions 143 -> 122, with the remainder overlapped.)
+
+**How.** `-ksp_type pipecg`.
+
+**Cost / caveat.** A little more local flops (extra AXPYs, one extra SpMV-like
+op); slightly less numerically stable than CG (the reordering amplifies
+rounding) — irrelevant for the well-conditioned monodomain matrix. Needs MPI-3
+non-blocking collectives (standard now).
+
+### 9.4 Fixed-dt amortization
+
+**What it is.** `A = M/dt + (1/2) K` depends only on `dt` and the mesh /
+conductivity. If `dt` is held constant (standard for monodomain) then **A is
+the same matrix every timestep**. So assemble `A` once, build the PC once
+(Jacobi = store `1/diag`; Block-Jacobi/ICC = factor blocks once; Chebyshev =
+estimate eigenvalue bounds once); each step only the right-hand side `b`
+(containing `V^n` and the reaction current) changes, which is cheap.
+
+**Why it helps.** Setup cost (assembly + factorization + eigenvalue estimation)
+is paid once and amortized over thousands of timesteps -> per-step setup ~ 0.
+This is what makes a slightly-more-expensive PC setup (ICC factorization,
+Chebyshev eigenvalue estimation) affordable — it does not recur.
+
+**How.** Build `A` and the PC/KSP objects *outside* the time loop; inside the
+loop only recompute `b` and call solve. Do not rebuild them per step.
+
+**Cost / caveat.** Valid only for fixed `dt` (adaptive `dt` forces a refactor
+when `dt` changes, but that is rare). This is implementation discipline rather
+than an algorithm, but it is essential — without it the per-step PC setup would
+dominate.
+
+### 9.5 Mass lumping
+
+**What it is.** The consistently-assembled P1 mass matrix `M` is **not
+diagonal** (it couples each node to its neighbours). Mass *lumping* replaces `M`
+with a diagonal `M_L` whose entries are the row sums of `M` (or a nodal
+quadrature) — physically, the element mass is lumped onto its vertices. Then
+`A_lumped = M_L/dt + (1/2) K` with `M_L` diagonal.
+
+**Why it helps.** The matrix becomes **even more diagonally dominant** (the
+mass term, dominant for small `dt`, is now purely diagonal) -> smaller spectral
+radius / condition number -> Jacobi / Richardson / Chebyshev converge in fewer
+steps (fewer SpMV halo exchanges); and the mass term contributes no off-diagonal
+nonzeros -> cheaper SpMV. In operator splitting, lumped mass is also what makes
+the reaction step a pointwise (solve-free) update.
+
+**Why it is standard.** Lumped mass is the norm in cardiac EP codes; the
+accuracy loss is small and the same order O(h^2) as the P1 discretisation, so
+it does not degrade the convergence order.
+
+**Cost / caveat.** Slight discretisation-error change (consistent vs lumped);
+some literature argues consistent mass is marginally more accurate for the
+propagation speed, but lumped mass is widely accepted in practice.
+
+### 9.6 How to combine them (the target form at ~3000 cores)
+
+Stack the five so each removes a different piece of the global communication:
+
+1. **Fixed-dt amortization (9.4) + mass lumping (9.5)** — foundation: matrix
+   assembled once, strongest diagonal dominance, PC setup paid once.
+2. **Temporal extrapolation initial guess (9.1)** — drives the *required*
+   iteration count to its minimum.
+3. **Chebyshev as the solver (9.2)** — drives the *per-iteration* global
+   synchronization to **zero**.
+
+Result: each timestep has almost no global communication — only the neighbour
+SpMV halo exchange remains; the Krylov allreduce bottleneck is bypassed
+entirely.
+
+A more conservative variant that stays inside CG: **9.1 + 9.3 + 9.4 + 9.5**
+(extrapolated guess + pipelined CG + amortization + lumping) — a large step
+with lower risk (keeps CG's robustness, only hides rather than eliminates the
+allreduce).
+
+> **Again: not adopted yet.** These are design notes; the time benefit must be
+> confirmed at real scale (~3000 cores), which we have not done. The
+> synchronization *counts* are verified; the *wall-time* crossover is not.
+
+## 10. How to reproduce
 
 ```bash
 cd asm_bug_demo
