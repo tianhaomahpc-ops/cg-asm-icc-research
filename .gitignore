@@ -33,4 +33,4 @@ slides/tex/*.nav
 slides/tex/*.out
 slides/tex/*.snm
 slides/tex/*.toc
-slides/tex/bslide-*.jpg
+slides/tex/*.jpg
