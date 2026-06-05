@@ -1,0 +1,376 @@
+% ASM overlap anomaly — Beamer deck (Chinese).  Compile with XeLaTeX.
+\PassOptionsToPackage{table}{xcolor}   % give beamer's xcolor the table (colortbl) feature
+\documentclass[aspectratio=169,11pt]{beamer}
+
+\usepackage[fontset=fandol]{ctex}     % Chinese via bundled Fandol fonts (robust)
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tikz}
+\usetikzlibrary{calc}
+
+% ---------------- palette ----------------
+\definecolor{NavyDark}{HTML}{15233F}
+\definecolor{Navy}{HTML}{1A2B4A}
+\definecolor{Teal}{HTML}{1C7293}
+\definecolor{Ice}{HTML}{CADCFC}
+\definecolor{Muted}{HTML}{6B7A99}
+\definecolor{LightBG}{HTML}{F5F7FB}
+\definecolor{AnomRed}{HTML}{C0392B}
+\definecolor{RedBG}{HTML}{FAEAE8}
+\definecolor{FixGreen}{HTML}{1E8A5B}
+\definecolor{GreenBG}{HTML}{E7F4ED}
+\definecolor{Line}{HTML}{DCE3F0}
+
+% ---------------- theme ----------------
+\setbeamercolor{normal text}{fg=Navy,bg=LightBG}
+\setbeamercolor{frametitle}{fg=Navy,bg=}
+\setbeamercolor{structure}{fg=Teal}
+\setbeamercolor{itemize item}{fg=Teal}
+\setbeamercolor{itemize subitem}{fg=Muted}
+\setbeamerfont{frametitle}{size=\Large,series=\bfseries}
+\setbeamerfont{framesubtitle}{size=\small}
+\setbeamercolor{framesubtitle}{fg=Teal}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{itemize item}{\small\raisebox{0.15ex}{\textbullet}}
+
+% left teal rule + footer
+\setbeamertemplate{frametitle}{%
+  \begin{tikzpicture}[remember picture,overlay]
+    \fill[Teal] (current page.north west) rectangle ($(current page.south west)+(0.12,0)$);
+  \end{tikzpicture}%
+  \vspace{0.2em}\hspace{0.2em}\insertframetitle\\[-0.1em]
+  {\usebeamerfont{framesubtitle}\usebeamercolor[fg]{framesubtitle}\insertframesubtitle}}
+\setbeamertemplate{footline}{%
+  \hbox to \paperwidth{\hskip0.5cm
+    \footnotesize\color{Muted} ASM overlap $\uparrow\Rightarrow$ iter $\uparrow$:\ 诊断与单层修复
+    \hfill \footnotesize\color{Muted}\insertframenumber/\inserttotalframenumber\hskip0.5cm}\vskip4pt}
+
+% ---------------- macros ----------------
+% teal circled number (avoids missing-glyph for ①②③)
+\newcommand{\circnum}[1]{\tikz[baseline=(c.base)]{\node[circle,fill=Teal,text=white,inner sep=2.4pt,font=\small\bfseries](c){#1};}}
+\newcommand{\up}{\textcolor{AnomRed}{$\uparrow$}}
+\newcommand{\down}{\textcolor{FixGreen}{$\downarrow$}}
+\newcommand{\rup}[1]{\textcolor{AnomRed}{\textbf{#1}}}
+\newcommand{\gdn}[1]{\textcolor{FixGreen}{\textbf{#1}}}
+% dark full-bleed frame
+\newenvironment{darkframe}{%
+  \setbeamercolor{background canvas}{bg=NavyDark}
+  \setbeamercolor{normal text}{fg=white}
+  \usebeamercolor[fg]{normal text}
+  \begin{frame}}{\end{frame}}
+% problem tag
+\newcommand{\ptag}[1]{问题:\,#1}
+
+\begin{document}
+
+% ===== S1 title =====
+{\setbeamertemplate{footline}{}
+\begin{darkframe}
+  \vspace{1.2cm}
+  {\color{white}\Huge\bfseries 为什么增大 ASM overlap,\\[0.3em] CG 迭代反而增加?\par}
+  \vspace{0.5em}
+  {\color{Ice}\large 椭圆问题上的诊断与单层修复 —— 保持 CG、不引入两层方法\par}
+  \vspace{0.4em}{\color{Teal}\rule{4cm}{1.2pt}\par}
+  \vspace{0.6em}
+  {\color{Ice!85!white}\normalsize \textbf{MFEM 4.9 + PETSc 3.24}\quad·\quad 双实现交叉验证(MFEM / 纯 PETSc)\quad·\quad 立方体 P1 有限元\par}
+  \vfill
+  {\color{Teal}\ttfamily\small github.com/tianhaomahpc-ops/cg-asm-icc-research\par}
+  \vspace{0.4cm}
+\end{darkframe}}
+
+% ===== S2 phenomenon + questions =====
+\begin{frame}{现象:overlap 增大,迭代反而上升}
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+  \footnotesize\textbf{cardioid 实测(Sys3 / Torso,ICC $L{=}0$)}\par\vspace{0.3em}
+  \renewcommand{\arraystretch}{1.3}
+  \begin{tabular}{>{\centering\arraybackslash}p{2.2cm}>{\centering\arraybackslash}p{3.4cm}}
+    \rowcolor{Navy}\color{white}\textbf{overlap} & \color{white}\textbf{平均迭代次数}\\
+    $O=0$ & 115\\
+    \rowcolor{RedBG}\rup{$O=1$} & \rup{200\ (撞 max\_it)}\\
+    \rowcolor{RedBG}\rup{$O=2$} & \rup{200\ (撞 max\_it)}\\
+    \bottomrule
+  \end{tabular}\par\vspace{0.6em}
+  \colorbox{RedBG}{\textcolor{AnomRed}{\textbf{$\uparrow$ 上升}}}\par\vspace{0.5em}
+  {\footnotesize\itshape\color{AnomRed} 经典 Schwarz 理论:overlap$\uparrow$ 应当 iter$\downarrow$。实测相反。}
+\end{column}
+\begin{column}{0.5\textwidth}
+  {\color{Teal}\textbf{本工作只回答两个问题}}\par\vspace{0.5em}
+  \circnum{1}\ \textbf{为什么?}\\[-0.2em]
+  {\footnotesize\color{Muted}\hspace{1.2em}增大 overlap 为何使 CG 迭代上升,是不是 bug?}\par\vspace{0.6em}
+  \circnum{2}\ \textbf{怎么修?}\\[-0.2em]
+  {\footnotesize\color{Muted}\hspace{1.2em}保持 CG、不引入两层方法,如何修复?}\par\vspace{0.8em}
+  \begin{beamercolorbox}[wd=\textwidth,sep=8pt]{}
+  \colorbox{NavyDark}{\parbox{0.93\textwidth}{\footnotesize\color{white}%
+  \textbf{\color{Ice}预告:}不是 bug;病根 = 子域解不精确 $\times$ 重叠重复计数;修复 = sASM(+Chebyshev),保 CG、单层。}}
+  \end{beamercolorbox}
+\end{column}
+\end{columns}
+\end{frame}
+
+% ===== S3 abstraction =====
+\begin{frame}{抽象:统一到一个干净的模型问题}
+\begin{columns}[T]
+\begin{column}{0.56\textwidth}
+  \begin{block}{主测问题(贯穿全部实验链):Sys3 / Laplace}
+  \[ -\Delta u = 1 \]
+  \vspace{-0.8em}
+  \begin{align*}
+    u &= 0 & &\text{于 } x=0 \text{ 面}\ (\text{Dirichlet})\\
+    \partial u/\partial n &= 0 & &\text{于其余 5 面}\ (\text{Neumann})
+  \end{align*}
+  {\footnotesize\color{Muted} 立方体 $[0,1]^3$ · P1 四面体 · $(n_x{+}1)^3$ 顶点自由度}
+  \end{block}
+\end{column}
+\begin{column}{0.44\textwidth}
+  {\color{Teal}\textbf{统一求解框架}}\par\vspace{0.4em}
+  \footnotesize
+  \textbf{CG}\ \,{\color{Muted}preconditioned norm, rtol 1e-6}\par\vspace{0.35em}
+  \textbf{ASM(BASIC)}\ \,{\color{Muted}overlap $O=0/1/2$}\par\vspace{0.35em}
+  \textbf{子域 ICC($L$)}\ \,{\color{Muted}fill level $L=0/1/2$}\par\vspace{0.35em}
+  \textbf{两套独立实现}\ \,{\color{Muted}MFEM 装配 / 纯 PETSc}
+\end{column}
+\end{columns}
+\vspace{0.4em}
+\begin{beamercolorbox}[wd=\textwidth,sep=6pt]{}
+\colorbox{Ice!40!white}{\parbox{0.97\textwidth}{\footnotesize%
+\textbf{另备两个问题作普遍性检验(第四部分):}\ \textcolor{Teal}{\textbf{pure Neumann(奇异椭圆)}} 与 \textcolor{Teal}{\textbf{reaction-diffusion(质量主导)}} —— 验证同现象、同修复。}}
+\end{beamercolorbox}
+\end{frame}
+
+% ===== S4 diagnosis =====
+\begin{frame}{诊断:迭代数受条件数支配,$\kappa$ 含两个病灶}
+\vspace{0.3em}
+\begin{center}
+$n_{\text{iter}} \ \sim\ \tfrac{1}{2}\sqrt{\kappa}\,\ln(2/\varepsilon),\qquad \kappa = \kappa(M^{-1}A)$
+\end{center}
+\vspace{0.6em}
+\[
+\kappa(M^{-1}A)\ \lesssim\
+\underbrace{C_0^{2}(\delta)}_{\substack{\textcolor{Teal}{\text{稳定分解}}\\[0.2em]\textcolor{Muted}{\text{overlap }\delta\uparrow\text{ 时 }\downarrow}}}
+\ \cdot\
+\underbrace{N_c}_{\substack{\textcolor{AnomRed}{\text{病灶 B}}\\[0.2em]\textcolor{Muted}{\text{重叠重复计数}}}}
+\ \cdot\
+\underbrace{\omega_{\max}/\omega_{\min}}_{\substack{\textcolor{AnomRed}{\text{病灶 A}}\\[0.2em]\textcolor{Muted}{\text{局部解不精确}}}}
+\]
+\vspace{0.4em}
+\begin{beamercolorbox}[wd=\textwidth,sep=8pt]{}
+\colorbox{NavyDark}{\parbox{0.95\textwidth}{\color{white}%
+\textbf{\color{Ice}核心命题}\quad 当病灶 A 与 B 同时存在,$\delta$ 增大使 $(N_c\cdot\omega)$ 的放大盖过 $C_0^2$ 的下降 $\Rightarrow \kappa\uparrow \Rightarrow$ 迭代 $\uparrow$。\\[0.3em]
+{\footnotesize\color{Ice}下面用实验逐一拆解:拔掉任一因子,趋势即翻回下降。}}}
+\end{beamercolorbox}
+\end{frame}
+
+% ===== S5 exp1 =====
+\begin{frame}{实验 1:复现 + 排除「实现 / 装配产物」}
+\framesubtitle{\ptag{Sys3 / Laplace,$n_x{=}48$,4 ranks}}
+\textbf{目的:}先确认这不是 MFEM / 矩阵转换的人为产物。\par\vspace{0.8em}
+\begin{columns}[T]
+\begin{column}{0.34\textwidth}\centering
+  {\color{FixGreen}\fontsize{34}{36}\selectfont\bfseries 27 / 27}\par\vspace{0.5em}
+  {\footnotesize 两独立实现在同一 METIS 矩阵上\\迭代数逐位一致}
+\end{column}
+\begin{column}{0.34\textwidth}\centering
+  {\color{Teal}\fontsize{30}{32}\selectfont\bfseries 逐位相同}\par\vspace{0.5em}
+  {\footnotesize \texttt{-ksp\_monitor} 残差历史\\每一步每一位都相同}
+\end{column}
+\begin{column}{0.30\textwidth}
+  \begin{block}{三层对齐}\footnotesize
+  \begin{itemize}\setlength\itemsep{0.2em}
+    \item 矩阵零容差过滤
+    \item 共享 METIS 分区
+    \item MatLoad 行布局保持
+  \end{itemize}\end{block}
+\end{column}
+\end{columns}
+\vfill
+\begin{beamercolorbox}[wd=\textwidth,sep=6pt]{}
+\colorbox{GreenBG}{\parbox{0.97\textwidth}{\small\textcolor{FixGreen}{\textbf{结论}}\quad 现象是 BASIC + ICC + CG 方法内在,与具体实现无关 —— 后续可在任一实现上做。}}
+\end{beamercolorbox}
+\end{frame}
+
+% ===== S6 exp2 =====
+\begin{frame}{实验 2:定位病根 —— 子域解是否精确}
+\framesubtitle{\ptag{Sys3 / Laplace}}
+\textbf{唯一变量 = 子域求解器精度}(BASIC、矩阵、分区全部不变)。\par\vspace{0.7em}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{l*{3}{>{\centering\arraybackslash}p{1.5cm}}>{\centering\arraybackslash}p{2cm}}
+  \rowcolor{Navy}\color{white}\textbf{子域求解器} & \color{white}$O{=}0$ & \color{white}$O{=}1$ & \color{white}$O{=}2$ & \color{white}\textbf{趋势}\\
+  精确 Cholesky & 52 & 34 & \gdn{30} & \cellcolor{GreenBG}\textcolor{FixGreen}{\textbf{$\downarrow$ 下降}}\\
+  ICC(0) 不精确 & 132 & 148 & \rup{179} & \cellcolor{RedBG}\textcolor{AnomRed}{\textbf{$\uparrow$ 上升}}\\
+  \bottomrule
+\end{tabular}
+\par\vspace{0.5em}
+{\footnotesize\color{Muted} 再加一轴:同 overlap 下提高 ICC 填充 $L{=}0\to1\to2$ 迭代单调降 —— 双重锁定「不精确」是病根。}
+\vfill
+\begin{beamercolorbox}[wd=\textwidth,sep=6pt]{}
+\colorbox{GreenBG}{\parbox{0.97\textwidth}{\small\textcolor{FixGreen}{\textbf{结论}}\quad 子域精确求解 $\Rightarrow$ overlap$\uparrow$ 迭代$\downarrow$(恢复经典理论);不精确 $\Rightarrow$ 反向。病根之一 = 因子 A。}}
+\end{beamercolorbox}
+\end{frame}
+
+% ===== S7 exp3 sASM =====
+\begin{frame}{实验 3:修因子 B —— sASM 对称缩放}
+\framesubtitle{\ptag{Sys3 / Laplace}}
+\begin{beamercolorbox}[wd=\textwidth,sep=8pt]{}
+\colorbox{NavyDark}{\parbox{0.95\textwidth}{\centering\color{white}\large
+$M^{-1}_{\text{sASM}} \;=\; D^{-1/2}\, M^{-1}_{\text{BASIC}}\, D^{-1/2},\qquad D=\operatorname{diag}(m_k)$}}
+\end{beamercolorbox}
+\vspace{0.6em}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{l*{3}{>{\centering\arraybackslash}p{1.5cm}}>{\centering\arraybackslash}p{2cm}}
+  \rowcolor{Navy}\color{white}\textbf{方案} & \color{white}$O{=}0$ & \color{white}$O{=}1$ & \color{white}$O{=}2$ & \color{white}\textbf{趋势}\\
+  scheme 0\ \,BASIC & 132 & 148 & \rup{179} & \cellcolor{RedBG}\textcolor{AnomRed}{\textbf{$\uparrow$ 上升}}\\
+  scheme 3\ \,sASM & 132 & 104 & \gdn{103} & \cellcolor{GreenBG}\textcolor{FixGreen}{\textbf{$\downarrow$ 下降}}\\
+  \bottomrule
+\end{tabular}
+\par\vspace{0.5em}
+{\footnotesize\color{Muted} 对称 $\Rightarrow$ 保 CG;约 10 行 PCSHELL、单层、无额外内存 / 全局通信。$O{=}0$ 时 $D{=}I$,sASM$\equiv$BASIC(自检)。}
+\vfill
+\begin{beamercolorbox}[wd=\textwidth,sep=6pt]{}
+\colorbox{GreenBG}{\parbox{0.97\textwidth}{\small\textcolor{FixGreen}{\textbf{结论}}\quad 用 $D^{-1/2}$ 精确抵消重叠区重复计数(因子 B),迭代趋势翻回下降,且仍是对称 CG。}}
+\end{beamercolorbox}
+\end{frame}
+
+% ===== S8 exp4 scheme4 =====
+\begin{frame}{实验 4:sASM + Chebyshev 块解(修两因子)}
+\framesubtitle{\ptag{Sys3 / Laplace}}
+{\footnotesize 子域用 2 步 Chebyshev(以 ICC 为光滑子)廉价逼近精确块逆:零额外内存、零额外全局通信、仍对称保 CG。}\par\vspace{0.6em}
+\begin{columns}[T]
+\begin{column}{0.62\textwidth}
+\renewcommand{\arraystretch}{1.35}\small
+\begin{tabular}{c*{3}{>{\centering\arraybackslash}p{1.7cm}}}
+  \rowcolor{Navy}\color{white}\textbf{(O, L)} & \color{white}scheme 0 & \color{white}scheme 3 & \color{white}scheme 4\\
+  \rowcolor{Navy}\color{white} & \color{white}\scriptsize BASIC & \color{white}\scriptsize sASM & \color{white}\scriptsize sASM+Ch2\\
+  0,\,0 & 132 & 132 & \gdn{85}\\
+  1,\,0 & \rup{148} & 104 & \gdn{68}\\
+  2,\,0 & \rup{179} & 103 & \gdn{65}\\
+  2,\,2 & 90 & 67 & \gdn{42}\\
+  \bottomrule
+\end{tabular}
+\end{column}
+\begin{column}{0.38\textwidth}\centering
+  \vspace{0.4em}
+  {\color{FixGreen}\fontsize{36}{38}\selectfont\bfseries $179\!\to\!65$}\par\vspace{0.4em}
+  {\footnotesize scheme 4 在 $O{=}2,L{=}0$\\ $\approx$ baseline 的 $1/3$}\par\vspace{0.8em}
+  {\scriptsize\color{Muted} 双实现 9/9 逐位一致\\解正确(误差 5.4e-5)}
+\end{column}
+\end{columns}
+\vfill
+\begin{beamercolorbox}[wd=\textwidth,sep=6pt]{}
+\colorbox{GreenBG}{\parbox{0.97\textwidth}{\small\textcolor{FixGreen}{\textbf{结论}}\quad A、B 两因子被同时廉价压低,scheme 4 在每个 (O,L) 都最低,且 overlap$\uparrow$ 单调下降。}}
+\end{beamercolorbox}
+\end{frame}
+
+% ===== S9 universality =====
+\begin{frame}{普遍性:换两个问题,同现象、同修复}
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+  \begin{block}{pure Neumann(奇异椭圆)}
+  \small
+  BASIC\hfill $64\to68\to\rup{87}$\ \up\par\vspace{0.3em}
+  sASM\hfill $64\to52\to\gdn{51}$\ \down\par\vspace{0.4em}
+  {\footnotesize\itshape\color{Muted} overlap$\uparrow$ 同样发病;sASM 同样修复。}
+  \end{block}
+\end{column}
+\begin{column}{0.5\textwidth}
+  \begin{block}{reaction-diffusion(质量主导)}
+  \small
+  ICC(0) 心脏 dt\hfill $6\to8\to\rup{9}$\ \up\par\vspace{0.3em}
+  ICC(2)\hfill $6\to6\to7$\ \ $\sim$\par\vspace{0.4em}
+  {\footnotesize\itshape\color{Muted} 低 ICC 也发病;提高 ICC / sASM 即压平。}
+  \end{block}
+\end{column}
+\end{columns}
+\vfill
+\begin{beamercolorbox}[wd=\textwidth,sep=8pt]{}
+\colorbox{NavyDark}{\parbox{0.95\textwidth}{\color{white}%
+\textbf{\color{Ice}结论}\quad「overlap$\uparrow$ 迭代$\uparrow$」不是某个问题独有 —— 只要局部解够不精确(低 ICC),三个问题都发病;差别只是幅度(质量主导$\to$幅度小,椭圆$\to$幅度大)。同一套 sASM / scheme 4 都能修。}}
+\end{beamercolorbox}
+\end{frame}
+
+% ===== S10 synchronization =====
+\begin{frame}{修复不止降迭代,也降「时间」}
+\framesubtitle{\ptag{Sys3 / Laplace}}
+{\footnotesize 用 \texttt{-log\_view} 的全局同步计数(确定性、机器无关;wall-time 在负载机器上不可信)。}\par\vspace{0.7em}
+\begin{columns}[T]
+\begin{column}{0.6\textwidth}
+\renewcommand{\arraystretch}{1.5}\small
+\begin{tabular}{l>{\centering\arraybackslash}p{1.3cm}>{\centering\arraybackslash}p{2.8cm}}
+  \rowcolor{Navy}\color{white}\textbf{方案 ($O{=}2,L{=}0$)} & \color{white}迭代 & \color{white}全局同步 (\texttt{Allreduce})\\
+  scheme 0\ baseline & \rup{179} & \rup{668}\\
+  scheme 4\ sASM+Cheby2 & \gdn{65} & \gdn{329}\\
+  \bottomrule
+\end{tabular}
+\end{column}
+\begin{column}{0.4\textwidth}
+  \begin{block}{}\footnotesize
+  \texttt{VecTDot = 2·iter + 2}\par\vspace{0.3em}
+  严格成立 $\Rightarrow$ 内层 Chebyshev(在 SELF 块上)\textbf{零全局同步};外层迭代降 = 全局同步降。
+  \end{block}
+\end{column}
+\end{columns}
+\vfill
+\begin{beamercolorbox}[wd=\textwidth,sep=6pt]{}
+\colorbox{GreenBG}{\parbox{0.97\textwidth}{\small\textcolor{FixGreen}{\textbf{结论}}\quad 全局 \texttt{MPI\_Allreduce} 从 668 降到 329($\approx 2\times$)—— 这正是大规模并行(数千 rank)的真瓶颈。}}
+\end{beamercolorbox}
+\end{frame}
+
+% ===== S11 literature & theory =====
+\begin{frame}{文献与理论定位:已证 / 待证}
+\begin{columns}[T]
+\begin{column}{0.46\textwidth}
+  {\color{Teal}\textbf{现象在文献中}}\par\vspace{0.4em}\footnotesize
+  \textbf{Cai–Sarkis 1999} — RAS,指出 BASIC 重叠区重复计数\par\vspace{0.3em}
+  \textbf{Efstathiou–Gander 2003} — 证 AS 收敛依赖着色数\par\vspace{0.3em}
+  \textcolor{AnomRed}{\textbf{Ernst–Flemisch–Wohlmuth 2009}} — 逐字记录「overlap 再增大,不精确法的迭代数比精确法更差」(异设定,诚实标注)
+\end{column}
+\begin{column}{0.54\textwidth}
+  {\color{Teal}\textbf{理论状态}}\par\vspace{0.4em}
+  \renewcommand{\arraystretch}{1.25}\scriptsize
+  \begin{tabular}{>{\raggedright\arraybackslash}p{3.3cm}l}
+    \rowcolor{Navy}\color{white}命题 & \color{white}状态\\
+    $\lambda_{\max}\le N_c$(因子 B) & \textcolor{FixGreen}{已严格证明}\\
+    $\omega$ 谱等价(因子 A) & \textcolor{FixGreen}{已严格证明}\\
+    精确解 overlap$\uparrow\to\downarrow$ & \textcolor{FixGreen}{已严格证明}\\
+    缩放令 $\lambda_{\max}\le1$(sASM) & \textcolor{FixGreen}{已严格证明}\\
+    A$\times$B $\Rightarrow$ 迭代严格上升 & \textcolor{AnomRed}{机制+实证,无闭式}\\
+    \bottomrule
+  \end{tabular}
+\end{column}
+\end{columns}
+\vspace{0.5em}
+\begin{beamercolorbox}[wd=\textwidth,sep=6pt]{}
+\colorbox{Ice!40!white}{\parbox{0.97\textwidth}{\footnotesize%
+\textcolor{AnomRed}{\textbf{开放问题:}}给出固定填充 ICC 在增大子块上的谱等价常数 $\omega(\delta)$ 随 overlap 增长的闭式下界 —— 把「机制」补成定理。}}
+\end{beamercolorbox}
+\end{frame}
+
+% ===== S12 conclusion =====
+{\setbeamertemplate{footline}{}
+\begin{darkframe}
+  \vspace{0.4cm}
+  {\color{white}\Large\bfseries 结论\par}\vspace{0.5em}
+  \begin{columns}[T]
+  \begin{column}{0.56\textwidth}\color{white}
+    \circnum{1}\ \textbf{不是 bug}\\[-0.2em]
+    {\footnotesize\color{Ice}\hspace{1.2em}两套独立实现 27/27 逐位一致,残差历史逐位相同。}\par\vspace{0.6em}
+    \circnum{2}\ \textbf{病根 = A $\times$ B}\\[-0.2em]
+    {\footnotesize\color{Ice}\hspace{1.2em}子域解不精确(A)$\times$ 重叠重复计数(B);拔掉任一即翻正。}\par\vspace{0.6em}
+    \circnum{3}\ \textbf{修复 = sASM (+ Chebyshev)}\\[-0.2em]
+    {\footnotesize\color{Ice}\hspace{1.2em}$D^{-1/2}$ 缩放消 B,Chebyshev 块解廉价压 A;保 CG、保单层。}
+  \end{column}
+  \begin{column}{0.44\textwidth}
+    \colorbox{Navy}{\parbox{0.93\textwidth}{\color{white}\vspace{0.2em}
+    \textcolor{Ice}{\textbf{普遍性}}\par\vspace{0.3em}
+    {\footnotesize 三个问题(Laplace / pure-Neumann / reaction-diffusion)在低 ICC 都发病,同一套方法都能修。}\par\vspace{0.6em}
+    \textcolor{Ice}{\textbf{开放问题}}\par\vspace{0.3em}
+    {\footnotesize ICC 在增大子块上 $\omega(\delta)$ 的闭式下界 —— 把机制补成定理。}\vspace{0.2em}}}
+  \end{column}
+  \end{columns}
+  \vfill
+  {\color{Teal}\ttfamily\small 代码 · 数据 · 完整报告:\ github.com/tianhaomahpc-ops/cg-asm-icc-research\par}
+  \vspace{0.3cm}
+\end{darkframe}}
+
+\end{document}

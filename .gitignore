@@ -27,3 +27,10 @@ slides/package-lock.json
 slides/package.json
 slides/*.pdf
 slides/slide-*.jpg
+slides/tex/*.aux
+slides/tex/*.log
+slides/tex/*.nav
+slides/tex/*.out
+slides/tex/*.snm
+slides/tex/*.toc
+slides/tex/bslide-*.jpg
