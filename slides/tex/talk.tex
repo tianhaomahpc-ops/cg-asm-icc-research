@@ -122,15 +122,15 @@ $L=2$ & 87  & 92  & 90  & 近持平 \\
 % ===== S4 : two coupled causes + nail-down table =====
 \begin{frame}{成因:两个耦合因素,用"换精确子域解"坐实}
 \framesubtitle{方案 BASIC,外层 CG,$L{=}0$;仅改变子域求解器,其余不变}
-\textbf{机制.}\ 预条件 CG:$n_{\text{iter}}\sim\tfrac12\sqrt{\kappa}\,\ln(2/\varepsilon)$。抽象加性 Schwarz 上界(Toselli \& Widlund 2005,定理 2.7):
+\textbf{机制.}\ 预条件 CG:$n_{\text{iter}}\sim\tfrac12\sqrt{\kappa}\,\ln(2/\varepsilon)$。抽象加性 Schwarz 上界(Gander, Halpern \& Santugini 2015,定理 2.7;着色形式):
 \[
-\kappa(M^{-1}A)\ \le\
+\kappa(P_{\text{ad}})\ \le\
 \underbrace{C_0^{2}}_{\substack{\text{稳定分解}\\ \delta\uparrow\Rightarrow\downarrow}}\ \cdot\
 \underbrace{\omega}_{\substack{\text{(A) 局部稳定性}\\ \text{精确}{=}1,\ \text{ICC}{>}1}}\ \cdot\
-\underbrace{N_c}_{\substack{\text{(B) 着色数(重叠重复计数)}\\ \delta\uparrow\Rightarrow\uparrow}}
+\underbrace{(N_c+1)}_{\substack{\text{(B) 着色数}+\text{粗空间}\\ \delta\uparrow\Rightarrow\uparrow}}
 \]
 \vskip-0.3em
-{\footnotesize 由 $\lambda_{\min}\!\ge\! C_0^{-2}$(稳定分解)与 $\lambda_{\max}\!\le\!\omega N_c$(着色 $+$ 局部稳定性)相除得到;推导见附录。精确解时 $\omega{=}1$。底层更细的强化 Cauchy--Schwarz 形式为 $\omega(\rho(\mathcal E){+}1)$,$\rho(\mathcal E){+}1\le N_c$。}
+{\footnotesize 由 $\lambda_{\min}\!\ge\! C_0^{-2}$(稳定分解)与 $\lambda_{\max}\!\le\!\omega(N_c{+}1)$(着色 $+$ 局部稳定性)相除得到;推导见附录。$+1$ 为粗空间 $P_0$,\textbf{本文单层无粗空间} $\Rightarrow C_0^2\omega N_c$。精确子域解 $\omega{=}1$。谱半径形式 $\omega(\rho(\mathcal E){+}1)$ 即该文定理 2.5($=$ Toselli--Widlund 定理 2.7)。}
 \begin{center}
 \begin{tabular}{l ccc c}
 \toprule
@@ -330,26 +330,26 @@ RAS & 否 & 飘忽 & \yes 满GMRES $129\to95\to92$ & \yes $97\to93$ & — \\
 
 % ===== Appendix : derivation of the condition-number bound =====
 \appendix
-\begin{frame}{附录:条件数上界 $\kappa\le C_0^2\,\omega\,N_c$ 的推导(T\&W 定理 2.7)}
-\framesubtitle{加性算子 $P_{\text{ad}}=M^{-1}A=\sum_i P_i$,$P_i=R_i^{\top}\tilde A_i^{-1}R_iA$;$a(u,v)=u^{\top}Av$}
+\begin{frame}{附录:上界 $\kappa\le C_0^2\,\omega\,(N_c{+}1)$ 的推导(Gander et al. 2015,定理 2.7)}
+\framesubtitle{$P_{\text{ad}}=\sum_{i=0}^{N} P_i$,$P_i=R_i^{\top}\tilde P_i$,$\tilde a_i(\tilde P_iu,v)=a(u,R_i^{\top}v)$;$i{=}0$ 为粗空间}
 \footnotesize
-\textbf{假设(2.2,2.4)$+$ 着色.}\
-(i) \emph{稳定分解}(Assump. 2.2):每个 $u$ 有 $u=\sum_iR_i^{\top}u_i$ 且 $\sum_i\tilde a_i(u_i,u_i)\le C_0^2\,a(u,u)$;\
-(ii) \emph{局部稳定性}(Assump. 2.4):$a(R_i^{\top}u_i,R_i^{\top}u_i)\le\omega\,\tilde a_i(u_i,u_i)$(精确局部解 $\Rightarrow\omega{=}1$);\
-(iii) \emph{着色}:用 $N_c$ 色给子域染色,同色支撑不相交($\Rightarrow$ 同色 $a$-正交)。
+\textbf{假设 2.2,2.4 $+$ 着色.}\
+(i) \emph{稳定分解}(2.2):每个 $u$ 有 $u=\sum_iR_i^{\top}u_i$ 且 $\sum_i\tilde a_i(u_i,u_i)\le C_0^2\,a(u,u)$;\
+(ii) \emph{局部稳定性}(2.4):$a(R_i^{\top}u_i,R_i^{\top}u_i)\le\omega\,\tilde a_i(u_i,u_i)$(精确局部解 $\Rightarrow\omega{=}1$);\
+(iii) \emph{着色}(定义 2.6):用 $N_c$ 色给细子域染色,同色支撑不相交($\Rightarrow$ 同色 $a$-正交)。
 \vskip0.5em
-\textbf{下界(用 i).}\ 由 $u=\sum_iR_i^{\top}u_i$ 得 $a(u,u)=\sum_i a(R_i^{\top}u_i,u)$;每项用 $\tilde a_i$ 的 Cauchy--Schwarz,注意 $\tilde a_i(\tilde A_i^{-1}R_iAu,\cdot)=a(P_iu,u)$:
+\textbf{下界(用 i).}\ 由 $u=\sum_iR_i^{\top}u_i$ 得 $a(u,u)=\sum_i a(R_i^{\top}u_i,u)$;每项用 $\tilde a_i$ 的 Cauchy--Schwarz,注意 $\tilde a_i(\tilde P_iu,\cdot)=a(P_iu,u)$:
 \[
 a(u,u)\le\Big(\textstyle\sum_i\tilde a_i(u_i,u_i)\Big)^{1/2}\Big(\sum_i a(P_iu,u)\Big)^{1/2}
 \le\big(C_0^2\,a(u,u)\big)^{1/2}\big(a(P_{\text{ad}}u,u)\big)^{1/2}
 \]
-$\Rightarrow a(P_{\text{ad}}u,u)\ge C_0^{-2}a(u,u)$,即 $\boxed{\lambda_{\min}(P_{\text{ad}})\ge C_0^{-2}}$。
+$\Rightarrow\boxed{\lambda_{\min}(P_{\text{ad}})\ge C_0^{-2}}$(T\&W 引理 2.5)。
 \vskip0.4em
-\textbf{上界(用 ii, iii).}\ 按颜色分组 $P_{\text{ad}}=\sum_{c=1}^{N_c}Q_c$,$Q_c=\sum_{i\in I_c}P_i$。同色 $a$-正交 $+$ 局部稳定性 $\Rightarrow\|Q_c\|_a\le\omega$;三角不等式:
+\textbf{上界(用 ii, iii).}\ 按颜色分组细空间 $\sum_{c=1}^{N_c}Q_c$($Q_c=\sum_{i\in I_c}P_i$),同色 $a$-正交 $+$(ii)$\Rightarrow a(Q_cu,u)\le\omega\,a(u,u)$;粗空间另有 $a(P_0u,u)\le\omega\,a(u,u)$。求和:
 \[
-\|P_{\text{ad}}\|_a\le\sum_{c=1}^{N_c}\|Q_c\|_a\le N_c\,\omega\quad\Rightarrow\quad\boxed{\lambda_{\max}(P_{\text{ad}})\le\omega N_c}.
+a(P_{\text{ad}}u,u)=a(P_0u,u)+\sum_{c=1}^{N_c}a(Q_cu,u)\le(N_c{+}1)\,\omega\,a(u,u)\ \Rightarrow\ \boxed{\lambda_{\max}\le\omega(N_c{+}1)}.
 \]
-\textbf{合并.}\ $\kappa=\lambda_{\max}/\lambda_{\min}\le C_0^2\,\omega\,N_c$。\ 更细可用强化 Cauchy--Schwarz(Assump. 2.3)得 $\lambda_{\max}\le\omega(\rho(\mathcal E){+}1)$,且 $\rho(\mathcal E){+}1\le N_c$。\ 精确子域解 $\omega{=}1$;ICC 不精确 $\omega{>}1$ 且作用于更大重叠块上增大——因素 A。
+\textbf{合并.}\ $\kappa\le C_0^2\,\omega\,(N_c{+}1)$。\ \textbf{本文单层无粗空间 $P_0$ $\Rightarrow$ 去掉 $+1$,即 $C_0^2\,\omega\,N_c$}。\ 谱半径形式 $\omega(\rho(\mathcal E){+}1)$ 为定理 2.5($=$ T\&W 定理 2.7),$\rho(\mathcal E)\le N_k$、$N_c\le N_k$(备注 2.8)。精确子域解 $\omega{=}1$;ICC $\omega{>}1$——因素 A。
 \end{frame}
 
 \end{document}
