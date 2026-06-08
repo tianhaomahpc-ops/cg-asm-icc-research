@@ -27,7 +27,7 @@
 \setbeamercolor{block body}{bg=Struct!6}
 \setbeamertemplate{frametitle}{\vskip0.5em\hspace{0.2em}\usebeamerfont{frametitle}\insertframetitle%
   {\ifx\insertframesubtitle\empty\else\\[0.1em]\small\color{Gray}\insertframesubtitle\fi}\par}
-\setbeamertemplate{footline}{\hfill\footnotesize\color{Gray}\insertframenumber\,/\,\inserttotalframenumber\hspace{0.4cm}\vspace{3pt}}
+\setbeamertemplate{footline}{\hfill\footnotesize\color{Gray}\ifnum\insertframenumber>10 附录\else\insertframenumber\,/\,10\fi\hspace{0.4cm}\vspace{3pt}}
 
 \newcommand{\ua}{$\uparrow$}
 \newcommand{\da}{$\downarrow$}
@@ -122,13 +122,15 @@ $L=2$ & 87  & 92  & 90  & 近持平 \\
 % ===== S4 : two coupled causes + nail-down table =====
 \begin{frame}{成因:两个耦合因素,用"换精确子域解"坐实}
 \framesubtitle{方案 BASIC,外层 CG,$L{=}0$;仅改变子域求解器,其余不变}
-\textbf{机制.}\ 预条件 CG 迭代数 $\sim\tfrac12\sqrt{\kappa}\,\ln(2/\varepsilon)$,单层加性 Schwarz 有
+\textbf{机制.}\ 预条件 CG:$n_{\text{iter}}\sim\tfrac12\sqrt{\kappa}\,\ln(2/\varepsilon)$。抽象加性 Schwarz 上界(Toselli \& Widlund 2005,定理 2.7):
 \[
-\kappa(M^{-1}A)\ \lesssim\
-\underbrace{C_0^{2}(\delta)}_{\text{随 overlap }\downarrow}\ \cdot\
-\underbrace{N_c}_{\text{(B) 重叠重复计数}}\ \cdot\
-\underbrace{\omega_{\max}/\omega_{\min}}_{\text{(A) 子域不精确,精确时}=1}
+\kappa(M^{-1}A)\ \le\
+\underbrace{C_0^{2}}_{\substack{\text{稳定分解}\\ \delta\uparrow\Rightarrow\downarrow}}\ \cdot\
+\underbrace{\omega}_{\substack{\text{(A) 局部稳定性}\\ \text{精确}{=}1,\ \text{ICC}{>}1}}\ \cdot\
+\underbrace{(\rho(\mathcal E)+1)}_{\substack{\text{(B) 重叠着色}\le N_c\\ \delta\uparrow\Rightarrow\uparrow}}
 \]
+\vskip-0.3em
+{\footnotesize 由 $\lambda_{\min}\!\ge\! C_0^{-2}$(稳定分解)与 $\lambda_{\max}\!\le\!\omega(\rho(\mathcal E){+}1)$(强化 Cauchy--Schwarz $+$ 局部稳定性)相除得到;推导见附录。精确解时 $\omega{=}1$。}
 \begin{center}
 \begin{tabular}{l ccc c}
 \toprule
@@ -324,6 +326,32 @@ RAS & 否 & 飘忽 & \yes 满GMRES $129\to95\to92$ & \yes $97\to93$ & — \\
   \item Krylov:非对称可由 FCG 救活(短截断即达满 GMRES);GMRES 高迭代源于 restart 而非正交化。
   \item 选型:对称路线选 \textbf{sASM};非对称路线选 \textbf{RAS$+$FCG}。两者均单层、保持 overlap 增大$\Rightarrow$迭代下降。
 \end{enumerate}
+\end{frame}
+
+% ===== Appendix : derivation of the condition-number bound =====
+\appendix
+\begin{frame}{附录:条件数上界 $\kappa\le C_0^2\,\omega\,(\rho(\mathcal E){+}1)$ 的推导}
+\framesubtitle{加性算子 $P_{\text{ad}}=M^{-1}A=\sum_i P_i$,$P_i=R_i^{\top}\tilde A_i^{-1}R_iA$;$a(u,v)=u^{\top}Av$}
+\footnotesize
+\textbf{三条假设.}\
+(i) \emph{稳定分解}:每个 $u$ 有 $u=\sum_iR_i^{\top}u_i$ 且 $\sum_i\tilde a_i(u_i,u_i)\le C_0^2\,a(u,u)$;\
+(ii) \emph{强化 Cauchy--Schwarz}:$a(P_iu,P_ju)\le\epsilon_{ij}\,a(P_iu,P_iu)^{1/2}a(P_ju,P_ju)^{1/2}$,$\mathcal E{=}(\epsilon_{ij})$;\
+(iii) \emph{局部稳定性}:$a(R_i^{\top}u_i,R_i^{\top}u_i)\le\omega\,\tilde a_i(u_i,u_i)$(精确局部解 $\Rightarrow\omega{=}1$)。
+\vskip0.5em
+\textbf{下界(用 i).}\ 由 $u=\sum_iR_i^{\top}u_i$ 得 $a(u,u)=\sum_i a(R_i^{\top}u_i,u)$;对每项用 $\tilde a_i$ 的 Cauchy--Schwarz,注意 $\tilde a_i(\tilde A_i^{-1}R_iAu,\cdot)=a(P_iu,u)$:
+\[
+a(u,u)\le\Big(\textstyle\sum_i\tilde a_i(u_i,u_i)\Big)^{1/2}\Big(\sum_i a(P_iu,u)\Big)^{1/2}
+\le\big(C_0^2\,a(u,u)\big)^{1/2}\big(a(P_{\text{ad}}u,u)\big)^{1/2}
+\]
+$\Rightarrow a(P_{\text{ad}}u,u)\ge C_0^{-2}a(u,u)$,即 $\boxed{\lambda_{\min}(P_{\text{ad}})\ge C_0^{-2}}$。
+\vskip0.4em
+\textbf{上界(用 ii, iii).}\ 记 $x_i=a(P_iu,P_iu)^{1/2}$;又 $a(P_iu,P_iu)\le\omega\,a(P_iu,u)$(由 iii):
+\[
+\|P_{\text{ad}}u\|_a^2=\sum_{i,j}a(P_iu,P_ju)\overset{(ii)}{\le}x^{\top}\mathcal E x\le\rho(\mathcal E)\sum_i x_i^2\overset{(iii)}{\le}\omega\,\rho(\mathcal E)\,a(P_{\text{ad}}u,u)
+\]
+由 $a(P_{\text{ad}}u,u)\le\|P_{\text{ad}}u\|_a\|u\|_a$ 得 $\|P_{\text{ad}}\|_a\le\omega\rho(\mathcal E)$;计入对角/粗项,$\boxed{\lambda_{\max}\le\omega(\rho(\mathcal E){+}1)}$。
+\vskip0.4em
+\textbf{合并.}\ $\kappa=\lambda_{\max}/\lambda_{\min}\le C_0^2\,\omega\,(\rho(\mathcal E){+}1)$。\ 着色论证给 $\rho(\mathcal E){+}1\le N_c$(同色子域互不重叠)。\ 精确子域解 $\omega{=}1$;不精确(ICC)$\omega{>}1$,且作用于更大的重叠块上 $\omega$ 增大——此即因素 A。
 \end{frame}
 
 \end{document}
