@@ -56,9 +56,9 @@ schemes.
 | File | Role |
 |:--|:--|
 | `asm_demo.cpp` | MFEM + PETSc reproducer: cube `[0,1]³`, P1 tetrahedral mesh, 1 Dirichlet face (`x=0, u=0`), 5 Neumann faces, hand-rolled `ConvertHypreToPetscAIJSafe` mirroring `femheart.cpp`. Knobs: `-fix_level 0..2`, `-scheme 0..3`, `-nx`. |
-| `pure_petsc_fem.c` | Independent **pure PETSc** P1-tet FEM assembler — no MFEM, no HYPRE. Uses MFEM's `hex_to_tet[6][4]` table verbatim so the mesh + element decomposition is identical. |
+| `pure_petsc_fem.c` | Independent **pure PETSc** P1-tet FEM assembler — no MFEM, no HYPRE. Uses MFEM's `hex_to_tet[6][4]` table verbatim. Partitions with **DMDA cuboid** (not METIS) → **math-equal only** (`‖Ax‖` matches; iter ±1 because partition differs). |
 | `pure_petsc_demo.c` | Earlier 7-point FD reference (kept for sanity; not used in final comparison). |
-| `pure_petsc_load.c` | Pure PETSc driver that **loads** MFEM's METIS-partitioned matrix + RHS + per-rank layout from binary so MFEM and PETSc share the same partition; used to verify bit-identical iter counts. |
+| `pure_petsc_load.c` | **The "METIS version".** Does not re-assemble — `MatLoad`s MFEM's METIS-partitioned matrix + RHS, with `MatSetSizes` before load to preserve the per-rank layout, so it inherits MFEM's **exact METIS partition and DOF numbering** → **bit-identical iter counts (27/27)**. |
 | `sweep.sh`, `sweep_pure.sh` | Sweep `(O,L)` for one solver scheme on each demo. |
 | `Makefile` | Pulls MFEM 4.9 / PETSc 3.24 paths from `mfem-config.mk`. |
 

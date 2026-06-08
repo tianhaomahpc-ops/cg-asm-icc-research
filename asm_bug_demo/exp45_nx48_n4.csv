@@ -1,0 +1,53 @@
+exp,label,ksp,pc_asm_type,scheme,O,restart,orthog,fcg_mmax,iter,reason,err
+exp4,RAS+GMRES,gmres,restrict,0,0,30,cgs,-,265,CONVERGED_RTOL,5.418e-05
+exp4,RAS+GMRES,gmres,restrict,0,0,30,mgs,-,265,CONVERGED_RTOL,5.418e-05
+exp4,RAS+GMRES,gmres,restrict,0,0,60,cgs,-,195,CONVERGED_RTOL,5.409e-05
+exp4,RAS+GMRES,gmres,restrict,0,0,60,mgs,-,195,CONVERGED_RTOL,5.409e-05
+exp4,RAS+GMRES,gmres,restrict,0,0,120,cgs,-,130,CONVERGED_RTOL,5.423e-05
+exp4,RAS+GMRES,gmres,restrict,0,0,120,mgs,-,130,CONVERGED_RTOL,5.423e-05
+exp4,RAS+GMRES,gmres,restrict,0,0,240,cgs,-,129,CONVERGED_RTOL,5.422e-05
+exp4,RAS+GMRES,gmres,restrict,0,0,240,mgs,-,129,CONVERGED_RTOL,5.422e-05
+exp4,RAS+GMRES,gmres,restrict,0,0,600,cgs,-,129,CONVERGED_RTOL,5.422e-05
+exp4,RAS+GMRES,gmres,restrict,0,0,600,mgs,-,129,CONVERGED_RTOL,5.422e-05
+exp4,RAS+GMRES,gmres,restrict,0,1,30,cgs,-,232,CONVERGED_RTOL,5.415e-05
+exp4,RAS+GMRES,gmres,restrict,0,1,30,mgs,-,232,CONVERGED_RTOL,5.415e-05
+exp4,RAS+GMRES,gmres,restrict,0,1,60,cgs,-,147,CONVERGED_RTOL,5.417e-05
+exp4,RAS+GMRES,gmres,restrict,0,1,60,mgs,-,147,CONVERGED_RTOL,5.417e-05
+exp4,RAS+GMRES,gmres,restrict,0,1,120,cgs,-,95,CONVERGED_RTOL,5.421e-05
+exp4,RAS+GMRES,gmres,restrict,0,1,120,mgs,-,95,CONVERGED_RTOL,5.421e-05
+exp4,RAS+GMRES,gmres,restrict,0,1,240,cgs,-,95,CONVERGED_RTOL,5.421e-05
+exp4,RAS+GMRES,gmres,restrict,0,1,240,mgs,-,95,CONVERGED_RTOL,5.421e-05
+exp4,RAS+GMRES,gmres,restrict,0,1,600,cgs,-,95,CONVERGED_RTOL,5.421e-05
+exp4,RAS+GMRES,gmres,restrict,0,1,600,mgs,-,95,CONVERGED_RTOL,5.421e-05
+exp4,RAS+GMRES,gmres,restrict,0,2,30,cgs,-,136,CONVERGED_RTOL,5.410e-05
+exp4,RAS+GMRES,gmres,restrict,0,2,30,mgs,-,136,CONVERGED_RTOL,5.410e-05
+exp4,RAS+GMRES,gmres,restrict,0,2,60,cgs,-,127,CONVERGED_RTOL,5.424e-05
+exp4,RAS+GMRES,gmres,restrict,0,2,60,mgs,-,127,CONVERGED_RTOL,5.424e-05
+exp4,RAS+GMRES,gmres,restrict,0,2,120,cgs,-,92,CONVERGED_RTOL,5.421e-05
+exp4,RAS+GMRES,gmres,restrict,0,2,120,mgs,-,92,CONVERGED_RTOL,5.421e-05
+exp4,RAS+GMRES,gmres,restrict,0,2,240,cgs,-,92,CONVERGED_RTOL,5.421e-05
+exp4,RAS+GMRES,gmres,restrict,0,2,240,mgs,-,92,CONVERGED_RTOL,5.421e-05
+exp4,RAS+GMRES,gmres,restrict,0,2,600,cgs,-,92,CONVERGED_RTOL,5.421e-05
+exp4,RAS+GMRES,gmres,restrict,0,2,600,mgs,-,92,CONVERGED_RTOL,5.421e-05
+exp4,exp3-D^-1+GMRES,gmres,basic,6,1,30,cgs,-,215,CONVERGED_RTOL,5.434e-05
+exp4,exp3-D^-1+GMRES,gmres,basic,6,1,600,cgs,-,101,CONVERGED_RTOL,5.421e-05
+exp4,exp3-D^-1+GMRES,gmres,basic,6,2,30,cgs,-,221,CONVERGED_RTOL,5.432e-05
+exp4,exp3-D^-1+GMRES,gmres,basic,6,2,600,cgs,-,99,CONVERGED_RTOL,5.421e-05
+exp5,RAS+FCG,fcg,restrict,0,0,30,cgs,-,132,CONVERGED_RTOL,5.421e-05
+exp5,RAS+CG (ref,fails),cg,restrict,0,0,30,cgs,-,132,CONVERGED_RTOL,5.421e-05
+exp5,RAS+GMRES (ref),gmres,restrict,0,0,30,cgs,-,265,CONVERGED_RTOL,5.418e-05
+exp5,sASM+CG (ref),cg,basic,3,0,30,cgs,-,132,CONVERGED_RTOL,5.421e-05
+exp5,RAS+FCG,fcg,restrict,0,1,30,cgs,-,97,CONVERGED_RTOL,5.421e-05
+exp5,RAS+CG (ref,fails),cg,restrict,0,1,30,cgs,-,2000,DIVERGED_ITS,5.414e-05
+exp5,RAS+GMRES (ref),gmres,restrict,0,1,30,cgs,-,232,CONVERGED_RTOL,5.415e-05
+exp5,sASM+CG (ref),cg,basic,3,1,30,cgs,-,104,CONVERGED_RTOL,5.421e-05
+exp5,RAS+FCG,fcg,restrict,0,2,30,cgs,-,93,CONVERGED_RTOL,5.421e-05
+exp5,RAS+CG (ref,fails),cg,restrict,0,2,30,cgs,-,111,CONVERGED_RTOL,5.421e-05
+exp5,RAS+GMRES (ref),gmres,restrict,0,2,30,cgs,-,136,CONVERGED_RTOL,5.410e-05
+exp5,sASM+CG (ref),cg,basic,3,2,30,cgs,-,103,CONVERGED_RTOL,5.421e-05
+exp5,RAS+FCG,fcg,restrict,0,2,30,cgs,30,93,CONVERGED_RTOL,5.421e-05
+exp5,RAS+FCG,fcg,restrict,0,2,30,cgs,60,93,CONVERGED_RTOL,5.421e-05
+exp5,RAS+FCG,fcg,restrict,0,2,30,cgs,120,93,CONVERGED_RTOL,5.421e-05
+exp5,RAS+FCG,fcg,restrict,0,2,30,cgs,600,93,CONVERGED_RTOL,5.421e-05
+exp5,exp3-D^-1+FCG,fcg,basic,6,1,30,cgs,-,103,CONVERGED_RTOL,5.421e-05
+exp5,exp3-D^-1+FCG,fcg,basic,6,2,30,cgs,-,102,CONVERGED_RTOL,5.421e-05

@@ -44,10 +44,12 @@ asmcg-laplace-demo/
     ├── recoverue_demo.cpp     # all-Neumann singular Laplacian, mirrors
     │                          # cardioid Sys2 / u_e recovery shape.
     │                          # Compares scheme 0 (ASM) vs scheme 3 (sASM)
-    ├── pure_petsc_fem.c       # Independent pure-PETSc P1 hex→tet FEM
+    ├── pure_petsc_fem.c       # Independent pure-PETSc P1 hex→tet FEM,
+    │                          # DMDA cuboid partition — MATH-EQUAL (‖Ax‖),
+    │                          # iter differs ±1 (partition differs from METIS)
     ├── pure_petsc_demo.c      # Earlier 7-pt FD reference (kept for sanity)
-    ├── pure_petsc_load.c      # PETSc driver that loads MFEM's partitioned
-    │                          # matrix+rhs so iter counts match bit-for-bit
+    ├── pure_petsc_load.c      # the "METIS version": MatLoads MFEM's
+    │                          # METIS-partitioned matrix+rhs -> BIT-IDENTICAL iter
     ├── sweep.sh / sweep_pure.sh / bench.sh / bench_recoverue.sh
     └── Makefile               # uses Spack-installed MFEM/PETSc/HYPRE/METIS
 ```
@@ -139,15 +141,26 @@ scheme=3 (CG+sASM):       9/9 EQUAL
                           36/36 cells iter bit-identical
 ```
 
-## Why two implementations were necessary
+## Why two implementations — and two *levels* of cross-check
 
 To rule out the possibility that the bug is an MFEM artefact (a custom
 HypreParMatrix → PETSc conversion, an unusual sparsity allocation, a
-nullspace handling quirk, …), we hand-wrote an independent pure-PETSc
-P1 hex→tet FEM assembler that uses **no MFEM, no Hypre, no shared
-helpers**. It uses MFEM's `hex_to_tet[6][4]` decomposition table
-verbatim (lifted from `mfem-4.9/mesh.cpp:986`) so the discrete operator
-matches. The two implementations are mathematically equal:
+nullspace handling quirk, …), the PETSc side exists in **two** forms,
+which give **two different strengths of agreement**. It is important not
+to conflate them:
+
+| PETSc driver | assembly | partition | agreement with MFEM |
+|:--|:--|:--|:--|
+| `pure_petsc_fem.c`  | **independent** P1 hex→tet (no MFEM/Hypre) | **DMDA cuboid** (`PETSC_DECIDE`) | **mathematically equal** — same operator, but iter counts differ by ±1 |
+| `pure_petsc_load.c` | **none** — `MatLoad`s MFEM's matrix | **the same METIS partition** (inherited from the dump) | **bit-identical** — 27/27 iter counts match exactly |
+
+**Level 1 — same operator, independent assembly (`pure_petsc_fem.c`).**
+A hand-written assembler that uses **no MFEM, no Hypre, no shared
+helpers**, reproducing MFEM's `hex_to_tet[6][4]` table verbatim (lifted
+from `mfem-4.9/mesh.cpp:986`). It partitions with PETSc's own **DMDA
+cuboid** decomposition, *not* METIS, so it is a deliberately *independent*
+construction. It proves the two codes build the **same discrete
+operator** (the `‖Ax‖` fingerprint matches to all printed digits):
 
 | nx | MFEM ‖Ax‖     | pure-PETSc ‖Ax‖ |
 |:--:|:--|:--|
@@ -155,12 +168,34 @@ matches. The two implementations are mathematically equal:
 | 17 | 2.137087e+01  | 2.137087e+01    |
 | 24 | 3.128297e+01  | 3.128297e+01    |
 
-`pure_petsc_load.c` then closes the partition gap: it `MatSetSizes` to
-MFEM's per-rank row count **before** `MatLoad`, which is the one detail
-that PETSc's binary I/O does not preserve by default (defaulting to
-`PETSC_DECIDE` and silently re-chunking). With all three layers
-(matrix-zero tolerance, METIS partition, row layout) aligned, the
-ksp iter counts match bit-for-bit.
+Because its partition (DMDA cuboid) differs from MFEM's (METIS), the
+subdomain shapes differ, so the **CG iteration count differs by ±1** even
+though the operator is identical. That ±1 is the *only* residual
+difference, and it is expected.
+
+**Level 2 — the same METIS partition, bit-identical (`pure_petsc_load.c`).**
+This is the **"METIS version"**: it does **not** re-assemble. It
+`MatLoad`s the matrix that `asm_demo` dumped, so it inherits MFEM's exact
+**METIS partition *and* MFEM's exact global DOF numbering** in one step.
+The one non-obvious detail: `MatLoad` defaults to `PETSC_DECIDE` and
+silently re-chunks the rows into equal contiguous blocks, *erasing* the
+METIS layout. `asm_demo` therefore also dumps the per-rank row counts,
+and `pure_petsc_load.c` calls `MatSetSizes(A, m_local, …)` **before**
+`MatLoad` to pin them. With all three layers aligned —
+matrix-zero tolerance, shared METIS partition, preserved row layout —
+the KSP iteration counts match **bit-for-bit (27/27)**, and the
+`-ksp_monitor` residual histories are identical at every step.
+
+**Why "load" rather than "independently assemble on the METIS
+partition".** Bit-identity needs not just the same *element→rank* map
+(which `asm_demo` does dump, as `metis_part_*.bin`) but also MFEM's exact
+global *true-DOF numbering* (each rank owns a contiguous DOF block, shared
+vertices assigned to a specific owner, ordered by MFEM's own convention).
+Replicating that numbering in standalone PETSc is intricate and
+MFEM-version-dependent; `MatLoad` sidesteps it by carrying partition and
+numbering together. (Consequently `metis_part_*.bin` is currently dumped
+but unused — a vestige of the earlier "partition by the map" idea that the
+load approach superseded.)
 
 ## `recoverue_demo`: all-Neumann (singular) Laplacian — ASM vs sASM
 

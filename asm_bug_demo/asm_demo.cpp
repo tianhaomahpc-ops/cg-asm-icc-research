@@ -217,26 +217,30 @@ static void InjectSchemeOptions(int scheme)
 }
 
 // ---------------------------------------------------------------------------
-// PCSHELL context for scheme 3 (scaled additive Schwarz)
+// PCSHELL context: diagonal-weighted additive Schwarz.
+//   apply(r) = [post? W .] M_BASIC^{-1} [pre? W .] r,   W = diag(w)
+// weight_mode (set in InstallScaledASM) selects W and which sides:
+//   0  W = D^{-1/2}, pre=post=1  ->  D^{-1/2} M_BASIC^{-1} D^{-1/2}  (sASM, sym)  [scheme 3/4]
+//   1  W = D^{-1},   pre=post=1  ->  D^{-1}   M_BASIC^{-1} D^{-1}    (sym, over-norm) [scheme 5]
+//   2  W = D^{-1},   pre=0,post=1->  D^{-1}   M_BASIC^{-1}          (non-symmetric)  [scheme 6]
 // ---------------------------------------------------------------------------
 struct SASMCtx
 {
-    PC   inner_pc;        // child PCASM_BASIC with overlap and ICC sub-PCs
-    Vec  inv_sqrt_mult;   // D^{-1/2} where D = diag(multiplicity)
-    Vec  tmp;             // scratch
+    PC   inner_pc;   // child PCASM_BASIC with overlap and ICC/Chebyshev sub-PCs
+    Vec  w;          // diagonal weight (D^{-1/2} or D^{-1})
+    Vec  tmp;        // scratch
+    int  pre;        // apply W before  M_BASIC^{-1}
+    int  post;       // apply W after   M_BASIC^{-1}
 };
 
-// Apply:  z = D^{-1/2}  M_BASIC^{-1}  D^{-1/2}  r
 extern "C" PetscErrorCode SASMApply(PC pc, Vec r, Vec z)
 {
     SASMCtx *ctx = nullptr;
     PetscCall(PCShellGetContext(pc, (void**)&ctx));
-    // tmp = D^{-1/2} * r
-    PetscCall(VecPointwiseMult(ctx->tmp, ctx->inv_sqrt_mult, r));
-    // z   = M_BASIC^{-1} * tmp
-    PetscCall(PCApply(ctx->inner_pc, ctx->tmp, z));
-    // z   = D^{-1/2} * z      (PETSc allows aliased output)
-    PetscCall(VecPointwiseMult(z, ctx->inv_sqrt_mult, z));
+    if (ctx->pre) { PetscCall(VecPointwiseMult(ctx->tmp, ctx->w, r)); }  // tmp = W r
+    else          { PetscCall(VecCopy(r, ctx->tmp)); }                   // tmp = r
+    PetscCall(PCApply(ctx->inner_pc, ctx->tmp, z));                      // z = M_BASIC^{-1} tmp
+    if (ctx->post) { PetscCall(VecPointwiseMult(z, ctx->w, z)); }        // z = W z (aliased ok)
     return PETSC_SUCCESS;
 }
 
@@ -247,7 +251,7 @@ extern "C" PetscErrorCode SASMDestroy(PC pc)
     if (ctx)
     {
         PetscCall(PCDestroy(&ctx->inner_pc));
-        PetscCall(VecDestroy(&ctx->inv_sqrt_mult));
+        PetscCall(VecDestroy(&ctx->w));
         PetscCall(VecDestroy(&ctx->tmp));
         delete ctx;
     }
@@ -261,7 +265,8 @@ extern "C" PetscErrorCode SASMDestroy(PC pc)
 static void InstallScaledASM(KSP ksp, Mat A,
                              PetscInt overlap, PetscInt icc_levels,
                              int my_rank,
-                             int cheby_deg = 0)
+                             int cheby_deg = 0,
+                             int weight_mode = 0)   // 0:D^-1/2 both, 1:D^-1 both, 2:D^-1 left only
 {
     // cheby_deg == 0 : block solve = preonly + ICC(icc_levels)   [scheme 3]
     // cheby_deg >= 1 : block solve = cheby_deg steps of Chebyshev,
@@ -368,17 +373,16 @@ static void InstallScaledASM(KSP ksp, Mat A,
         if (dbg_rank == 0) { std::cout << "ok\n  " << std::flush; }
     }
 
-    // 4. inv_sqrt_mult[k] = 1 / sqrt(m[k]).  Use abs to defend against
-    //    numerical fuzz; m is always >= 1 in practice.
+    // 4. Build the diagonal weight w:
+    //      weight_mode 0 -> w = 1/sqrt(m[k])   (D^{-1/2})
+    //      weight_mode 1 -> w = 1/m[k]         (D^{-1}, applied both sides)
+    //      weight_mode 2 -> w = 1/m[k]         (D^{-1}, applied left only)
     if (my_rank == 0) { std::cout << "[step4] dup... " << std::flush; }
     Vec inv_sqrt = nullptr;
     VecDuplicate(mult, &inv_sqrt);
-    if (my_rank == 0) { std::cout << "copy... " << std::flush; }
     VecCopy(mult, inv_sqrt);
-    if (my_rank == 0) { std::cout << "recip... " << std::flush; }
-    VecReciprocal(inv_sqrt);
-    if (my_rank == 0) { std::cout << "sqrt... " << std::flush; }
-    VecSqrtAbs(inv_sqrt);
+    VecReciprocal(inv_sqrt);                 // 1/m[k]
+    if (weight_mode == 0) { VecSqrtAbs(inv_sqrt); }   // -> 1/sqrt(m[k]) for sASM
     if (my_rank == 0) { std::cout << "ok\n  [sASM step 4b] range... " << std::flush; }
 
     {
@@ -403,14 +407,16 @@ static void InstallScaledASM(KSP ksp, Mat A,
     if (my_rank == 0) { std::cout << "alloc ctx... " << std::flush; }
 
     SASMCtx *ctx = new SASMCtx;
-    ctx->inner_pc      = inner_pc;
-    ctx->inv_sqrt_mult = inv_sqrt;
+    ctx->inner_pc = inner_pc;
+    ctx->w        = inv_sqrt;            // D^{-1/2} (mode 0) or D^{-1} (mode 1/2)
+    ctx->pre      = (weight_mode == 2) ? 0 : 1;   // left+right except mode 2 (left/post only)
+    ctx->post     = 1;
     MatCreateVecs(A, &ctx->tmp, NULL);
 
     PCShellSetContext(pc_outer, ctx);
     PCShellSetApply  (pc_outer, SASMApply);
     PCShellSetDestroy(pc_outer, SASMDestroy);
-    PCShellSetName   (pc_outer, "sASM_BASIC_x_inv_mult");
+    PCShellSetName   (pc_outer, "weighted_ASM");
     if (my_rank == 0) { std::cout << "ok\n  [step6] PCSetUp(outer)... " << std::flush; }
 
     // 6. PCSetUp on the shell triggers any internal init; for our shell
@@ -479,12 +485,14 @@ int main(int argc, char *argv[])
             "0:CG+ASM_BASIC",
             "1:GMRES+ASM_RESTRICT (RAS)",
             "2:BCGS +ASM_RESTRICT (RAS)",
-            "3:CG+sASM (PCSHELL D^-1/2 BASIC D^-1/2)",
-            "4:CG+sASM + Chebyshev block solve" };
+            "3:CG+sASM (D^-1/2 BASIC D^-1/2)",
+            "4:CG+sASM + Chebyshev block solve",
+            "5:CG + D^-1 BASIC D^-1 (sym, over-norm)",
+            "6:D^-1 BASIC (non-symmetric, one-sided)" };
         std::cout << "================================================\n"
                   << "  asm_demo  (ranks=" << num_ranks
                   << ", fix_level=" << fix_level
-                  << ", scheme=" << (scheme>=0 && scheme<=4 ? scheme_name[scheme] : "?")
+                  << ", scheme=" << (scheme>=0 && scheme<=6 ? scheme_name[scheme] : "?")
                   << ", nx=" << nx << ")\n"
                   << "================================================\n";
     }
@@ -792,11 +800,12 @@ int main(int argc, char *argv[])
     // the user's -ksp_* options land on the KSP, then (b) overwrite the
     // outer PC with our PCSHELL.  Done in this order, the PCSHELL is the
     // final PC seen by KSPSolve and our installation is not clobbered.
-    if (scheme == 3 || scheme == 4)
+    if (scheme >= 3 && scheme <= 6)
     {
-        // scheme 3 = sASM + preonly/ICC block solve
-        // scheme 4 = sASM + Chebyshev(deg) block solve  (deg from
-        //            -localcheby, default 2)
+        // scheme 3 = sASM (D^-1/2 .. D^-1/2) + preonly/ICC block solve
+        // scheme 4 = sASM + Chebyshev(deg) block solve (deg from -localcheby, def 2)
+        // scheme 5 = D^-1 BASIC D^-1 (symmetric, over-normalized) + ICC
+        // scheme 6 = D^-1 BASIC      (non-symmetric, one-sided)    + ICC
         pcg.Customize(true);                       // runs KSPSetFromOptions
         KSP   ksp_raw = static_cast<KSP>(pcg);
         Mat   A_raw   = nullptr;
@@ -814,7 +823,8 @@ int main(int argc, char *argv[])
                 if (std::string(argv[i]) == "-localcheby" && i + 1 < argc)
                     cheby_deg = std::atoi(argv[i+1]);
         }
-        InstallScaledASM(ksp_raw, A_raw, overlap, icc_lev, my_rank, cheby_deg);
+        int weight_mode = (scheme == 5) ? 1 : (scheme == 6) ? 2 : 0;
+        InstallScaledASM(ksp_raw, A_raw, overlap, icc_lev, my_rank, cheby_deg, weight_mode);
     }
 
     double t0 = MPI_Wtime();

@@ -22,20 +22,28 @@
 #include <string.h>
 #include <math.h>
 
-/* ---- sASM PCSHELL (scheme 3) -- identical to pure_petsc_fem.c -------- */
+/* ---- diagonal-weighted ASM PCSHELL (mirrors asm_demo.cpp) -----------
+ *   apply(r) = [post? W .] M_BASIC^{-1} [pre? W .] r,   W = diag(w)
+ *   weight_mode 0: W=D^-1/2, pre=post=1  (sASM, sym)        [scheme 3/4]
+ *   weight_mode 1: W=D^-1,   pre=post=1  (sym, over-norm)   [scheme 5]
+ *   weight_mode 2: W=D^-1,   pre=0,post=1 (non-symmetric)   [scheme 6]
+ */
 typedef struct {
     PC  inner_pc;
-    Vec inv_sqrt_mult;
+    Vec w;          /* D^-1/2 or D^-1 */
     Vec tmp;
+    int pre;
+    int post;
 } SASMCtx;
 
 static PetscErrorCode sASMApply(PC pc, Vec r, Vec z)
 {
     SASMCtx *ctx = NULL;
     PetscCall(PCShellGetContext(pc, (void**)&ctx));
-    PetscCall(VecPointwiseMult(ctx->tmp, ctx->inv_sqrt_mult, r));
+    if (ctx->pre) PetscCall(VecPointwiseMult(ctx->tmp, ctx->w, r));
+    else          PetscCall(VecCopy(r, ctx->tmp));
     PetscCall(PCApply(ctx->inner_pc, ctx->tmp, z));
-    PetscCall(VecPointwiseMult(z, ctx->inv_sqrt_mult, z));
+    if (ctx->post) PetscCall(VecPointwiseMult(z, ctx->w, z));
     return PETSC_SUCCESS;
 }
 static PetscErrorCode sASMDestroy(PC pc)
@@ -44,7 +52,7 @@ static PetscErrorCode sASMDestroy(PC pc)
     PetscCall(PCShellGetContext(pc, (void**)&ctx));
     if (ctx) {
         PetscCall(PCDestroy(&ctx->inner_pc));
-        PetscCall(VecDestroy(&ctx->inv_sqrt_mult));
+        PetscCall(VecDestroy(&ctx->w));
         PetscCall(VecDestroy(&ctx->tmp));
         free(ctx);
     }
@@ -53,7 +61,7 @@ static PetscErrorCode sASMDestroy(PC pc)
 }
 static PetscErrorCode InstallScaledASM(KSP ksp, Mat A,
                                        PetscInt overlap, PetscInt icc_levels,
-                                       PetscInt cheby_deg)
+                                       PetscInt cheby_deg, int weight_mode)
 {
     // cheby_deg == 0 : block solve = preonly + ICC(icc_levels)   [scheme 3]
     // cheby_deg >= 1 : block solve = cheby_deg Chebyshev steps over ICC,
@@ -115,8 +123,8 @@ static PetscErrorCode InstallScaledASM(KSP ksp, Mat A,
     }
     PetscCall(VecDuplicate(mult, &invsqrt));
     PetscCall(VecCopy(mult, invsqrt));
-    PetscCall(VecReciprocal(invsqrt));
-    PetscCall(VecSqrtAbs(invsqrt));
+    PetscCall(VecReciprocal(invsqrt));                       /* 1/m[k] (D^-1) */
+    if (weight_mode == 0) PetscCall(VecSqrtAbs(invsqrt));    /* -> 1/sqrt(m[k]) for sASM */
     {
         PetscReal mn, mx;
         PetscCall(VecMin(mult, NULL, &mn));
@@ -130,13 +138,15 @@ static PetscErrorCode InstallScaledASM(KSP ksp, Mat A,
     PetscCall(KSPGetPC(ksp, &outer));
     PetscCall(PCSetType(outer, PCSHELL));
     SASMCtx *ctx = (SASMCtx*)malloc(sizeof(SASMCtx));
-    ctx->inner_pc      = inner;
-    ctx->inv_sqrt_mult = invsqrt;
+    ctx->inner_pc = inner;
+    ctx->w        = invsqrt;                       /* D^-1/2 (mode 0) or D^-1 (mode 1/2) */
+    ctx->pre      = (weight_mode == 2) ? 0 : 1;    /* mode 2 = left/post only */
+    ctx->post     = 1;
     PetscCall(MatCreateVecs(A, &ctx->tmp, NULL));
     PetscCall(PCShellSetContext(outer, ctx));
     PetscCall(PCShellSetApply  (outer, sASMApply));
     PetscCall(PCShellSetDestroy(outer, sASMDestroy));
-    PetscCall(PCShellSetName   (outer, "sASM_metis_partition"));
+    PetscCall(PCShellSetName   (outer, "weighted_ASM"));
     PetscCall(PCSetUp(outer));
     if (rank == 0) {
         printf("[sASM] PCSHELL installed (overlap=%d, icc_levels=%d)\n",
@@ -189,11 +199,14 @@ int main(int argc, char **argv)
     snprintf(bfn, sizeof(bfn), "mfem_b_nx%d_n%d.petscbin", nx, (int)size);
     if (rank == 0) {
         const char *sn[] = {"CG+ASM_BASIC", "GMRES+ASM_RESTRICT (RAS)",
-                            "BCGS+ASM_RESTRICT (RAS)", "CG+sASM (PCSHELL)"};
+                            "BCGS+ASM_RESTRICT (RAS)", "CG+sASM (D^-1/2 .. D^-1/2)",
+                            "CG+sASM+Chebyshev",
+                            "D^-1 BASIC D^-1 (sym, over-norm)",
+                            "D^-1 BASIC (non-symmetric)"};
         printf("================================================\n");
         printf("  pure_petsc_load  ranks=%d nx=%d scheme=%d:%s\n",
                (int)size, nx, scheme,
-               (scheme>=0 && scheme<=3) ? sn[scheme] : "?");
+               (scheme>=0 && scheme<=6) ? sn[scheme] : "?");
         printf("  matrix file = %s\n  rhs    file = %s\n", mfn, bfn);
         printf("================================================\n");
     }
@@ -310,7 +323,7 @@ int main(int argc, char **argv)
     PetscCall(KSPSetTolerances(ksp, 1e-6, 1e-12, PETSC_DEFAULT, 1000));
     PetscCall(KSPSetFromOptions(ksp));
 
-    if (scheme == 3 || scheme == 4) {
+    if (scheme >= 3 && scheme <= 6) {
         PetscInt overlap = 0, icc_lev = 0;
         PetscOptionsGetInt(NULL, NULL, "-pc_asm_overlap",       &overlap, NULL);
         PetscOptionsGetInt(NULL, NULL, "-sub_pc_factor_levels", &icc_lev, NULL);
@@ -321,7 +334,8 @@ int main(int argc, char **argv)
                 if (!strcmp(argv[i], "-localcheby") && i + 1 < argc)
                     cheby_deg = atoi(argv[i+1]);
         }
-        PetscCall(InstallScaledASM(ksp, A, overlap, icc_lev, cheby_deg));
+        int weight_mode = (scheme == 5) ? 1 : (scheme == 6) ? 2 : 0;
+        PetscCall(InstallScaledASM(ksp, A, overlap, icc_lev, cheby_deg, weight_mode));
     }
 
     double t0 = MPI_Wtime();
