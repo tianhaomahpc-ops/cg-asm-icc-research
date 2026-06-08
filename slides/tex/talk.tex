@@ -1,0 +1,329 @@
+% Academic talk (10 slides): overlap-dependent CG iteration growth in ASM,
+% from the MFEM<->PETSc bit-identical benchmark through the weighted-ASM ablation.
+% Minimal style, complete tables, every data table fully parameter-annotated.
+% Compile with XeLaTeX (ctex/Fandol).
+\PassOptionsToPackage{table}{xcolor}
+\documentclass[aspectratio=169,10pt]{beamer}
+
+\usepackage[fontset=fandol]{ctex}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+
+\definecolor{Struct}{HTML}{1F3A5F}
+\definecolor{Gray}{HTML}{6E6E6E}
+
+\usetheme{default}
+\usefonttheme{professionalfonts}
+\setbeamertemplate{navigation symbols}{}
+\setbeamercolor{structure}{fg=Struct}
+\setbeamercolor{frametitle}{fg=Struct}
+\setbeamerfont{frametitle}{series=\bfseries,size=\large}
+\setbeamercolor{normal text}{fg=black}
+\setbeamertemplate{itemize item}{\textbullet}
+\setbeamertemplate{itemize subitem}{--}
+\setbeamertemplate{blocks}[default]
+\setbeamercolor{block title}{fg=white,bg=Struct}
+\setbeamercolor{block body}{bg=Struct!6}
+\setbeamertemplate{frametitle}{\vskip0.5em\hspace{0.2em}\usebeamerfont{frametitle}\insertframetitle%
+  {\ifx\insertframesubtitle\empty\else\\[0.1em]\small\color{Gray}\insertframesubtitle\fi}\par}
+\setbeamertemplate{footline}{\hfill\footnotesize\color{Gray}\insertframenumber\,/\,\inserttotalframenumber\hspace{0.4cm}\vspace{3pt}}
+
+\newcommand{\ua}{$\uparrow$}
+\newcommand{\da}{$\downarrow$}
+\newcommand{\yes}{\ensuremath{\checkmark}}
+\newcommand{\no}{\ensuremath{\times}}
+\renewcommand{\arraystretch}{1.15}
+% standard fixed-parameter context line (Sys3), printed under data tables
+\newcommand{\ctx}{{\footnotesize\color{Gray}固定参数:Laplace($1$面 Dir$+5$面 Neu,$f{=}1$)· MFEM P1 四面体 $n_x{=}48$($117\,649$ DOF)· $4$ ranks METIS(mult $\in[1,3]$)· rtol$=10^{-6}$,max\_it$=2000$。}}
+
+\begin{document}
+
+% ===== S1 : problem statement =====
+\begin{frame}{问题}
+{\color{Struct}\bfseries 重叠型加性 Schwarz $+$ 子域 ICC 预条件下,CG 迭代次数随 overlap 增大而\emph{增加}:现象、成因与单层修复\par}
+\vskip0.5em
+\textbf{主测问题(Sys3,贯穿全部结果).}
+\[
+-\Delta u = 1\ \ \text{于}\ [0,1]^3,\qquad u=0\ (x{=}0\ \text{面}),\qquad \partial u/\partial n=0\ (\text{其余 }5\ \text{面}).
+\]
+\textbf{求解器栈.} \ 外层 CG $+$ \texttt{PCASM(BASIC)},overlap $O\in\{0,1,2\}$;子域不完全 Cholesky ICC($L$),$L\in\{0,1,2\}$,\texttt{preonly}。
+\vskip0.4em
+\textbf{反常.} \ 经典重叠 Schwarz 理论(子域精确解)预期 overlap 增大$\Rightarrow$条件数减小$\Rightarrow$迭代\emph{减少};实测\textbf{相反}。
+\vskip0.5em\hrule height0.3pt\vskip0.4em
+{\footnotesize 另两个问题作普遍性检验(同样现象,程度不同):\textbf{Sys1} reaction--diffusion $\tfrac1{\Delta t}M+\tfrac12K$(质量主导,良态);\textbf{Sys2} 全 Neumann 椭圆($K$ 奇异,$\ker=\mathrm{span}\{1\}$)。本报告主线为 Sys3。\\[0.2em]
+代码与数据:\texttt{github.com/tianhaomahpc-ops/cg-asm-icc-research}。}
+\end{frame}
+
+% ===== S2 : MFEM <-> PETSc benchmark =====
+\begin{frame}{基准:MFEM 与纯 PETSc 两套实现逐位一致}
+\framesubtitle{先确立"数字可信",以便把后续反常归因于数学而非实现}
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+\textbf{两套独立实现.}
+\begin{itemize}\itemsep0.25em\footnotesize
+  \item MFEM 装配矩阵 $\to$ PETSc 求解(\texttt{asm\_demo});
+  \item 纯 PETSc \emph{加载同一矩阵} $\to$ 求解(\texttt{pure\_petsc\_load})。
+\end{itemize}
+\vskip0.3em
+\textbf{逐位一致的三层对齐.}
+\begin{enumerate}\itemsep0.25em\footnotesize
+  \item 矩阵零容差过滤 $|a_{ij}|<10^{-12}$;
+  \item 共享同一 METIS 分区;
+  \item \texttt{MatLoad} 前用 \texttt{MatSetSizes} 预置逐进程行布局(绕开默认 re-chunk)。
+\end{enumerate}
+\end{column}
+\begin{column}{0.5\textwidth}
+\textbf{结果:EQ 的含义.} \footnotesize 同一组参数下,MFEM 与 PETSc 解得的迭代次数\emph{逐位相同}。
+\vskip0.3em
+\begin{center}\footnotesize
+\begin{tabular}{l c c}
+\toprule
+方案集合 & 组合数 & 一致 \\
+\midrule
+原方案 $\{0,3,4\}\times O\times L$ & 27 & $27/27$ \\
+新方案 $5,6$(全 $O,L,$Krylov) & 15 & $15/15$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vskip0.3em
+\footnotesize \texttt{-ksp\_monitor} 下每步预条件残差范数亦逐位相同。\par
+\vskip0.3em
+$\Rightarrow$ 后续任何反常都是\textbf{方法的数学性质},非某一边的实现产物。
+\end{column}
+\end{columns}
+\vskip0.5em
+\ctx
+\end{frame}
+
+% ===== S3 : the anomaly =====
+\begin{frame}{反常现象:overlap 增大,CG 迭代次数上升}
+\framesubtitle{方案 BASIC,外层 CG;扫 overlap $O$ 与 ICC 填充 $L$}
+\begin{center}
+\begin{tabular}{l ccc c}
+\toprule
+ICC 填充 & $O=0$ & $O=1$ & $O=2$ & 随 $O$ 趋势 \\
+\midrule
+$L=0$ & 132 & 148 & 179 & \ua\ 上升 \\
+$L=1$ & 102 & 102 & 117 & \ua\ 上升 \\
+$L=2$ & 87  & 92  & 90  & 近持平 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vskip0.5em
+\begin{itemize}\itemsep0.3em
+  \item $L=0$ 列最典型:$132\to148\to179$,与经典理论方向相反。
+  \item ICC 填充越高(子域解越精确),现象越弱——已暗示成因之一是\emph{子域求解精度}。
+\end{itemize}
+\vskip0.4em
+\ctx
+\end{frame}
+
+% ===== S4 : two coupled causes + nail-down table =====
+\begin{frame}{成因:两个耦合因素,用"换精确子域解"坐实}
+\framesubtitle{方案 BASIC,外层 CG,$L{=}0$;仅改变子域求解器,其余不变}
+\textbf{机制.}\ 预条件 CG 迭代数 $\sim\tfrac12\sqrt{\kappa}\,\ln(2/\varepsilon)$,单层加性 Schwarz 有
+\[
+\kappa(M^{-1}A)\ \lesssim\
+\underbrace{C_0^{2}(\delta)}_{\text{随 overlap }\downarrow}\ \cdot\
+\underbrace{N_c}_{\text{(B) 重叠重复计数}}\ \cdot\
+\underbrace{\omega_{\max}/\omega_{\min}}_{\text{(A) 子域不精确,精确时}=1}
+\]
+\begin{center}
+\begin{tabular}{l ccc c}
+\toprule
+子域求解器 & $O=0$ & $O=1$ & $O=2$ & 趋势 \\
+\midrule
+精确 Cholesky(去掉 A) & 52 & 34 & 30 & \da\ 下降 \\
+ICC$(0)$(不精确) & 132 & 148 & 179 & \ua\ 上升 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vskip0.4em
+\textbf{结论.}\ 去掉因素 A(子域改精确解),overlap 立即恢复"越大越好"。故反常 $=$ A(不精确 ICC)$\times$ B(BASIC 重复计数)\emph{耦合}所致。\quad\ctx
+\end{frame}
+
+% ===== S5 : sASM math + impl + fix =====
+\begin{frame}{修复:对称缩放加性 Schwarz(sASM)}
+\framesubtitle{去掉因素 B、保持对称、保持单层、保持外层 CG}
+\begin{columns}[T]
+\begin{column}{0.46\textwidth}
+\textbf{数学.}\ 记 $D=\operatorname{diag}(m_k)$,$m_k=$ 自由度 $k$ 所属子域数:
+\[
+M^{-1}_{\text{sASM}}=D^{-1/2}\,M^{-1}_{\text{BASIC}}\,D^{-1/2}.
+\]
+{\footnotesize 重叠区的 $m_k$ 重复被两侧 $1/\sqrt{m_k}$ 抵消;$D$ 对角$\Rightarrow$算子对称$\Rightarrow$CG 合法;$O{=}0$ 时 $D{=}I$ 退化为 BASIC。}
+\vskip0.3em
+\textbf{实现(PCSHELL,3 行 apply).}
+{\footnotesize\[ z=D^{-1/2}\!\odot\big(M^{-1}_{\text{BASIC}}\,(D^{-1/2}\!\odot r)\big) \]}
+{\footnotesize $D$ 由 \texttt{PCASMGetLocalSubdomains} 的指示向量累加得到。}
+\end{column}
+\begin{column}{0.54\textwidth}
+\textbf{修复结果(外层 CG,$L{=}0$;迭代次数 / 墙钟秒).}
+\vskip0.2em
+\begin{center}\footnotesize
+\begin{tabular}{l cc cc cc}
+\toprule
+ & \multicolumn{2}{c}{$O=0$} & \multicolumn{2}{c}{$O=1$} & \multicolumn{2}{c}{$O=2$} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+方案 & it & s & it & s & it & s \\
+\midrule
+BASIC & 132 & 0.20 & 148 & 0.26 & 179 & 0.32 \\
+sASM  & 132 & 0.21 & 104 & 0.18 & 103 & 0.18 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vskip0.2em
+{\footnotesize $132\to104\to103$,overlap 恢复有效;$O{=}2$ 处迭代与时间均近乎减半。时间为 3 次最优,负载机器仅供参考。}
+\end{column}
+\end{columns}
+\vskip0.4em
+\ctx
+\end{frame}
+
+% ===== S6 : unified framework table =====
+\begin{frame}{统一框架:对角加权 ASM 变体(后三页的导航图)}
+\framesubtitle{两条轴:归一化"剂量"(纵)与"对称与否"(横);sASM 落在"剂量恰好 $+$ 对称"}
+\begin{center}
+\begin{tabular}{l l c c c c}
+\toprule
+记号 & $M^{-1}$ & 归一化总量 & 对称 & 适配 Krylov & scheme \\
+\midrule
+BASIC & $\sum_i R_i^{\top}\widetilde A_i^{-1}R_i$ & 无 & 是 & CG & 0 \\
+\textbf{sASM} & $D^{-1/2}M_{\text B}^{-1}D^{-1/2}$ & $D^{-1}$ & 是 & CG & 3 \\
+exp2 & $D^{-1}M_{\text B}^{-1}D^{-1}$ & $D^{-2}$(过量) & 是 & CG & 5 \\
+exp3 & $D^{-1}M_{\text B}^{-1}$ & $D^{-1}$ & 否 & GMRES/FCG & 6 \\
+RAS & $\sum_i \widetilde R_i^{\top}\widetilde A_i^{-1}R_i$ & $D^{-1}$(0/1) & 否 & GMRES/FCG & 0$+$restrict \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vskip0.6em
+\begin{itemize}\itemsep0.3em
+  \item 要抵消 B(重复计数 $\textstyle\sum_i R_i^{\top}R_i=D$)共需一份 $D^{-1}$ 权重;\emph{怎么放、放多少、配什么 Krylov} 即三条轴。
+  \item S7 比\textbf{剂量轴}(exp2),S8 比\textbf{对称轴}(exp1$+$exp3),S9 比\textbf{Krylov 轴}(exp5$+$exp4)。
+\end{itemize}
+\end{frame}
+
+% ===== S7 : dose axis (exp 2) =====
+\begin{frame}{剂量轴(实验 2):$D^{-1/2}$ 是正确剂量,过量次优}
+\framesubtitle{外层 CG;BASIC / sASM($D^{-1/2}$)/ exp2($D^{-1}$ 两侧),迭代次数}
+\begin{center}
+\begin{tabular}{cc ccc}
+\toprule
+$O$ & $L$ & BASIC & sASM $D^{-1/2}$ & exp2 $D^{-1}$ \\
+\midrule
+0 & 0 & 132 & 132 & 132 \\
+1 & 0 & 148 & \textbf{104} & 123 \\
+2 & 0 & 179 & \textbf{103} & 128 \\
+\midrule
+1 & 1 & 102 & 75 & 92 \\
+1 & 2 & 92  & 70 & 80 \\
+2 & 2 & 90  & 67 & 81 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vskip0.5em
+\begin{itemize}\itemsep0.3em
+  \item $O{=}0$ 时 $D{=}I$,三者相同(自检)。
+  \item $O\ge1$ 时 exp2 \textbf{恒在 BASIC 与 sASM 之间}:两侧 $D^{-1}$(总量 $D^{-2}$)过度归一化,优于 BASIC 但不如正确剂量 $D^{-1/2}$。
+\end{itemize}
+\vskip0.3em
+\ctx
+\end{frame}
+
+% ===== S8 : symmetry axis (exp 1 + 3) =====
+\begin{frame}{对称轴(实验 1 $+$ 3):非对称 PC 配 CG 失效}
+\framesubtitle{子域 ICC$(0)$;比较外层 CG 与 GMRES;迭代次数(DIV $=$ 达 2000 上限未收敛)}
+\begin{center}
+\begin{tabular}{c cc c}
+\toprule
+$O$ & RAS $+$ CG & exp3($D^{-1}$单侧)$+$ CG & 对照:RAS $+$ GMRES \\
+\midrule
+0 & 132 & 132 & 265 \\
+1 & \textbf{2000 DIV} & \textbf{2000 DIV} & 232 \\
+2 & 111 & \textbf{2000 DIV} & 136 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vskip0.5em
+\begin{itemize}\itemsep0.3em
+  \item $O{=}0$ 时 RAS$=$exp3$=$BASIC(对称),CG 正常。
+  \item $O\ge1$:RAS$+$CG 飘忽($O{=}1$ 发散、$O{=}2$ 又收敛),exp3$+$CG 稳定发散——\textbf{非对称破坏 CG 的收敛保证}。
+  \item 同一非对称 PC 改配 GMRES 即正常收敛(右列)。
+\end{itemize}
+\vskip0.3em
+\ctx
+\end{frame}
+
+% ===== S9 : Krylov axis (exp 5 + 4) =====
+\begin{frame}{Krylov 轴(实验 5 $+$ 4):FCG 救活非对称;GMRES 高迭代源于 restart}
+\framesubtitle{子域 ICC$(0)$,$L{=}0$;迭代次数}
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+\textbf{实验 5:RAS $+$ FCG(flexible CG).}
+\vskip0.2em
+\begin{center}\footnotesize
+\begin{tabular}{c ccc}
+\toprule
+$O$ & RAS$+$FCG & RAS$+$CG & sASM$+$CG \\
+\midrule
+0 & 132 & 132 & 132 \\
+1 & \textbf{97} & 2000 DIV & 104 \\
+2 & \textbf{93} & 111 & 103 \\
+\bottomrule
+\end{tabular}
+\end{center}
+{\footnotesize \texttt{mmax} 取 $30/60/120/600$($O{=}2$)恒为 $93$:短截断即足。FCG 单步比 CG 贵(存 $\sim$mmax 个方向)。}
+\end{column}
+\begin{column}{0.5\textwidth}
+\textbf{实验 4:RAS $+$ GMRES,restart 扫描($O{=}1$).}
+\vskip0.2em
+\begin{center}\footnotesize
+\begin{tabular}{c ccccc}
+\toprule
+restart & 30 & 60 & 120 & 240 & 600 \\
+\midrule
+iter & 232 & 147 & 95 & 95 & 95 \\
+\bottomrule
+\end{tabular}
+\end{center}
+{\footnotesize 修正 Gram--Schmidt 与经典 Gram--Schmidt 逐行\emph{完全相同}。满 GMRES(restart $\ge120$)下 RAS 随 $O$:$129\to95\to92$,单调下降。}
+\end{column}
+\end{columns}
+\vskip0.5em
+\begin{itemize}\itemsep0.25em\footnotesize
+  \item FCG 容忍非对称 RAS($O{=}1$ 处普通 CG 发散,FCG 收敛 $97$),且 \texttt{mmax}$=30$ 即达满 GMRES 水平($97/93\approx95/92$)。
+  \item 实验 1/3 中 GMRES "看着差" 主要是 \textbf{restart$=30$ 的假象},非正交化损失;放大 restart 即回落。
+\end{itemize}
+\vskip0.2em\ctx
+\end{frame}
+
+% ===== S10 : conclusion + decision =====
+\begin{frame}{结论与决策}
+\textbf{成因(为何 overlap 增大、迭代上升).}\ overlap 本应通过 $C_0^2(\delta)\!\downarrow$ 改善条件数,但被
+\textbf{A}(不精确 ICC 的 $\omega_{\max}/\omega_{\min}$)$\times$\textbf{B}(BASIC 重叠重复计数 $N_c$)耦合反超 $\Rightarrow$ 净上升;去除任一即恢复下降。
+\vskip0.4em
+\begin{center}\footnotesize
+\begin{tabular}{l c c c c l}
+\toprule
+方法 & 对称 & CG & GMRES & FCG & overlap 趋势($L{=}0$) \\
+\midrule
+BASIC & 是 & \yes \emph{反常}\ua & — & — & $132\to148\to179$ \\
+sASM $D^{-1/2}$ & 是 & \yes \textbf{最优} & — & — & $132\to104\to103$ \\
+exp2 $D^{-1}$ 两侧 & 是 & \yes 次优 & — & — & $132\to123\to128$ \\
+exp3 $D^{-1}$ 单侧 & 否 & \no 发散 & \yes(restart 限) & \yes & — \\
+RAS & 否 & 飘忽 & \yes 满GMRES $129\to95\to92$ & \yes $97\to93$ & — \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vskip0.4em
+\textbf{各实验最终结论.}
+\begin{enumerate}\itemsep0.2em\footnotesize
+  \item 剂量:$D^{-1/2}$ 最优,过量($D^{-2}$)次优,无(BASIC)反常上升。
+  \item 对称:对称是 CG 的硬约束;非对称 PC 配 CG 失效(exp3 稳定发散、RAS 飘忽)。
+  \item Krylov:非对称可由 FCG 救活(短截断即达满 GMRES);GMRES 高迭代源于 restart 而非正交化。
+  \item 选型:对称路线选 \textbf{sASM};非对称路线选 \textbf{RAS$+$FCG}。两者均单层、保持 overlap 增大$\Rightarrow$迭代下降。
+\end{enumerate}
+\end{frame}
+
+\end{document}
