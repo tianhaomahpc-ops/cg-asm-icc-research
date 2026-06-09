@@ -435,7 +435,8 @@ static void InstallScaledASM(KSP ksp, Mat A,
 // hand it to either MFEM's OptionsParser or PETSc, so neither one yells.
 // Mutates argc/argv in place.
 static void ExtractOwnOptions(int &argc, char **argv,
-                              int &fix_level, int &nx, int &scheme, bool &warmup)
+                              int &fix_level, int &nx, int &scheme, bool &warmup,
+                              bool &pure_neumann)   // -pure_neumann: drop Dirichlet face -> Sys2
 {
     int out = 1;                       // keep argv[0]
     for (int i = 1; i < argc; ++i)
@@ -457,6 +458,10 @@ static void ExtractOwnOptions(int &argc, char **argv,
         {
             warmup = true;  continue;  // so the timed Mult is solve-only (PC pre-set-up)
         }
+        if (a == "-pure_neumann")      // no value: all-Neumann singular (Sys2)
+        {
+            pure_neumann = true;  continue;
+        }
         argv[out++] = argv[i];         // keep everything else
     }
     argc = out;
@@ -473,7 +478,8 @@ int main(int argc, char *argv[])
     int nx        = 24;
     int scheme    = 0;   // 0=CG+BASIC, 1=GMRES+RAS, 2=BCGS+RAS, 3=CG+sASM
     bool warmup   = false;   // -warmup: one untimed solve so time= is solve-only
-    ExtractOwnOptions(argc, argv, fix_level, nx, scheme, warmup);
+    bool pure_neumann = false;   // -pure_neumann: drop Dirichlet -> singular Sys2
+    ExtractOwnOptions(argc, argv, fix_level, nx, scheme, warmup, pure_neumann);
 
     // Boot PETSc through MFEM (no rc file; everything via CLI).
     MFEMInitializePetsc(&argc, &argv, NULL, NULL);
@@ -559,7 +565,9 @@ int main(int argc, char *argv[])
     // -------- 3) essential (Dirichlet) DOF list -------------------------
     Array<int> ess_bdr(pmesh.bdr_attributes.Max());
     ess_bdr = 0;
-    ess_bdr[dirichlet_attr - 1] = 1;   // mark only the x=0 face
+    if (!pure_neumann)
+        ess_bdr[dirichlet_attr - 1] = 1;   // mark only the x=0 face (Sys3)
+    // pure_neumann (Sys2): leave ess_bdr all-zero -> all 6 faces Neumann -> singular K
     Array<int> ess_tdof_list;
     fes.GetEssentialTrueDofs(ess_bdr, ess_tdof_list);
 
@@ -637,6 +645,22 @@ int main(int argc, char *argv[])
     Vector X, B;
     a.FormLinearSystem(ess_tdof_list, u_gf, b, A_hypre, X, B);
 
+    // pure_neumann (Sys2): A is singular with ker = span{1}.  Make the RHS
+    // compatible (orthogonal to the constant null space) by subtracting its
+    // global mean, so sum(B) = 0.  The null space itself is attached to the
+    // PETSc operator below via MatSetNullSpace.
+    if (pure_neumann)
+    {
+        double loc[2] = {0.0, (double)B.Size()}, glob[2] = {0.0, 0.0};
+        for (int i = 0; i < B.Size(); ++i) loc[0] += B(i);
+        MPI_Allreduce(loc, glob, 2, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        const double mean = glob[0] / glob[1];
+        for (int i = 0; i < B.Size(); ++i) B(i) -= mean;
+        if (my_rank == 0)
+            std::cout << "[PURE_NEUMANN] singular K, ker=span{1}; RHS mean removed "
+                      << "(global N=" << (long)glob[1] << ")\n";
+    }
+
     if (my_rank == 0)
     {
         std::cout << "[ASSEMBLY] hypre matrix global rows = "
@@ -650,6 +674,18 @@ int main(int argc, char *argv[])
     PetscParMatrix A_petsc;
     HypreToPetscAIJ(A_hypre, A_petsc, "demo_A",
                     my_rank, fix_level, /*assume_spd=*/true);
+
+    // pure_neumann (Sys2): attach the constant null space so the outer Krylov
+    // method projects it out of the residual/iterates (and removes it from the
+    // RHS at KSPSolve).  Subdomain blocks remain non-singular (Dirichlet cuts),
+    // so ICC/Chebyshev sub-solves are unaffected.
+    if (pure_neumann)
+    {
+        MatNullSpace nsp = NULL;
+        MatNullSpaceCreate(PETSC_COMM_WORLD, PETSC_TRUE, 0, NULL, &nsp);
+        MatSetNullSpace(static_cast<Mat>(A_petsc), nsp);
+        MatNullSpaceDestroy(&nsp);
+    }
 
     // Dump the assembled, METIS-partitioned PETSc matrix to binary so the
     // pure-PETSc demo can MatLoad it and run the IDENTICAL KSP problem

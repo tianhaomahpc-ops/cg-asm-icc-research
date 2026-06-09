@@ -27,7 +27,7 @@
 \setbeamercolor{block body}{bg=Struct!6}
 \setbeamertemplate{frametitle}{\vskip0.5em\hspace{0.2em}\usebeamerfont{frametitle}\insertframetitle%
   {\ifx\insertframesubtitle\empty\else\\[0.1em]\small\color{Gray}\insertframesubtitle\fi}\par}
-\setbeamertemplate{footline}{\hfill\footnotesize\color{Gray}\ifnum\insertframenumber>12 附录\else\insertframenumber\,/\,12\fi\hspace{0.4cm}\vspace{3pt}}
+\setbeamertemplate{footline}{\hfill\footnotesize\color{Gray}\ifnum\insertframenumber>13 附录\else\insertframenumber\,/\,13\fi\hspace{0.4cm}\vspace{3pt}}
 
 \newcommand{\ua}{$\uparrow$}
 \newcommand{\da}{$\downarrow$}
@@ -389,6 +389,29 @@ sASM & $O2,L1$ & 73 & 0.124 s & 285 & $\sim$6 向量 & 是 \\
 \end{itemize}
 \end{column}
 \end{columns}
+\end{frame}
+
+% ===== S9c : cross-system four-method optima =====
+\begin{frame}{跨系统验证:四方法在 Sys1 / Sys2 / Sys3 上的最优}
+\framesubtitle{$n_x{=}48$,4 ranks;每格 = 最优配置 · 外层迭代 · solve-only 时间(warm,best-of-3/5)}
+\begin{center}\footnotesize\setlength{\tabcolsep}{5pt}
+\begin{tabular}{l c c c}
+\toprule
+方法 & Sys1(reaction--diffusion) & Sys2(pure Neumann 奇异) & Sys3(Laplace 1D+5N) \\
+\midrule
+BASIC & $O0,L1$ · 26 · 0.048 & $O1,L2$ · 67 · 0.121 & $O0,L2$ · 87 · 0.145 \\
+sASM & $O2,L1$ · 18 · 0.041 & $O2,L2$ · 54 · 0.110 & $O2,L1$ · 73 · 0.124 \\
+\textbf{sASM+Cheby} & $O3,L1$ · \textbf{11} · 0.042 & $O2,L1$ · \textbf{42} · 0.106 & $O2,L1$ · \textbf{48} · 0.115 \\
+\textbf{RAS+GMRES} & $O3,L1$ · 15 · \textbf{0.024} & $O2,L2$ · 40 · \textbf{0.072} & $O3,L2$ · 51 · \textbf{0.102} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vskip0.4em
+\begin{itemize}\itemsep0.2em\footnotesize
+  \item \textbf{排名三系统一致}:时间 RAS+GMRES $<$ sASM+Cheby $\lesssim$ sASM $<$ BASIC;迭代 sASM+Cheby 最少、BASIC 最多。
+  \item RAS+GMRES 领先在良态问题最大(Sys1 $\sim$1.7$\times$),Sys3 最小;代价(内存 $\sim$10$\times$、非对称)与系统无关。
+  \item \textbf{反常$+$修复三系统都成立}:Sys2(奇异)BASIC 随 $O$ 仍 $102\to110\to134$↑,sASM $102\to75\to74$↓。
+\end{itemize}
 \end{frame}
 
 % ===== S10 : conclusion + decision =====

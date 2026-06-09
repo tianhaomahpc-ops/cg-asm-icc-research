@@ -296,7 +296,38 @@ Chebyshev 步在子域内(`COMM_SELF`),**零额外全局归约**。**最优:$O2,
 
 ---
 
-## 10. 综合结论
+## 10. 跨系统验证:四方法在 Sys1 / Sys2 / Sys3 上的最优
+
+**目的**:把四种方法在三个模型问题上各自调到最优,看排名是否一致。
+**方法**:同一公平口径(`-warmup` solve-only,best-of-3/5)。
+- **Sys1** = reaction–diffusion $(1/\Delta t)M+\tfrac12K$,$\Delta t=10^{-2}$(`asm_demo -dt 1e-2`);
+- **Sys2** = 全 Neumann 奇异 Laplace,$\ker=\mathrm{span}\{1\}$(`asm_demo -pure_neumann`,
+  `MatNullSpaceCreate(const)` + RHS 去均值;真残差 $1.3\times10^{-6}$,解 mean $\approx0$);
+- **Sys3** = 1 面 Dirichlet + 5 面 Neumann Laplace(主线)。
+数据 `sys1_nx48_n4.csv` / `sys2_nx48_n4.csv`(脚本 `collect_sys1.sh` / `collect_sys2.sh`)。
+
+| 方法 | Sys1(dt=1e-2) | Sys2(pure Neumann) | Sys3(1D+5N) |
+|---|---|---|---|
+| BASIC | $O0,L1$ · 26 · 0.048 s | $O1,L2$ · 67 · 0.121 s | $O0,L2$ · 87 · 0.145 s |
+| sASM | $O2,L1$ · 18 · 0.041 s | $O2,L2$ · 54 · 0.110 s | $O2,L1$ · 73 · 0.124 s |
+| **sASM+Cheby(d2)** | $O3,L1$ · **11** · 0.042 s | $O2,L1$ · **42** · 0.106 s | $O2,L1$ · **48** · 0.115 s |
+| **RAS+GMRES(r60)** | $O3,L1$ · 15 · **0.024 s** | $O2,L2$ · 40 · **0.072 s** | $O3,L2$ · 51 · **0.102 s** |
+
+(每格为 最优配置 · 外层迭代 · solve-only 时间。)
+
+**结论(三系统一致)**:
+1. **时间排名恒为** RAS+GMRES $<$ sASM+Cheby $\lesssim$ sASM $<$ BASIC。
+2. **外层迭代**:sASM+Cheby 最少(或与 RAS+GMRES 并列),BASIC 最多。
+3. **RAS+GMRES 的领先在良态问题上最大**(Sys1 ~1.7$\times$、Sys2 ~1.5$\times$),Sys3 最小($\sim$1.13$\times$);
+   但其代价(~10$\times$ 内存、非对称)与系统无关。
+4. **sASM+Cheby $\approx$ sASM 在良态 Sys1**(Chebyshev 省的迭代被每步 deg$\times$成本抵消),
+   但迭代恒最少;在 ill-conditioned 的 Sys3 上 Chebyshev 的时间优势更明显。
+5. **反常 + 修复在三系统都成立**:如 Sys2 BASIC($L{=}0$)随 overlap $102\to110\to134$(↑,**奇异系统也发病**),
+   sASM $102\to75\to74\to74$(↓,修好)。
+
+---
+
+## 11. 综合结论
 
 | 方法 | 对称 | 配 CG | 配 GMRES | 配 FCG | overlap 趋势 |
 |---|---|---|---|---|---|
