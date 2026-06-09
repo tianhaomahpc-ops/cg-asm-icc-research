@@ -27,7 +27,7 @@
 \setbeamercolor{block body}{bg=Struct!6}
 \setbeamertemplate{frametitle}{\vskip0.5em\hspace{0.2em}\usebeamerfont{frametitle}\insertframetitle%
   {\ifx\insertframesubtitle\empty\else\\[0.1em]\small\color{Gray}\insertframesubtitle\fi}\par}
-\setbeamertemplate{footline}{\hfill\footnotesize\color{Gray}\ifnum\insertframenumber>11 附录\else\insertframenumber\,/\,11\fi\hspace{0.4cm}\vspace{3pt}}
+\setbeamertemplate{footline}{\hfill\footnotesize\color{Gray}\ifnum\insertframenumber>12 附录\else\insertframenumber\,/\,12\fi\hspace{0.4cm}\vspace{3pt}}
 
 \newcommand{\ua}{$\uparrow$}
 \newcommand{\da}{$\downarrow$}
@@ -354,6 +354,41 @@ iter & 232 & 147 & 95 & 95 & 95 \\
   \item 实验 1/3 中 GMRES "看着差" 主要是 \textbf{restart$=30$ 的假象},非正交化损失;放大 restart 即回落。
 \end{itemize}
 \vskip0.2em\ctx
+\end{frame}
+
+% ===== S9b : four-way performance comparison =====
+\begin{frame}{四方性能对比与选型(各自调到最优)}
+\framesubtitle{Sys3,$n_x{=}48$,4 ranks;时间为 solve-only(warm,best-of-5),归约由 \texttt{-log\_view}}
+\begin{center}\footnotesize\setlength{\tabcolsep}{5pt}
+\begin{tabular}{l c c c c c c}
+\toprule
+方法 & 最优配置 & 外层 iter & solve-only & 全局归约 & Krylov 内存 & 对称/CG \\
+\midrule
+BASIC & $O0,L2$ & 87 & 0.145 s & 310 & $\sim$6 向量 & 是 \\
+sASM & $O2,L1$ & 73 & 0.124 s & 285 & $\sim$6 向量 & 是 \\
+\textbf{sASM$+$Cheby($d2$)} & $O2,L1$ & \textbf{48} & \textbf{0.115 s} & 278 & $\sim$10 向量 & \textbf{是} \\
+\textbf{RAS$+$GMRES($r60$)} & $O3,L2$ & 51 & \textbf{0.102 s} & \textbf{233} & $\sim$62 向量 & 否 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vskip0.4em
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+\begin{itemize}\itemsep0.2em\footnotesize
+  \item 时间:RAS$+$GMRES $<$ sASM$+$Cheby $<$ sASM $<$ BASIC。
+  \item 外层迭代:\textbf{sASM$+$Cheby 最少(48)}(Chebyshev 更好地逼近子块逆,每步零额外全局归约)。
+  \item 经典 GS 把正交化合并成一次 \texttt{VecMDot} $\Rightarrow$ GMRES 归约不比 CG 多。
+\end{itemize}
+\end{column}
+\begin{column}{0.5\textwidth}
+\textbf{选型.}
+\begin{itemize}\itemsep0.2em\footnotesize
+  \item 对称$/$CG$/$低内存(心脏 HPC 约束):\textbf{sASM$+$Chebyshev(d2)}——迭代最少、快过 sASM、内存仍低。
+  \item 内存充裕$/$可弃对称:\textbf{RAS$+$GMRES} 最快、归约最少,但内存 $\sim$10$\times$。
+  \item 最省事:纯 sASM(无 deg$/$restart 可调)。
+\end{itemize}
+\end{column}
+\end{columns}
 \end{frame}
 
 % ===== S10 : conclusion + decision =====
