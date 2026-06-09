@@ -435,7 +435,7 @@ static void InstallScaledASM(KSP ksp, Mat A,
 // hand it to either MFEM's OptionsParser or PETSc, so neither one yells.
 // Mutates argc/argv in place.
 static void ExtractOwnOptions(int &argc, char **argv,
-                              int &fix_level, int &nx, int &scheme)
+                              int &fix_level, int &nx, int &scheme, bool &warmup)
 {
     int out = 1;                       // keep argv[0]
     for (int i = 1; i < argc; ++i)
@@ -453,6 +453,10 @@ static void ExtractOwnOptions(int &argc, char **argv,
         {
             scheme = std::atoi(argv[++i]);  continue;
         }
+        if (a == "-warmup")            // no value: do one untimed solve first
+        {
+            warmup = true;  continue;  // so the timed Mult is solve-only (PC pre-set-up)
+        }
         argv[out++] = argv[i];         // keep everything else
     }
     argc = out;
@@ -468,7 +472,8 @@ int main(int argc, char *argv[])
     int fix_level = 0;   // 0=baseline, 1=zeros, 2=+symmetric, 3=+shift/RCM
     int nx        = 24;
     int scheme    = 0;   // 0=CG+BASIC, 1=GMRES+RAS, 2=BCGS+RAS, 3=CG+sASM
-    ExtractOwnOptions(argc, argv, fix_level, nx, scheme);
+    bool warmup   = false;   // -warmup: one untimed solve so time= is solve-only
+    ExtractOwnOptions(argc, argv, fix_level, nx, scheme, warmup);
 
     // Boot PETSc through MFEM (no rc file; everything via CLI).
     MFEMInitializePetsc(&argc, &argv, NULL, NULL);
@@ -827,6 +832,15 @@ int main(int argc, char *argv[])
         InstallScaledASM(ksp_raw, A_raw, overlap, icc_lev, my_rank, cheby_deg, weight_mode);
     }
 
+    if (warmup)
+    {
+        // One untimed solve: forces all lazy PCSetUp (ICC factorisation, overlap)
+        // to happen now, so the timed Mult below measures solve-only cost.
+        // CG zeros the initial guess each Mult, so the timed solve does the same
+        // work as a cold solve -- fair, setup-excluded ("amortised") timing.
+        Vector Xtmp(X);
+        pcg.Mult(B, Xtmp);
+    }
     double t0 = MPI_Wtime();
     pcg.Mult(B, X);
     double t1 = MPI_Wtime();

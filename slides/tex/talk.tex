@@ -27,7 +27,7 @@
 \setbeamercolor{block body}{bg=Struct!6}
 \setbeamertemplate{frametitle}{\vskip0.5em\hspace{0.2em}\usebeamerfont{frametitle}\insertframetitle%
   {\ifx\insertframesubtitle\empty\else\\[0.1em]\small\color{Gray}\insertframesubtitle\fi}\par}
-\setbeamertemplate{footline}{\hfill\footnotesize\color{Gray}\ifnum\insertframenumber>10 附录\else\insertframenumber\,/\,10\fi\hspace{0.4cm}\vspace{3pt}}
+\setbeamertemplate{footline}{\hfill\footnotesize\color{Gray}\ifnum\insertframenumber>11 附录\else\insertframenumber\,/\,11\fi\hspace{0.4cm}\vspace{3pt}}
 
 \newcommand{\ua}{$\uparrow$}
 \newcommand{\da}{$\downarrow$}
@@ -96,26 +96,31 @@ $\Rightarrow$ 后续任何反常都是\textbf{方法的数学性质},非某一�
 \ctx
 \end{frame}
 
-% ===== S3 : the anomaly =====
-\begin{frame}{反常现象:overlap 增大,CG 迭代次数上升}
-\framesubtitle{方案 BASIC,外层 CG;扫 overlap $O$ 与 ICC 填充 $L$}
-\begin{center}
-\begin{tabular}{l ccc c}
+% ===== S3 : the anomaly + the flip (wide sweep) =====
+\begin{frame}{反常现象与翻转:趋势随 ICC 精度改变}
+\framesubtitle{方案 BASIC,外层 CG;完整扫描 $O=0\text{–}5$,$L=0\text{–}6$(迭代次数)}
+\begin{center}\footnotesize\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c ccccccc}
 \toprule
-ICC 填充 & $O=0$ & $O=1$ & $O=2$ & 随 $O$ 趋势 \\
+$O\backslash L$ & 0 & 1 & 2 & 3 & 4 & 5 & 6 \\
 \midrule
-$L=0$ & 132 & 148 & 179 & \ua\ 上升 \\
-$L=1$ & 102 & 102 & 117 & \ua\ 上升 \\
-$L=2$ & 87  & 92  & 90  & 近持平 \\
+0 & 132 & 102 & 87 & 77 & 72 & 66 & 64 \\
+1 & 148 & 102 & 92 & 75 & 65 & 56 & 50 \\
+2 & 179 & 117 & 90 & 74 & 65 & 57 & 51 \\
+3 & 199 & 130 & 103 & 80 & \textbf{59} & 56 & 50 \\
+4 & 203 & 133 & 105 & 83 & 66 & 55 & \textbf{46} \\
+5 & 202 & 133 & 106 & 83 & 68 & 56 & 48 \\
+\midrule
+随 $O$ & \ua & \ua & \ua & $\approx$ & \da & \da & \da \\
 \bottomrule
 \end{tabular}
 \end{center}
-\vskip0.5em
-\begin{itemize}\itemsep0.3em
-  \item $L=0$ 列最典型:$132\to148\to179$,与经典理论方向相反。
-  \item ICC 填充越高(子域解越精确),现象越弱——已暗示成因之一是\emph{子域求解精度}。
+\vskip0.2em
+\begin{itemize}\itemsep0.2em\footnotesize
+  \item 低 ICC 填充($L\le3$):overlap 增大 $\Rightarrow$ 迭代\textbf{上升}(反常);$L{=}0$ 最典型 $132\to202$。
+  \item \textbf{翻转点 $L\approx4\text{–}5$}:$L{=}4$ 起 overlap 转为\textbf{有益}($O{=}3$ 取 $59<72$),$L{=}6$ 单调 $64\to46$。
+  \item 与成因一致:ICC 越精确 $\Rightarrow$ 因素 A($\omega$)越小 $\Rightarrow$ $C_0^2(\delta)$ 的下降占上风。
 \end{itemize}
-\vskip0.4em
 \ctx
 \end{frame}
 
@@ -161,7 +166,7 @@ M^{-1}_{\text{sASM}}=D^{-1/2}\,M^{-1}_{\text{BASIC}}\,D^{-1/2}.
 {\footnotesize $D$ 由 \texttt{PCASMGetLocalSubdomains} 的指示向量累加得到。}
 \end{column}
 \begin{column}{0.54\textwidth}
-\textbf{修复结果(外层 CG,$L{=}0$;迭代次数 / 墙钟秒).}
+\textbf{修复结果(外层 CG,$L{=}0$;迭代 / solve-only 秒).}
 \vskip0.2em
 \begin{center}\footnotesize
 \begin{tabular}{l cc cc cc}
@@ -170,17 +175,68 @@ M^{-1}_{\text{sASM}}=D^{-1/2}\,M^{-1}_{\text{BASIC}}\,D^{-1/2}.
 \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
 方案 & it & s & it & s & it & s \\
 \midrule
-BASIC & 132 & 0.20 & 148 & 0.26 & 179 & 0.32 \\
-sASM  & 132 & 0.21 & 104 & 0.18 & 103 & 0.18 \\
+BASIC & 132 & 0.19 & 148 & 0.24 & 179 & 0.29 \\
+sASM  & 132 & 0.20 & 104 & 0.17 & 103 & 0.17 \\
 \bottomrule
 \end{tabular}
 \end{center}
 \vskip0.2em
-{\footnotesize $132\to104\to103$,overlap 恢复有效;$O{=}2$ 处迭代与时间均近乎减半。时间为 3 次最优,负载机器仅供参考。}
+{\footnotesize $132\to104\to103$,overlap 恢复有效;$O{=}2$ 处迭代与时间均近乎减半。时间为 solve-only(warm,best-of-5),负载机器仅供参考。}
 \end{column}
 \end{columns}
 \vskip0.4em
 \ctx
+\end{frame}
+
+% ===== S5b : ASM vs sASM, wide sweep + optimal iteration/time =====
+\begin{frame}{ASM vs sASM:更大范围扫描下的迭代与时间最优}
+\framesubtitle{Sys3,$n_x{=}48$,4 ranks;时间为 solve-only(warm,best-of-5)}
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+\textbf{每个 overlap 的最优(取最佳 $L$).}
+\vskip0.2em
+\begin{center}\footnotesize\setlength{\tabcolsep}{4pt}
+\begin{tabular}{c cc cc}
+\toprule
+ & \multicolumn{2}{c}{BASIC} & \multicolumn{2}{c}{sASM} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+$O$ & it & s & it & s \\
+\midrule
+0 & 87 & 0.145 & 87 & 0.150 \\
+1 & 102 & 0.169 & 75 & 0.127 \\
+2 & 90 & 0.175 & \textbf{73} & \textbf{0.124} \\
+3 & — & — & 66 & 0.132 \\
+\midrule
+随 $O$ & \multicolumn{2}{c}{\ua\ 越慢} & \multicolumn{2}{c}{\da\ $O{=}2$ 触底} \\
+\bottomrule
+\end{tabular}
+\end{center}
+{\footnotesize BASIC 最优被逼到 $O{=}0$(overlap 纯负担);sASM 把 overlap 变成净收益。}
+\end{column}
+\begin{column}{0.5\textwidth}
+\textbf{全局最优.}
+\vskip0.2em
+\begin{center}\footnotesize
+\begin{tabular}{l c c c}
+\toprule
+方法 & 配置 & iter & solve-only \\
+\midrule
+BASIC & $O0,L2$ & 87 & 0.145 s \\
+\textbf{sASM} & $O2,L1$ & \textbf{73} & \textbf{0.124 s} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vskip0.3em
+\textbf{更大范围(迭代次数).}
+\begin{itemize}\itemsep0.18em\footnotesize
+  \item sASM 在\textbf{每个 $L$}(含 $L{=}0$)overlap 都有益;BASIC 要 $L\ge4\text{–}5$ 才翻转。
+  \item sASM 迭代随 $O,L$ 增大而\textbf{饱和}:$O\ge5$ 后无增益,$L\approx12$ 触底 $\approx\textbf{28}$。
+  \item 真下界(精确 Cholesky 子域解)更低($O{=}8$ 达 18),但慢 $20\text{–}40\times$。
+\end{itemize}
+\end{column}
+\end{columns}
+\vskip0.2em
+\textbf{结论.}\ sASM 最优 \textbf{0.124 s / 73 步},比 BASIC 最优 \textbf{0.145 s / 87 步} 快约 \textbf{14\%} 且迭代更少;关键在 sASM 能用 overlap、BASIC 不能。
 \end{frame}
 
 % ===== S6 : unified framework table =====
