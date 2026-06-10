@@ -436,7 +436,8 @@ static void InstallScaledASM(KSP ksp, Mat A,
 // Mutates argc/argv in place.
 static void ExtractOwnOptions(int &argc, char **argv,
                               int &fix_level, int &nx, int &scheme, bool &warmup,
-                              bool &pure_neumann)   // -pure_neumann: drop Dirichlet face -> Sys2
+                              bool &pure_neumann,   // -pure_neumann: drop Dirichlet face -> Sys2
+                              bool &all_dirichlet)  // -all_dirichlet: all 6 faces Dirichlet
 {
     int out = 1;                       // keep argv[0]
     for (int i = 1; i < argc; ++i)
@@ -462,6 +463,10 @@ static void ExtractOwnOptions(int &argc, char **argv,
         {
             pure_neumann = true;  continue;
         }
+        if (a == "-all_dirichlet")     // no value: u=0 on all 6 faces
+        {
+            all_dirichlet = true;  continue;
+        }
         argv[out++] = argv[i];         // keep everything else
     }
     argc = out;
@@ -479,7 +484,15 @@ int main(int argc, char *argv[])
     int scheme    = 0;   // 0=CG+BASIC, 1=GMRES+RAS, 2=BCGS+RAS, 3=CG+sASM
     bool warmup   = false;   // -warmup: one untimed solve so time= is solve-only
     bool pure_neumann = false;   // -pure_neumann: drop Dirichlet -> singular Sys2
-    ExtractOwnOptions(argc, argv, fix_level, nx, scheme, warmup, pure_neumann);
+    bool all_dirichlet = false;  // -all_dirichlet: u=0 on all 6 faces
+    ExtractOwnOptions(argc, argv, fix_level, nx, scheme, warmup, pure_neumann,
+                      all_dirichlet);
+    if (pure_neumann && all_dirichlet)
+    {
+        if (my_rank == 0)
+            std::cerr << "error: -pure_neumann and -all_dirichlet are mutually exclusive\n";
+        return 1;
+    }
 
     // Boot PETSc through MFEM (no rc file; everything via CLI).
     MFEMInitializePetsc(&argc, &argv, NULL, NULL);
@@ -565,11 +578,15 @@ int main(int argc, char *argv[])
     // -------- 3) essential (Dirichlet) DOF list -------------------------
     Array<int> ess_bdr(pmesh.bdr_attributes.Max());
     ess_bdr = 0;
-    if (!pure_neumann)
+    if (all_dirichlet)
+        ess_bdr = 1;                       // u=0 on all 6 faces (fully pinned)
+    else if (!pure_neumann)
         ess_bdr[dirichlet_attr - 1] = 1;   // mark only the x=0 face (Sys3)
     // pure_neumann (Sys2): leave ess_bdr all-zero -> all 6 faces Neumann -> singular K
     Array<int> ess_tdof_list;
     fes.GetEssentialTrueDofs(ess_bdr, ess_tdof_list);
+    if (all_dirichlet && my_rank == 0)
+        std::cout << "[ALL_DIRICHLET] u=0 on all 6 faces (fully pinned, non-singular)\n";
 
     // -------- 4) bilinear & linear forms --------------------------------
     // Source term:
