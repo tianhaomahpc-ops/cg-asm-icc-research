@@ -27,7 +27,7 @@
 \setbeamercolor{block body}{bg=Struct!6}
 \setbeamertemplate{frametitle}{\vskip0.5em\hspace{0.2em}\usebeamerfont{frametitle}\insertframetitle%
   {\ifx\insertframesubtitle\empty\else\\[0.1em]\small\color{Gray}\insertframesubtitle\fi}\par}
-\setbeamertemplate{footline}{\hfill\footnotesize\color{Gray}\ifnum\insertframenumber>13 附录\else\insertframenumber\,/\,13\fi\hspace{0.4cm}\vspace{3pt}}
+\setbeamertemplate{footline}{\hfill\footnotesize\color{Gray}\ifnum\insertframenumber>14 附录\else\insertframenumber\,/\,14\fi\hspace{0.4cm}\vspace{3pt}}
 
 \newcommand{\ua}{$\uparrow$}
 \newcommand{\da}{$\downarrow$}
@@ -237,6 +237,57 @@ BASIC & $O0,L2$ & 87 & 0.145 s \\
 \end{columns}
 \vskip0.2em
 \textbf{结论.}\ sASM 最优 \textbf{0.124 s / 73 步},比 BASIC 最优 \textbf{0.145 s / 87 步} 快约 \textbf{14\%} 且迭代更少;关键在 sASM 能用 overlap、BASIC 不能。
+\end{frame}
+
+% ===== S5c : ASM vs sASM on Sys1 / Sys2 (universality of anomaly + fix) =====
+\begin{frame}{普遍性:Sys1 / Sys2 上的 ASM vs sASM}
+\framesubtitle{迭代次数;$n_x{=}48$,4 ranks,METIS,rtol$=10^{-6}$;子域 ICC($L$),外层 CG}
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+\textbf{Sys1:reaction--diffusion}\ \footnotesize($\tfrac1{\Delta t}M{+}\tfrac12K$,$\Delta t{=}10^{-2}$)
+\vskip0.2em
+\begin{center}\footnotesize\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c cc cc}
+\toprule
+ & \multicolumn{2}{c}{$L=0$} & \multicolumn{2}{c}{$L=2$} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+$O$ & BASIC & sASM & BASIC & sASM \\
+\midrule
+0 & 33 & 33 & 24 & 24 \\
+1 & 42 & \textbf{27} & 19 & \textbf{16} \\
+2 & 47 & \textbf{27} & 20 & \textbf{15} \\
+3 & — & 27 & — & 14 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vskip0.2em
+{\footnotesize 心脏量级 $\Delta t{=}10^{-4}$:BASIC $6\to8\to9$,sASM $6\to4\to4$。\\
+最优 solve-only:BASIC 0.048 s vs sASM \textbf{0.041 s}。}
+\end{column}
+\begin{column}{0.5\textwidth}
+\textbf{Sys2:全 Neumann(奇异)}\ \footnotesize($\ker=\mathrm{span}\{1\}$,MatNullSpace$+$RHS 去均值)
+\vskip0.2em
+\begin{center}\footnotesize\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c cc cc}
+\toprule
+ & \multicolumn{2}{c}{$L=0$} & \multicolumn{2}{c}{$L=2$} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+$O$ & BASIC & sASM & BASIC & sASM \\
+\midrule
+0 & 102 & 102 & 77 & 77 \\
+1 & 110 & \textbf{75} & 67 & \textbf{59} \\
+2 & 134 & \textbf{74} & 65 & \textbf{54} \\
+3 & — & 74 & — & 53 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vskip0.2em
+{\footnotesize 奇异系统也发病($102\to134$)、也被修复。\\
+最优 solve-only:BASIC 0.121 s vs sASM \textbf{0.110 s}。}
+\end{column}
+\end{columns}
+\vskip0.4em
+\textbf{观察.}\ 与 Sys3 一致:BASIC 随 $O$ 上升(反常)、sASM 随 $O$ 下降(修复);$O{=}0$ 两者相同($D{=}I$)。反常与修复均与边界/算子类型无关。
 \end{frame}
 
 % ===== S6 : unified framework table =====
