@@ -277,7 +277,8 @@ extern "C" PetscErrorCode SASMDestroy(PC pc)
 // ---------------------------------------------------------------------------
 struct LocalPUCtx
 {
-    PC  icc;     // ICC on the overlapped subdomain block (COMM_SELF)
+    PC  icc;     // ICC on the overlapped subdomain block (COMM_SELF), or
+    KSP cheb;    // fixed-degree Chebyshev over ICC (when -localcheby > 0)
     Vec w;       // local diagonal weight d_i
     Vec tmp;     // scratch
 };
@@ -287,7 +288,8 @@ extern "C" PetscErrorCode LocalPUApply(PC pc, Vec r, Vec z)
     LocalPUCtx *c = nullptr;
     PetscCall(PCShellGetContext(pc, (void**)&c));
     PetscCall(VecPointwiseMult(c->tmp, c->w, r));   // tmp = D_i r
-    PetscCall(PCApply(c->icc, c->tmp, z));          // z = ICC^{-1} tmp
+    if (c->cheb) { PetscCall(KSPSolve(c->cheb, c->tmp, z)); } // fixed SPD poly
+    else         { PetscCall(PCApply(c->icc, c->tmp, z)); }   // z = ICC^{-1} tmp
     PetscCall(VecPointwiseMult(z, c->w, z));        // z = D_i z
     return PETSC_SUCCESS;
 }
@@ -299,12 +301,145 @@ extern "C" PetscErrorCode LocalPUDestroy(PC pc)
     if (c)
     {
         PetscCall(PCDestroy(&c->icc));
+        PetscCall(KSPDestroy(&c->cheb));
         PetscCall(VecDestroy(&c->w));
         PetscCall(VecDestroy(&c->tmp));
         delete c;
     }
     PetscCall(PCShellSetContext(pc, nullptr));
     return PETSC_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// Scheme 8: symmetrized multiplicative RAS ("RAS o RAS^T").
+//   B^{-1} = theta*P + theta*P^T - theta^2 P^T A P,   P = M_RAS^{-1}.
+// Apply: z1 = theta*P r;  r2 = r - A z1;  z = z1 + theta*P^T r2.
+// Then  I - B^{-1}A = (I - theta*P^T A)(I - theta*P A) = E_A^* E  with E_A^*
+// the A-adjoint of E, so B^{-1}A is A-self-adjoint with spectrum in (0,1]
+// iff the damped RAS stationary iteration contracts in the energy norm
+// (||E||_A < 1); CG is then valid.  Pollution removal is RAS-native (full
+// input residual, owner-only writeback) -- no masking weights -- and the
+// symmetry comes from the multiplicative composition, not from weights.
+// Memory stays at CG level (two extra work vectors); cost per application
+// is two block solves + one extra matvec.
+// ---------------------------------------------------------------------------
+struct SMRASCtx
+{
+    PC     ras;     // inner PCASM(RESTRICT) + ICC
+    Mat    A;
+    Vec    z1, r2;
+    double theta;
+};
+
+extern "C" PetscErrorCode SMRASApply(PC pc, Vec r, Vec z)
+{
+    SMRASCtx *c = nullptr;
+    PetscCall(PCShellGetContext(pc, (void**)&c));
+    PetscCall(PCApply(c->ras, r, c->z1));            // z1 = P r
+    if (c->theta != 1.0) { PetscCall(VecScale(c->z1, c->theta)); }
+    PetscCall(MatMult(c->A, c->z1, c->r2));          // r2 = A z1
+    PetscCall(VecAYPX(c->r2, -1.0, r));              // r2 = r - A z1
+    PetscCall(PCApplyTranspose(c->ras, c->r2, z));   // z = P^T r2
+    if (c->theta != 1.0) { PetscCall(VecScale(z, c->theta)); }
+    PetscCall(VecAXPY(z, 1.0, c->z1));               // z += z1
+    return PETSC_SUCCESS;
+}
+
+extern "C" PetscErrorCode SMRASDestroy(PC pc)
+{
+    SMRASCtx *c = nullptr;
+    PetscCall(PCShellGetContext(pc, (void**)&c));
+    if (c)
+    {
+        PetscCall(PCDestroy(&c->ras));
+        PetscCall(VecDestroy(&c->z1));
+        PetscCall(VecDestroy(&c->r2));
+        delete c;
+    }
+    PetscCall(PCShellSetContext(pc, nullptr));
+    return PETSC_SUCCESS;
+}
+
+static void InstallSMRAS(KSP ksp, Mat A,
+                         PetscInt overlap, PetscInt icc_levels,
+                         int my_rank, double theta)
+{
+    PC ras = nullptr;
+    PCCreate(PetscObjectComm((PetscObject)A), &ras);
+    PCSetType(ras, PCASM);
+    PCASMSetType(ras, PC_ASM_RESTRICT);
+    PCASMSetOverlap(ras, overlap);
+    PCSetOperators(ras, A, A);
+    PCSetUp(ras);
+    {
+        KSP     *subs = nullptr;
+        PetscInt nl = 0, fi = 0;
+        PCASMGetSubKSP(ras, &nl, &fi, &subs);
+        for (PetscInt i = 0; i < nl; ++i)
+        {
+            PC sp = nullptr;
+            KSPSetType(subs[i], KSPPREONLY);
+            KSPGetPC(subs[i], &sp);
+            PCSetType(sp, PCICC);
+            PCFactorSetLevels(sp, icc_levels);
+        }
+        PCSetUpOnBlocks(ras);
+    }
+    PC pc_outer = nullptr;
+    KSPGetPC(ksp, &pc_outer);
+    PCSetType(pc_outer, PCSHELL);
+    SMRASCtx *c = new SMRASCtx;
+    c->ras   = ras;
+    c->A     = A;
+    c->theta = theta;
+    MatCreateVecs(A, &c->z1, NULL);
+    MatCreateVecs(A, &c->r2, NULL);
+    PCShellSetContext(pc_outer, c);
+    PCShellSetApply  (pc_outer, SMRASApply);
+    PCShellSetDestroy(pc_outer, SMRASDestroy);
+    PCShellSetName   (pc_outer, "symmetrized_mult_RAS");
+    PCSetUp(pc_outer);
+
+    // One-time exact-adjoint probe.  PCApplyTranspose_ASM is the true
+    // transpose of PC_ASM_RESTRICT only on PETSc >= 3.20 (on <= 3.19 the
+    // writeback is owner-masked too and it silently applies the both-sides
+    // masked RASH sweep) and only with 1 subdomain per rank.  Checking
+    // s.B^{-1}r == r.B^{-1}s on deterministic vectors catches every such
+    // silent-asymmetry route at install time.
+    {
+        Vec pr = nullptr, ps = nullptr, zr = nullptr, zs = nullptr;
+        MatCreateVecs(A, &pr, NULL);  MatCreateVecs(A, &ps, NULL);
+        MatCreateVecs(A, &zr, NULL);  MatCreateVecs(A, &zs, NULL);
+        PetscInt prs = 0, pre = 0;
+        VecGetOwnershipRange(pr, &prs, &pre);
+        for (PetscInt g = prs; g < pre; ++g)
+        {
+            PetscScalar a = std::sin((double)(g + 1));
+            PetscScalar b = std::cos((double)(2*g + 1));
+            VecSetValues(pr, 1, &g, &a, INSERT_VALUES);
+            VecSetValues(ps, 1, &g, &b, INSERT_VALUES);
+        }
+        VecAssemblyBegin(pr); VecAssemblyEnd(pr);
+        VecAssemblyBegin(ps); VecAssemblyEnd(ps);
+        PCApply(pc_outer, pr, zr);
+        PCApply(pc_outer, ps, zs);
+        PetscScalar s_zr = 0, r_zs = 0;
+        VecDot(ps, zr, &s_zr);
+        VecDot(pr, zs, &r_zs);
+        const double rel = std::abs(PetscRealPart(s_zr - r_zs))
+                         / std::max(1e-30, std::abs(PetscRealPart(s_zr)));
+        if (my_rank == 0)
+            std::cout << "[sMRAS] symmetry probe |s.Br - r.Bs|/|s.Br| = "
+                      << std::scientific << rel
+                      << (rel < 1e-10 ? "  (symmetric)\n"
+                          : "  ** NOT SYMMETRIC: need PETSc >= 3.20 and 1 subdomain/rank **\n");
+        VecDestroy(&pr); VecDestroy(&ps); VecDestroy(&zr); VecDestroy(&zs);
+    }
+
+    if (my_rank == 0)
+        std::cout << "[sMRAS] installed (overlap=" << overlap
+                  << ", icc_levels=" << icc_levels
+                  << ", theta=" << theta << ")\n";
 }
 
 // Build an inner PCASM_BASIC + ICC, compute its overlap-aware multiplicity
@@ -396,12 +531,36 @@ static void InstallScaledASM(KSP ksp, Mat A,
                 KSPSetType(sub_ksps[i], KSPPREONLY);
                 Mat Ai = nullptr;
                 KSPGetOperators(sub_ksps[i], &Ai, NULL);
-                PC icc = nullptr;
-                PCCreate(PETSC_COMM_SELF, &icc);
-                PCSetType(icc, PCICC);
-                PCFactorSetLevels(icc, icc_levels);
-                PCSetOperators(icc, Ai, Ai);
-                PCSetUp(icc);
+                PC  icc  = nullptr;
+                KSP cheb = nullptr;
+                if (cheby_deg > 0)
+                {
+                    // block solve = fixed-degree Chebyshev over ICC (frozen
+                    // eigenvalue bounds -> fixed SPD operator), composed with
+                    // the D_i sandwich: attacks factor A while the graded
+                    // weights attack factor B + pollution.
+                    KSPCreate(PETSC_COMM_SELF, &cheb);
+                    KSPSetType(cheb, KSPCHEBYSHEV);
+                    KSPSetOperators(cheb, Ai, Ai);
+                    KSPSetTolerances(cheb, PETSC_DEFAULT, PETSC_DEFAULT,
+                                     PETSC_DEFAULT, cheby_deg);
+                    KSPSetNormType(cheb, KSP_NORM_NONE);
+                    KSPSetInitialGuessNonzero(cheb, PETSC_FALSE);
+                    KSPChebyshevEstEigSet(cheb, 0.0, 0.1, 0.0, 1.1);
+                    PC cp = nullptr;
+                    KSPGetPC(cheb, &cp);
+                    PCSetType(cp, PCICC);
+                    PCFactorSetLevels(cp, icc_levels);
+                    KSPSetUp(cheb);
+                }
+                else
+                {
+                    PCCreate(PETSC_COMM_SELF, &icc);
+                    PCSetType(icc, PCICC);
+                    PCFactorSetLevels(icc, icc_levels);
+                    PCSetOperators(icc, Ai, Ai);
+                    PCSetUp(icc);
+                }
                 // Local weight: gather global multiplicity into subdomain
                 // ordering, then d_i = [own?1:eps]/sqrt(1+(m-1)eps^2).
                 PetscInt nloc = 0;
@@ -501,8 +660,9 @@ static void InstallScaledASM(KSP ksp, Mat A,
                 }
                 ISRestoreIndices(is_with_overlap[i], &gidx);
                 LocalPUCtx *c = new LocalPUCtx;
-                c->icc = icc;
-                c->w   = w;
+                c->icc  = icc;
+                c->cheb = cheb;
+                c->w    = w;
                 VecDuplicate(w, &c->tmp);
                 KSPGetPC(sub_ksps[i], &sub_pc);
                 PCSetType(sub_pc, PCSHELL);
@@ -679,11 +839,12 @@ int main(int argc, char *argv[])
             "4:CG+sASM + Chebyshev block solve",
             "5:CG + D^-1 BASIC D^-1 (sym, over-norm)",
             "6:D^-1 BASIC (non-symmetric, one-sided)",
-            "7:CG + eps-PU weighted ASM (sym, per-subdomain)" };
+            "7:CG + eps-PU weighted ASM (sym, per-subdomain)",
+            "8:CG + symmetrized multiplicative RAS (RAS o RAS^T)" };
         std::cout << "================================================\n"
                   << "  asm_demo  (ranks=" << num_ranks
                   << ", fix_level=" << fix_level
-                  << ", scheme=" << (scheme>=0 && scheme<=7 ? scheme_name[scheme] : "?")
+                  << ", scheme=" << (scheme>=0 && scheme<=8 ? scheme_name[scheme] : "?")
                   << ", nx=" << nx << ")\n"
                   << "================================================\n";
     }
@@ -1042,13 +1203,11 @@ int main(int argc, char *argv[])
         PetscOptionsGetInt(NULL, NULL, "-sub_pc_factor_levels",   &icc_lev, NULL);
 
         int cheby_deg = 0;
-        if (scheme == 4)
-        {
-            cheby_deg = 2;
+        if (scheme == 4) cheby_deg = 2;          // scheme 4 default
+        if (scheme == 4 || scheme == 7)          // scheme 7: opt-in via flag
             for (int i = 1; i < argc; ++i)
                 if (std::string(argv[i]) == "-localcheby" && i + 1 < argc)
                     cheby_deg = std::atoi(argv[i+1]);
-        }
         double pu_eps = 0.25, pu_alpha = 1.0, pu_grade = 0.0;
         if (scheme == 7)
             for (int i = 1; i < argc; ++i)
@@ -1063,6 +1222,24 @@ int main(int argc, char *argv[])
         int weight_mode = (scheme == 5) ? 1 : (scheme == 6) ? 2 : (scheme == 7) ? 3 : 0;
         InstallScaledASM(ksp_raw, A_raw, overlap, icc_lev, my_rank, cheby_deg,
                          weight_mode, pu_eps, pu_alpha, pu_grade);
+    }
+    else if (scheme == 8)
+    {
+        // scheme 8 = symmetrized multiplicative RAS (RAS o RAS^T), CG-valid
+        //            iff the damped RAS stationary iteration contracts;
+        //            damping via -smtheta (default 1.0).
+        pcg.Customize(true);
+        KSP   ksp_raw = static_cast<KSP>(pcg);
+        Mat   A_raw   = nullptr;
+        KSPGetOperators(ksp_raw, &A_raw, NULL);
+        PetscInt overlap = 0, icc_lev = 0;
+        PetscOptionsGetInt(NULL, NULL, "-pc_asm_overlap",       &overlap, NULL);
+        PetscOptionsGetInt(NULL, NULL, "-sub_pc_factor_levels", &icc_lev, NULL);
+        double theta = 1.0;
+        for (int i = 1; i < argc; ++i)
+            if (std::string(argv[i]) == "-smtheta" && i + 1 < argc)
+                theta = std::atof(argv[i+1]);
+        InstallSMRAS(ksp_raw, A_raw, overlap, icc_lev, my_rank, theta);
     }
 
     if (warmup)

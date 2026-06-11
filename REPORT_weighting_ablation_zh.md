@@ -507,7 +507,72 @@ $\alpha=1$ 附近平坦、两侧变差 ⇒ **外层取精确归一化子已是�
 
 ---
 
-## 13. 综合结论
+## 13. 自创方法两案:graded+Chebyshev 复合 与 sMRAS
+
+**目标**:不复刻 RASHO/SORAS,基于我们的因果框架(A×B+污染+对称税)自行构造新方法,
+要求对称(CG)、单层、低内存,并在迭代与时间上逼近或超越 RAS+GMRES。
+
+### 13.1 方法 I:graded-√PU + Chebyshev 块解复合(scheme 7 `-pugrade q -localcheby d`)
+
+把我们两个已验证的独立增益正交合成:$M^{-1}=\sum_iR_i^\top D_i\,p_d(\tilde A_i)\,D_iR_i$——
+$D_i$ 为层深渐变权重(攻因素 B+污染),$p_d$ 为 ICC 预条件的固定 $d$ 阶 Chebyshev 多项式
+(攻因素 A;冻结特征值界 ⇒ 固定 SPD 算子,审查 agent 对照 PETSc 3.24.4 `cheby.c` 源码核实:
+`KSP_NORM_NONE` 下不算范数、不触发收敛测试、特征值估计仅在 `KSPSetUp` 执行一次并被状态守卫冻结)。
+
+**结果(Sys3,nx=48,4 ranks;同批 solve-only,warm,best-of-5):**
+
+| 方法 | 配置 | iter | solve-only | 归约 | 内存 | 对称/CG |
+|---|---|---|---|---|---|---|
+| **graded+Cheby** | $q0.8,d2,O3,L1$ | 38 | **0.099 s** | 256 | ~10 向量 | **是** |
+| graded+Cheby | $q0.8,d3,O3,L1$ | **32** | 0.106 s | — | ~10 向量 | 是 |
+| RAS+GMRES(r60) | $O3,L2$,同批 | 51 | 0.112 s | 233 | ~62 向量 | 否 |
+| sASM+Cheby(scheme 4) | $O2,L1,d2$,同批 | 48 | 0.120 s | 278 | ~10 向量 | 是 |
+| graded(无 Cheby) | $q0.8,O3,L2$,同批 | 58 | 0.123 s | — | ~6 向量 | 是 |
+
+**对称/CG/低内存的方法首次在时间上超过 RAS+GMRES**(0.099 vs 0.112,同批 ~12%),
+迭代 38 vs 51。新颖性核实(含来源):各部件均有出处(SORAS 型夹心、加权 Schwarz 光滑子的
+非均匀权重 Stiller JSC 2017、子域多项式解为求解器库惯例),但**"层深渐变 √PU 权重 ×
+ICC-Chebyshev 多项式块解"这一组合未见发表**——属工程级/增量新颖,价值在实测性能。
+
+### 13.2 方法 II:对称化乘性 RAS(sMRAS,scheme 8)
+
+$$B^{-1}=\theta P+\theta P^\top-\theta^2P^\top AP,\quad P=M_{\text{RAS}}^{-1};\qquad
+I-B^{-1}A=(I-\theta P^\top A)(I-\theta PA)=E^{*}_AE$$
+
+RAS 扫一遍、其伴随(ASH)扫一遍,中间夹一次残差更新。$B^{-1}A$ 在 $A$-内积下自伴、
+谱在 $(0,1]$ **当且仅当阻尼 RAS 不动点迭代在能量范数收缩**($\|E\|_A<1$)。
+污染剔除是 RAS 原生的(全输入残差、owner 回写),对称性来自乘性复合而非权重。
+实现:`PCApplyTranspose` 作用于 `PC_ASM_RESTRICT`(审查 agent diff 了 PETSc
+3.18/3.19/3.20/3.24 源码:**仅 ≥3.20 是精确转置**,≤3.19 静默退化为 RASH——
+据此加装了安装时对称性探针,实测 $|s^\top Br-r^\top Bs|/|s^\top Br|=3.2\times10^{-14}$)。
+
+**结果**:$\theta=1$ 下**全 $(O,L)$ 网格 SPD 稳定**(36–63 步,无一发散)——
+即 $\|E\|_A<1$ 在 ICC(0–2) 不精确块解下也成立。最优 $O3,L2$:**36 步 / 0.118 s / 归约 240**。
+每步 2 次块解 + 1 次额外 matvec(~1.9×),内存仅 +2 工作向量。
+
+**新颖性核实**:模板是经典的(Holst–Vandewalle SINUM 1997 "To Symmetrize or Not to
+Symmetrize";AMG 对称化光滑子 $I-\tilde M^{-1}A=(I-M^{-\top}A)(I-M^{-1}A)$),
+但 **以 RAS∘ASH 乘性复合作 CG 预条件子的实例未见发表**;且关键支撑观察——
+"RAS+ICC 不动点迭代在能量范数收缩,故对称化 SPD"——文献中**不存在**:
+Frommer–Szyld(SINUM 2001)明言 RAS 投影非 $A$-正交、能量范数分析不可用(只在加权
+极大范数下证 M-/H-矩阵收敛),Galvis(arXiv:1905.12800)称 RAS 的 SPD 理论仍缺失。
+我们的全网格 SPD 实证是该方向的一个新数据点(也是潜在可证命题)。
+文献亦警告(Holst–Vandewalle):对称化常不如"非对称+柔性 Krylov"——我们的数据
+恰好量化了这一点(sMRAS 0.118 vs RAS+GMRES 0.112),但 sMRAS 以 CG 级内存换得 ~5% 时间差。
+
+### 13.3 全景排名(同批 solve-only)
+
+$$\underbrace{0.099}_{\textbf{graded+Cheby}}\ <\ \underbrace{0.112}_{\text{RAS+GMRES}}\ <\ \underbrace{0.118}_{\text{sMRAS}}\ <\ \underbrace{0.120}_{\text{sASM+Cheby}}\ <\ \underbrace{0.123}_{\text{graded}}\ <\ \cdots$$
+
+- **追求时间 + 对称 + 低内存**:graded+Cheby($q0.8,d2$)是全场冠军;
+- **追求最少外层迭代/最少全局同步**:graded+Cheby $d3$(32 步)或 sMRAS(36 步,归约 240);
+- 两个方法的"可发表增量":(a) 组合本身 + 跨三系统/逐位验证基础设施;
+  (b) sMRAS 的能量范数收缩实证(填补 Frommer–Szyld/Galvis 指出的理论空白的实验侧)。
+- graded/sMRAS 暂为 MFEM 端实现;移植 PETSc 端与跨 Sys1/Sys2 验证为后续工作。
+
+---
+
+## 14. 综合结论
 
 | 方法 | 对称 | 配 CG | 配 GMRES | 配 FCG | overlap 趋势 |
 |---|---|---|---|---|---|
