@@ -59,9 +59,47 @@ static PetscErrorCode sASMDestroy(PC pc)
     PetscCall(PCShellSetContext(pc, NULL));
     return PETSC_SUCCESS;
 }
+
+/* ---- per-subdomain eps-PU weighted block solve (scheme 7, weight_mode 3)
+ *   block_solve(r_i) = D_i * ICC(A_i)^{-1} * (D_i * r_i)
+ *   d_i(k) = [k owned by this rank ? 1 : eps] / sqrt(1 + (m_k-1) eps^2)
+ * sum_i d_i(k)^2 = 1 exactly (squared partition of unity); eps = 1
+ * reproduces sASM, eps = 0 is the both-sides 0/1 restriction.
+ */
+typedef struct {
+    PC  icc;     /* ICC on the overlapped subdomain block (COMM_SELF) */
+    Vec w;       /* local diagonal weight d_i */
+    Vec tmp;     /* scratch */
+} LocalPUCtx;
+
+static PetscErrorCode localPUApply(PC pc, Vec r, Vec z)
+{
+    LocalPUCtx *c = NULL;
+    PetscCall(PCShellGetContext(pc, (void**)&c));
+    PetscCall(VecPointwiseMult(c->tmp, c->w, r));   /* tmp = D_i r */
+    PetscCall(PCApply(c->icc, c->tmp, z));          /* z = ICC^{-1} tmp */
+    PetscCall(VecPointwiseMult(z, c->w, z));        /* z = D_i z */
+    return PETSC_SUCCESS;
+}
+
+static PetscErrorCode localPUDestroy(PC pc)
+{
+    LocalPUCtx *c = NULL;
+    PetscCall(PCShellGetContext(pc, (void**)&c));
+    if (c) {
+        PetscCall(PCDestroy(&c->icc));
+        PetscCall(VecDestroy(&c->w));
+        PetscCall(VecDestroy(&c->tmp));
+        free(c);
+    }
+    PetscCall(PCShellSetContext(pc, NULL));
+    return PETSC_SUCCESS;
+}
+
 static PetscErrorCode InstallScaledASM(KSP ksp, Mat A,
                                        PetscInt overlap, PetscInt icc_levels,
-                                       PetscInt cheby_deg, int weight_mode)
+                                       PetscInt cheby_deg, int weight_mode,
+                                       double pu_eps)
 {
     // cheby_deg == 0 : block solve = preonly + ICC(icc_levels)   [scheme 3]
     // cheby_deg >= 1 : block solve = cheby_deg Chebyshev steps over ICC,
@@ -75,13 +113,88 @@ static PetscErrorCode InstallScaledASM(KSP ksp, Mat A,
     PetscCall(PCASMSetOverlap(inner, overlap));
     PetscCall(PCSetOperators(inner, A, A));
     PetscCall(PCSetUp(inner));
+
+    /* Multiplicity vector m[k] = #subdomains that contain k.  Needed by the
+     * global outer weights (modes 0-2) AND by the per-subdomain local
+     * weights of mode 3, so it is computed BEFORE the sub-KSP config.
+     * is_full[i] is the WITH-overlap IS; is_local_only[i] the rank's own DOFs. */
+    Vec mult = NULL, invsqrt = NULL;
+    PetscInt n_sub = 0;
+    IS *is_full = NULL, *is_local_only = NULL;
+    PetscCall(MatCreateVecs(A, &mult, NULL));
+    PetscCall(VecSet(mult, 0.0));
+    PetscCall(PCASMGetLocalSubdomains(inner, &n_sub, &is_full, &is_local_only));
+    for (PetscInt i = 0; i < n_sub; ++i) {
+        const PetscInt *idx = NULL;
+        PetscInt        n   = 0;
+        PetscCall(ISGetLocalSize(is_full[i], &n));
+        PetscCall(ISGetIndices(is_full[i], &idx));
+        PetscScalar *ones = (PetscScalar*)malloc(sizeof(PetscScalar) * (n>0?n:1));
+        for (PetscInt j = 0; j < n; ++j) ones[j] = 1.0;
+        PetscCall(VecSetValues(mult, n, idx, ones, ADD_VALUES));
+        free(ones);
+        PetscCall(ISRestoreIndices(is_full[i], &idx));
+    }
+    PetscCall(VecAssemblyBegin(mult));
+    PetscCall(VecAssemblyEnd(mult));
+
     {
         KSP     *subksp = NULL;
         PetscInt n_local = 0, first = 0;
         PetscCall(PCASMGetSubKSP(inner, &n_local, &first, &subksp));
         for (PetscInt i = 0; i < n_local; ++i) {
             PC sub = NULL;
-            if (cheby_deg <= 0) {
+            if (weight_mode == 3) {
+                /* scheme 7: eps-PU sandwich around ICC inside this subdomain.
+                 * Owner test below assumes the default PCASM decomposition
+                 * (1 subdomain per rank = matrix ownership range + overlap). */
+                if (n_local != 1 && rank == 0)
+                    printf("[warn] eps-PU owner test assumes 1 subdomain/rank\n");
+                PetscCall(KSPSetType(subksp[i], KSPPREONLY));
+                Mat Ai = NULL;
+                PetscCall(KSPGetOperators(subksp[i], &Ai, NULL));
+                PC icc = NULL;
+                PetscCall(PCCreate(PETSC_COMM_SELF, &icc));
+                PetscCall(PCSetType(icc, PCICC));
+                PetscCall(PCFactorSetLevels(icc, icc_levels));
+                PetscCall(PCSetOperators(icc, Ai, Ai));
+                PetscCall(PCSetUp(icc));
+                /* Local weight: gather global multiplicity into subdomain
+                 * ordering, then d_i = [own?1:eps]/sqrt(1+(m-1)eps^2). */
+                PetscInt nloc = 0;
+                PetscCall(ISGetLocalSize(is_full[i], &nloc));
+                Vec w = NULL;
+                PetscCall(VecCreateSeq(PETSC_COMM_SELF, nloc, &w));
+                VecScatter sc = NULL;
+                PetscCall(VecScatterCreate(mult, is_full[i], w, NULL, &sc));
+                PetscCall(VecScatterBegin(sc, mult, w, INSERT_VALUES, SCATTER_FORWARD));
+                PetscCall(VecScatterEnd  (sc, mult, w, INSERT_VALUES, SCATTER_FORWARD));
+                PetscCall(VecScatterDestroy(&sc));
+                const PetscInt *gidx = NULL;
+                PetscCall(ISGetIndices(is_full[i], &gidx));
+                PetscInt rstart = 0, rend = 0;
+                PetscCall(MatGetOwnershipRange(A, &rstart, &rend));
+                PetscScalar *warr = NULL;
+                PetscCall(VecGetArray(w, &warr));
+                for (PetscInt l = 0; l < nloc; ++l) {
+                    const PetscReal m   = PetscRealPart(warr[l]);
+                    const int       own = (gidx[l] >= rstart && gidx[l] < rend);
+                    warr[l] = (own ? 1.0 : pu_eps)
+                              / PetscSqrtReal(1.0 + (m - 1.0)*pu_eps*pu_eps);
+                }
+                PetscCall(VecRestoreArray(w, &warr));
+                PetscCall(ISRestoreIndices(is_full[i], &gidx));
+                LocalPUCtx *c = (LocalPUCtx*)malloc(sizeof(LocalPUCtx));
+                c->icc = icc;
+                c->w   = w;
+                PetscCall(VecDuplicate(w, &c->tmp));
+                PetscCall(KSPGetPC(subksp[i], &sub));
+                PetscCall(PCSetType(sub, PCSHELL));
+                PetscCall(PCShellSetContext(sub, c));
+                PetscCall(PCShellSetApply  (sub, localPUApply));
+                PetscCall(PCShellSetDestroy(sub, localPUDestroy));
+                PetscCall(PCShellSetName   (sub, "local_epsPU_ICC"));
+            } else if (cheby_deg <= 0) {
                 PetscCall(KSPSetType(subksp[i], KSPPREONLY));
                 PetscCall(KSPGetPC(subksp[i], &sub));
                 PetscCall(PCSetType(sub, PCICC));
@@ -100,31 +213,12 @@ static PetscErrorCode InstallScaledASM(KSP ksp, Mat A,
         }
         PetscCall(PCSetUpOnBlocks(inner));
     }
-    Vec mult = NULL, invsqrt = NULL;
-    PetscCall(MatCreateVecs(A, &mult, NULL));
-    PetscCall(VecSet(mult, 0.0));
-    {
-        PetscInt n_local = 0;
-        IS *is_full = NULL, *is_local_only = NULL;
-        PetscCall(PCASMGetLocalSubdomains(inner, &n_local, &is_full, &is_local_only));
-        for (PetscInt i = 0; i < n_local; ++i) {
-            const PetscInt *idx = NULL;
-            PetscInt        n   = 0;
-            PetscCall(ISGetLocalSize(is_full[i], &n));
-            PetscCall(ISGetIndices(is_full[i], &idx));
-            PetscScalar *ones = (PetscScalar*)malloc(sizeof(PetscScalar) * (n>0?n:1));
-            for (PetscInt j = 0; j < n; ++j) ones[j] = 1.0;
-            PetscCall(VecSetValues(mult, n, idx, ones, ADD_VALUES));
-            free(ones);
-            PetscCall(ISRestoreIndices(is_full[i], &idx));
-        }
-        PetscCall(VecAssemblyBegin(mult));
-        PetscCall(VecAssemblyEnd(mult));
+    if (weight_mode != 3) {  /* mode 3: the weights live inside the sub-PCs */
+        PetscCall(VecDuplicate(mult, &invsqrt));
+        PetscCall(VecCopy(mult, invsqrt));
+        PetscCall(VecReciprocal(invsqrt));                       /* 1/m[k] (D^-1) */
+        if (weight_mode == 0) PetscCall(VecSqrtAbs(invsqrt));    /* -> 1/sqrt(m[k]) for sASM */
     }
-    PetscCall(VecDuplicate(mult, &invsqrt));
-    PetscCall(VecCopy(mult, invsqrt));
-    PetscCall(VecReciprocal(invsqrt));                       /* 1/m[k] (D^-1) */
-    if (weight_mode == 0) PetscCall(VecSqrtAbs(invsqrt));    /* -> 1/sqrt(m[k]) for sASM */
     {
         PetscReal mn, mx;
         PetscCall(VecMin(mult, NULL, &mn));
@@ -139,9 +233,9 @@ static PetscErrorCode InstallScaledASM(KSP ksp, Mat A,
     PetscCall(PCSetType(outer, PCSHELL));
     SASMCtx *ctx = (SASMCtx*)malloc(sizeof(SASMCtx));
     ctx->inner_pc = inner;
-    ctx->w        = invsqrt;                       /* D^-1/2 (mode 0) or D^-1 (mode 1/2) */
-    ctx->pre      = (weight_mode == 2) ? 0 : 1;    /* mode 2 = left/post only */
-    ctx->post     = 1;
+    ctx->w        = invsqrt;   /* D^-1/2 (mode 0), D^-1 (mode 1/2), NULL (mode 3) */
+    ctx->pre      = (weight_mode == 2 || weight_mode == 3) ? 0 : 1;
+    ctx->post     = (weight_mode == 3) ? 0 : 1;    /* mode 3: outer = pass-through */
     PetscCall(MatCreateVecs(A, &ctx->tmp, NULL));
     PetscCall(PCShellSetContext(outer, ctx));
     PetscCall(PCShellSetApply  (outer, sASMApply));
@@ -202,11 +296,12 @@ int main(int argc, char **argv)
                             "BCGS+ASM_RESTRICT (RAS)", "CG+sASM (D^-1/2 .. D^-1/2)",
                             "CG+sASM+Chebyshev",
                             "D^-1 BASIC D^-1 (sym, over-norm)",
-                            "D^-1 BASIC (non-symmetric)"};
+                            "D^-1 BASIC (non-symmetric)",
+                            "eps-PU weighted ASM (sym)"};
         printf("================================================\n");
         printf("  pure_petsc_load  ranks=%d nx=%d scheme=%d:%s\n",
                (int)size, nx, scheme,
-               (scheme>=0 && scheme<=6) ? sn[scheme] : "?");
+               (scheme>=0 && scheme<=7) ? sn[scheme] : "?");
         printf("  matrix file = %s\n  rhs    file = %s\n", mfn, bfn);
         printf("================================================\n");
     }
@@ -323,7 +418,7 @@ int main(int argc, char **argv)
     PetscCall(KSPSetTolerances(ksp, 1e-6, 1e-12, PETSC_DEFAULT, 1000));
     PetscCall(KSPSetFromOptions(ksp));
 
-    if (scheme >= 3 && scheme <= 6) {
+    if (scheme >= 3 && scheme <= 7) {
         PetscInt overlap = 0, icc_lev = 0;
         PetscOptionsGetInt(NULL, NULL, "-pc_asm_overlap",       &overlap, NULL);
         PetscOptionsGetInt(NULL, NULL, "-sub_pc_factor_levels", &icc_lev, NULL);
@@ -334,8 +429,14 @@ int main(int argc, char **argv)
                 if (!strcmp(argv[i], "-localcheby") && i + 1 < argc)
                     cheby_deg = atoi(argv[i+1]);
         }
-        int weight_mode = (scheme == 5) ? 1 : (scheme == 6) ? 2 : 0;
-        PetscCall(InstallScaledASM(ksp, A, overlap, icc_lev, cheby_deg, weight_mode));
+        double pu_eps = 0.25;
+        if (scheme == 7)
+            for (int i = 1; i < argc; ++i)
+                if (!strcmp(argv[i], "-pueps") && i + 1 < argc)
+                    pu_eps = atof(argv[i+1]);
+        int weight_mode = (scheme == 5) ? 1 : (scheme == 6) ? 2 : (scheme == 7) ? 3 : 0;
+        PetscCall(InstallScaledASM(ksp, A, overlap, icc_lev, cheby_deg, weight_mode,
+                                   pu_eps));
     }
 
     double t0 = MPI_Wtime();

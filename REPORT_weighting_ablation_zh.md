@@ -409,7 +409,72 @@ BASIC+精确 Cholesky $34\to21\to20\to18\to15$(↓,经典行为)。
 
 ---
 
-## 12. 综合结论
+## 12. 对称地剔除污染值?——ε-PU 加权 ASM(scheme 7,RASH$_\ell$ 型)
+
+**动机**:§9 的机理分析指出,sASM 与 RAS 都消灭了重复计数(因素 B),但 RAS 还把
+"邻居人工边界处的污染值"直接丢弃,而 sASM 受对称性所迫只能把污染值降权平均。
+**问题:能否既剔除污染、又保持对称(保 CG)?**
+
+**关键观察**:污染是"每个子域各自"的属性——同一 DOF $k$ 对 owner 是干净值、对邻居是
+污染值,权重必须依赖 $(i,k)$ 二元组;sASM 的全局对角三明治 $D^{-1/2}MD^{-1/2}$ 只能给
+每个 $k$ 一个权重,写不出这件事。出路是把**按子域的对角权重放进求和号内**:
+
+$$M^{-1}_{\varepsilon\text{PU}}=\sum_i R_i^{\top} D_i\,\tilde A_i^{-1}\,D_i R_i,\qquad
+d_i(k)=\frac{[\,i\text{ owns }k\,?\,1:\varepsilon\,]}{\sqrt{1+(m_k-1)\varepsilon^2}},\qquad
+\sum_i d_i(k)^2=1.$$
+
+每项 $R_i^\top D_iÃ_i^{-1}D_iR_i$ 对称 PSD;$x^\top M^{-1}x=\sum_i\|Ã_i^{-1/2}D_iR_ix\|^2$
+且每个 DOF 的 owner 权重严格为正 ⇒ **SPD,CG 合法**。$\varepsilon=1$ 时权重退化为
+$1/\sqrt{m_k}$(全局对角可穿出求和号)**恒等于 sASM**;$\varepsilon=0$ 是双侧 0/1 限制。
+实现:内层 PCASM(BASIC) 的 sub-PC 换成局部 PCSHELL($w\odot\text{ICC}^{-1}(w\odot r)$),
+外层直通;`asm_demo -scheme 7 -pueps ε`,PETSc 端同步移植。
+
+**12.1 验证**:$\varepsilon=1$ 与 scheme 3 逐位一致(132/104/103,残差史与最终范数均相同;
+nx=16 亦验证);独立对抗审查未发现 critical/major 缺陷(`-log_view` 对象创建=销毁,无泄漏);
+MFEM↔PETSc 交叉校验 **18/18 EQ**($\varepsilon\in\{0,0.7,1\}\times O\{1,2,3\}\times L\{0,2\}$)。
+
+**12.2 ε 扫描(迭代次数;Sys3,nx=48,4 ranks,CG)**:
+
+| $\varepsilon$ | 0.0 | 0.1 | 0.25 | 0.5 | 0.6 | **0.7** | 0.8 | 0.9 | 1.0(=sASM) |
+|---|---|---|---|---|---|---|---|---|---|
+| $O2,L2$ | 104 | 96 | 83 | 67 | 64 | **62** | 63 | 65 | 67 |
+| $O3,L2$ | 106 | 96 | 83 | 66 | 62 | **61** | 63 | 64 | 66 |
+| $O3,L0$ | 142 | 124 | 111 | 99 | — | **98** | — | — | 102 |
+
+solve-only 计时(同批对比):$\varepsilon{=}0.7$ 在 $O3,L2$:61 步/0.144 s vs sASM 66 步/0.153 s。
+
+**12.3 结果解读**:
+1. **强掩蔽(ε→0)反而变差**(142 步):对称性强迫"掩多少输出就掩多少输入"(伴随关系),
+   小 ε 丢失的重叠区残差信息超过了掩掉污染的收益。
+2. **浅谷在 ε≈0.6–0.8**:比 sASM 好约 **7%**(61 vs 66),时间同步小胜——**对称掩蔽有效但封顶**。
+3. **远未达到 RAS**(同配置 $O3,L2$:RAS+满GMRES 51 步)。**对称税真实存在**:
+   纯靠权重掩蔽,在对称约束下无法复制"全输入、选择性输出"的 RAS。
+
+**12.4 文献定位**(已逐条核实,含来源):这正是已知结构——
+$\varepsilon=0$ **就是 RASH**(Cai–Sarkis SISC 1999 的对称双侧限制变体);一般 ε 是 Gander 的
+**RASH$_\ell$**(光滑 PU 对称化加权 RAS,DD26 plenary);等价于 **SORAS**(Haferssas–Jolivet–Nataf,
+SISC 39(4):A1345, 2017,式(14))**把 Robin 矩阵换成 Dirichlet 矩阵**(论文原话:SORAS
+"is reminiscent of the RASH algorithm")。文献预言与我们的数据完全吻合:
+- Cai–Dryja–Sarkis(SINUM 41(4):1209, 2003)明言 RASH "often takes more iterations than AS/CG"
+  ——我们 ε=0 的 141–142 ✓;
+- Gander 证明 RAS 对 PU 选择不敏感(≡Lions 并行 Schwarz)而 RASH 对 PU 极其敏感
+  ——我们的 ε 曲线(142→61→66)✓;
+- Bonazzoli–Claeys–Nataf–Tournier(DD27, arXiv:2212.03132)发现 SORAS 中 PU 在重叠区
+  保持非零优于在界面归零——我们 ε>0 优于 ε=0 ✓。
+- ε 插值的 $\sqrt{\text{PU}}$ 族($\sum d_i^2=1$)本身无既有命名与专门分析;
+  "中间 ε 小幅优于全局缩放 sASM"这一点在所引文献中未见报道。
+
+**12.5 结论与出路**:对称 + 纯 Dirichlet 局部解 + 权重掩蔽 = 收益封顶(~7%)。
+文献中真正"对称且接近/达到 RAS 质量"的两条路都**改变局部问题本身**而非只调权重:
+- **RASHO**(Cai–Dryja–Sarkis 2003):调和重叠——让重叠区局部解离散调和,被丢弃的部分
+  "不携带独立信息",从而 0/1 限制可对称化;有近最优 CG 理论,迭代少于 AS/CG;
+- **SORAS**(2017):Robin 传输条件——在源头减轻人工边界污染,再配 PU 夹心保对称。
+这两者是本研究自然的后续方向;在"只动权重"的约束下,sASM(ε=1)与 ε≈0.7 的 RASH$_\ell$
+已是对称单层的实用上限。
+
+---
+
+## 13. 综合结论
 
 | 方法 | 对称 | 配 CG | 配 GMRES | 配 FCG | overlap 趋势 |
 |---|---|---|---|---|---|

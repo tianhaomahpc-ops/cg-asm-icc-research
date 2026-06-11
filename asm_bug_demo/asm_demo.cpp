@@ -259,6 +259,54 @@ extern "C" PetscErrorCode SASMDestroy(PC pc)
     return PETSC_SUCCESS;
 }
 
+// ---------------------------------------------------------------------------
+// Per-subdomain eps-PU weighted block solve (scheme 7, weight_mode 3):
+//   block_solve(r_i) = D_i * ICC(A_i)^{-1} * (D_i * r_i)
+//   d_i(k) = [k owned by this rank ? 1 : eps] / sqrt(1 + (m_k-1) eps^2)
+// sum_i d_i(k)^2 = 1 exactly (squared partition of unity), and d_i ~ eps on
+// the borrowed overlap layer, i.e. next to subdomain i's OWN artificial
+// Dirichlet boundary -- masking the polluted part of the local solve that
+// RAS discards outright.  Every term R_i^T D_i A_i^{-1} D_i R_i is symmetric
+// PSD; the sum is SPD because x^T M^{-1} x = sum_i ||A_i^{-1/2} D_i R_i x||^2
+// and each DOF has an owner with weight > 0, so x != 0 cannot be annihilated
+// by every D_i R_i.  (Also needs the ICC apply itself SPD -- guaranteed by
+// PETSc ICC's default Manteuffel shift.)  Hence CG remains valid.
+// eps = 1 reproduces sASM exactly; eps = 0 is the both-sides 0/1 restriction
+// (= RASH of Cai-Sarkis 1999); general eps is a symmetrized weighted RAS
+// (Gander's RASH_l), i.e. the SORAS sandwich with Dirichlet local matrices.
+// ---------------------------------------------------------------------------
+struct LocalPUCtx
+{
+    PC  icc;     // ICC on the overlapped subdomain block (COMM_SELF)
+    Vec w;       // local diagonal weight d_i
+    Vec tmp;     // scratch
+};
+
+extern "C" PetscErrorCode LocalPUApply(PC pc, Vec r, Vec z)
+{
+    LocalPUCtx *c = nullptr;
+    PetscCall(PCShellGetContext(pc, (void**)&c));
+    PetscCall(VecPointwiseMult(c->tmp, c->w, r));   // tmp = D_i r
+    PetscCall(PCApply(c->icc, c->tmp, z));          // z = ICC^{-1} tmp
+    PetscCall(VecPointwiseMult(z, c->w, z));        // z = D_i z
+    return PETSC_SUCCESS;
+}
+
+extern "C" PetscErrorCode LocalPUDestroy(PC pc)
+{
+    LocalPUCtx *c = nullptr;
+    PetscCall(PCShellGetContext(pc, (void**)&c));
+    if (c)
+    {
+        PetscCall(PCDestroy(&c->icc));
+        PetscCall(VecDestroy(&c->w));
+        PetscCall(VecDestroy(&c->tmp));
+        delete c;
+    }
+    PetscCall(PCShellSetContext(pc, nullptr));
+    return PETSC_SUCCESS;
+}
+
 // Build an inner PCASM_BASIC + ICC, compute its overlap-aware multiplicity
 // vector, then install a PCSHELL on the outer KSP that applies
 // D^{-1/2} * M_BASIC^{-1} * D^{-1/2}.
@@ -266,7 +314,9 @@ static void InstallScaledASM(KSP ksp, Mat A,
                              PetscInt overlap, PetscInt icc_levels,
                              int my_rank,
                              int cheby_deg = 0,
-                             int weight_mode = 0)   // 0:D^-1/2 both, 1:D^-1 both, 2:D^-1 left only
+                             int weight_mode = 0,   // 0:D^-1/2 both, 1:D^-1 both, 2:D^-1 left,
+                                                    // 3: per-subdomain eps-PU inside the sum
+                             double pu_eps = 0.25)  // eps for weight_mode 3
 {
     // cheby_deg == 0 : block solve = preonly + ICC(icc_levels)   [scheme 3]
     // cheby_deg >= 1 : block solve = cheby_deg steps of Chebyshev,
@@ -287,9 +337,42 @@ static void InstallScaledASM(KSP ksp, Mat A,
     PCSetOperators(inner_pc, A, A);
     if (my_rank == 0) { std::cout << "PCSetUp... " << std::flush; }
     PCSetUp(inner_pc);
-    if (my_rank == 0) { std::cout << "ok\n  [sASM step 2] sub-KSP cfg... " << std::flush; }
+    if (my_rank == 0) { std::cout << "ok\n  [sASM step 2] multiplicity... " << std::flush; }
 
-    // 2. Configure the sub-KSPs.
+    // 2. Multiplicity vector m[k] = #subdomains that contain k.  Needed by
+    //    the global outer weights (modes 0-2) AND by the per-subdomain local
+    //    weights of mode 3, so it is computed BEFORE the sub-KSP config.
+    //    is[i] is the WITH-overlap IS; is_local[i] the rank's own DOFs.
+    int dbg_rank;
+    MPI_Comm_rank(PetscObjectComm((PetscObject)A), &dbg_rank);
+    Vec mult = nullptr;
+    MatCreateVecs(A, &mult, NULL);
+    VecSet(mult, 0.0);
+    PetscInt n_sub = 0;
+    IS *is_with_overlap = nullptr, *is_local_only = nullptr;
+    PCASMGetLocalSubdomains(inner_pc, &n_sub, &is_with_overlap, &is_local_only);
+    if (dbg_rank == 0)
+    {
+        PetscInt isize = 0;
+        if (n_sub > 0) { ISGetLocalSize(is_with_overlap[0], &isize); }
+        std::cout << "n_local=" << n_sub << " is_size[0]=" << isize
+                  << " loop..." << std::flush;
+    }
+    for (PetscInt i = 0; i < n_sub; ++i)
+    {
+        const PetscInt *idx = nullptr;
+        PetscInt        n   = 0;
+        ISGetLocalSize(is_with_overlap[i], &n);
+        ISGetIndices(is_with_overlap[i], &idx);
+        std::vector<PetscScalar> ones(n, 1.0);
+        VecSetValues(mult, n, idx, ones.data(), ADD_VALUES);
+        ISRestoreIndices(is_with_overlap[i], &idx);
+    }
+    VecAssemblyBegin(mult);
+    VecAssemblyEnd(mult);
+    if (my_rank == 0) { std::cout << "ok\n  [sASM step 3] sub-KSP cfg... " << std::flush; }
+
+    // 3. Configure the sub-KSPs.
     {
         KSP     *sub_ksps = nullptr;
         PetscInt n_local  = 0, first = 0;
@@ -297,7 +380,61 @@ static void InstallScaledASM(KSP ksp, Mat A,
         for (PetscInt i = 0; i < n_local; ++i)
         {
             PC sub_pc = nullptr;
-            if (cheby_deg <= 0)
+            if (weight_mode == 3)
+            {
+                // scheme 7: eps-PU sandwich around ICC inside this subdomain.
+                // Owner test below assumes the default PCASM decomposition
+                // (1 subdomain per rank = the matrix ownership range + overlap).
+                if (n_local != 1)   // every violating rank must speak up
+                    std::cout << "[warn] rank " << my_rank << ": eps-PU owner test "
+                              << "assumes 1 subdomain/rank (n_local=" << n_local << ")\n";
+                KSPSetType(sub_ksps[i], KSPPREONLY);
+                Mat Ai = nullptr;
+                KSPGetOperators(sub_ksps[i], &Ai, NULL);
+                PC icc = nullptr;
+                PCCreate(PETSC_COMM_SELF, &icc);
+                PCSetType(icc, PCICC);
+                PCFactorSetLevels(icc, icc_levels);
+                PCSetOperators(icc, Ai, Ai);
+                PCSetUp(icc);
+                // Local weight: gather global multiplicity into subdomain
+                // ordering, then d_i = [own?1:eps]/sqrt(1+(m-1)eps^2).
+                PetscInt nloc = 0;
+                ISGetLocalSize(is_with_overlap[i], &nloc);
+                Vec w = nullptr;
+                VecCreateSeq(PETSC_COMM_SELF, nloc, &w);
+                VecScatter sc = nullptr;
+                VecScatterCreate(mult, is_with_overlap[i], w, NULL, &sc);
+                VecScatterBegin(sc, mult, w, INSERT_VALUES, SCATTER_FORWARD);
+                VecScatterEnd  (sc, mult, w, INSERT_VALUES, SCATTER_FORWARD);
+                VecScatterDestroy(&sc);
+                const PetscInt *gidx = nullptr;
+                ISGetIndices(is_with_overlap[i], &gidx);
+                PetscInt rstart = 0, rend = 0;
+                MatGetOwnershipRange(A, &rstart, &rend);
+                PetscScalar *warr = nullptr;
+                VecGetArray(w, &warr);
+                for (PetscInt l = 0; l < nloc; ++l)
+                {
+                    const PetscReal m   = PetscRealPart(warr[l]);
+                    const bool      own = (gidx[l] >= rstart && gidx[l] < rend);
+                    warr[l] = (own ? 1.0 : pu_eps)
+                              / PetscSqrtReal(1.0 + (m - 1.0)*pu_eps*pu_eps);
+                }
+                VecRestoreArray(w, &warr);
+                ISRestoreIndices(is_with_overlap[i], &gidx);
+                LocalPUCtx *c = new LocalPUCtx;
+                c->icc = icc;
+                c->w   = w;
+                VecDuplicate(w, &c->tmp);
+                KSPGetPC(sub_ksps[i], &sub_pc);
+                PCSetType(sub_pc, PCSHELL);
+                PCShellSetContext(sub_pc, c);
+                PCShellSetApply  (sub_pc, LocalPUApply);
+                PCShellSetDestroy(sub_pc, LocalPUDestroy);
+                PCShellSetName   (sub_pc, "local_epsPU_ICC");
+            }
+            else if (cheby_deg <= 0)
             {
                 KSPSetType(sub_ksps[i], KSPPREONLY);
                 KSPGetPC(sub_ksps[i], &sub_pc);
@@ -321,57 +458,6 @@ static void InstallScaledASM(KSP ksp, Mat A,
         }
         PCSetUpOnBlocks(inner_pc);
     }
-    if (my_rank == 0) { std::cout << "ok\n  [sASM step 3] multiplicity... " << std::flush; }
-
-    // 3. Compute the multiplicity vector m[k] = #subdomains that contain k.
-    //    PCASMGetLocalSubdomains returns the IS lists.  is[i] is the WITH-
-    //    overlap version (so the boundary DOFs of neighbour partitions are
-    //    in there); is_local[i] is just the rank's own DOFs.  We sum the
-    //    "1" indicator across is[i] to get m globally.
-    int dbg_rank;
-    MPI_Comm_rank(PetscObjectComm((PetscObject)A), &dbg_rank);
-    Vec mult = nullptr;
-    if (dbg_rank == 0) { std::cout << "MatCreateVecs..." << std::flush; }
-    MatCreateVecs(A, &mult, NULL);
-    if (dbg_rank == 0) { std::cout << "ok VecSet..." << std::flush; }
-    VecSet(mult, 0.0);
-    if (dbg_rank == 0) { std::cout << "ok GetIS..." << std::flush; }
-    {
-        PetscInt n_local = 0;
-        IS *is_with_overlap = nullptr, *is_local_only = nullptr;
-        PCASMGetLocalSubdomains(inner_pc, &n_local,
-                                &is_with_overlap, &is_local_only);
-        // Every rank prints its own n_local + IS size; helpful even if
-        // the global stdout interleaves.
-        for (int r = 0; r < 1; ++r)   // just rank 0 first
-        {
-            if (dbg_rank == r)
-            {
-                PetscInt isize = 0;
-                if (n_local > 0)
-                {
-                    ISGetLocalSize(is_with_overlap[0], &isize);
-                }
-                std::cout << "ok n_local=" << n_local
-                          << " is_size[0]=" << isize << " loop..." << std::flush;
-            }
-        }
-        for (PetscInt i = 0; i < n_local; ++i)
-        {
-            const PetscInt *idx = nullptr;
-            PetscInt        n   = 0;
-            ISGetLocalSize(is_with_overlap[i], &n);
-            ISGetIndices(is_with_overlap[i], &idx);
-            std::vector<PetscScalar> ones(n, 1.0);
-            VecSetValues(mult, n, idx, ones.data(), ADD_VALUES);
-            ISRestoreIndices(is_with_overlap[i], &idx);
-        }
-        if (dbg_rank == 0) { std::cout << "ok AsmBegin..." << std::flush; }
-        VecAssemblyBegin(mult);
-        if (dbg_rank == 0) { std::cout << "ok AsmEnd..." << std::flush; }
-        VecAssemblyEnd(mult);
-        if (dbg_rank == 0) { std::cout << "ok\n  " << std::flush; }
-    }
 
     // 4. Build the diagonal weight w:
     //      weight_mode 0 -> w = 1/sqrt(m[k])   (D^{-1/2})
@@ -379,10 +465,13 @@ static void InstallScaledASM(KSP ksp, Mat A,
     //      weight_mode 2 -> w = 1/m[k]         (D^{-1}, applied left only)
     if (my_rank == 0) { std::cout << "[step4] dup... " << std::flush; }
     Vec inv_sqrt = nullptr;
-    VecDuplicate(mult, &inv_sqrt);
-    VecCopy(mult, inv_sqrt);
-    VecReciprocal(inv_sqrt);                 // 1/m[k]
-    if (weight_mode == 0) { VecSqrtAbs(inv_sqrt); }   // -> 1/sqrt(m[k]) for sASM
+    if (weight_mode != 3)   // mode 3: the weights live inside the sub-PCs
+    {
+        VecDuplicate(mult, &inv_sqrt);
+        VecCopy(mult, inv_sqrt);
+        VecReciprocal(inv_sqrt);                 // 1/m[k]
+        if (weight_mode == 0) { VecSqrtAbs(inv_sqrt); }   // -> 1/sqrt(m[k]) for sASM
+    }
     if (my_rank == 0) { std::cout << "ok\n  [sASM step 4b] range... " << std::flush; }
 
     {
@@ -408,9 +497,9 @@ static void InstallScaledASM(KSP ksp, Mat A,
 
     SASMCtx *ctx = new SASMCtx;
     ctx->inner_pc = inner_pc;
-    ctx->w        = inv_sqrt;            // D^{-1/2} (mode 0) or D^{-1} (mode 1/2)
-    ctx->pre      = (weight_mode == 2) ? 0 : 1;   // left+right except mode 2 (left/post only)
-    ctx->post     = 1;
+    ctx->w        = inv_sqrt;            // D^{-1/2} (0) / D^{-1} (1,2) / NULL (3)
+    ctx->pre      = (weight_mode == 2 || weight_mode == 3) ? 0 : 1;
+    ctx->post     = (weight_mode == 3) ? 0 : 1;   // mode 3: outer = pure pass-through
     MatCreateVecs(A, &ctx->tmp, NULL);
 
     PCShellSetContext(pc_outer, ctx);
@@ -512,11 +601,12 @@ int main(int argc, char *argv[])
             "3:CG+sASM (D^-1/2 BASIC D^-1/2)",
             "4:CG+sASM + Chebyshev block solve",
             "5:CG + D^-1 BASIC D^-1 (sym, over-norm)",
-            "6:D^-1 BASIC (non-symmetric, one-sided)" };
+            "6:D^-1 BASIC (non-symmetric, one-sided)",
+            "7:CG + eps-PU weighted ASM (sym, per-subdomain)" };
         std::cout << "================================================\n"
                   << "  asm_demo  (ranks=" << num_ranks
                   << ", fix_level=" << fix_level
-                  << ", scheme=" << (scheme>=0 && scheme<=6 ? scheme_name[scheme] : "?")
+                  << ", scheme=" << (scheme>=0 && scheme<=7 ? scheme_name[scheme] : "?")
                   << ", nx=" << nx << ")\n"
                   << "================================================\n";
     }
@@ -858,12 +948,13 @@ int main(int argc, char *argv[])
     // the user's -ksp_* options land on the KSP, then (b) overwrite the
     // outer PC with our PCSHELL.  Done in this order, the PCSHELL is the
     // final PC seen by KSPSolve and our installation is not clobbered.
-    if (scheme >= 3 && scheme <= 6)
+    if (scheme >= 3 && scheme <= 7)
     {
         // scheme 3 = sASM (D^-1/2 .. D^-1/2) + preonly/ICC block solve
         // scheme 4 = sASM + Chebyshev(deg) block solve (deg from -localcheby, def 2)
         // scheme 5 = D^-1 BASIC D^-1 (symmetric, over-normalized) + ICC
         // scheme 6 = D^-1 BASIC      (non-symmetric, one-sided)    + ICC
+        // scheme 7 = per-subdomain eps-PU weighted ASM (symmetric; -pueps, def 0.25)
         pcg.Customize(true);                       // runs KSPSetFromOptions
         KSP   ksp_raw = static_cast<KSP>(pcg);
         Mat   A_raw   = nullptr;
@@ -881,8 +972,14 @@ int main(int argc, char *argv[])
                 if (std::string(argv[i]) == "-localcheby" && i + 1 < argc)
                     cheby_deg = std::atoi(argv[i+1]);
         }
-        int weight_mode = (scheme == 5) ? 1 : (scheme == 6) ? 2 : 0;
-        InstallScaledASM(ksp_raw, A_raw, overlap, icc_lev, my_rank, cheby_deg, weight_mode);
+        double pu_eps = 0.25;
+        if (scheme == 7)
+            for (int i = 1; i < argc; ++i)
+                if (std::string(argv[i]) == "-pueps" && i + 1 < argc)
+                    pu_eps = std::atof(argv[i+1]);
+        int weight_mode = (scheme == 5) ? 1 : (scheme == 6) ? 2 : (scheme == 7) ? 3 : 0;
+        InstallScaledASM(ksp_raw, A_raw, overlap, icc_lev, my_rank, cheby_deg,
+                         weight_mode, pu_eps);
     }
 
     if (warmup)
