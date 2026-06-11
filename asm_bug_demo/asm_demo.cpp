@@ -316,7 +316,12 @@ static void InstallScaledASM(KSP ksp, Mat A,
                              int cheby_deg = 0,
                              int weight_mode = 0,   // 0:D^-1/2 both, 1:D^-1 both, 2:D^-1 left,
                                                     // 3: per-subdomain eps-PU inside the sum
-                             double pu_eps = 0.25)  // eps for weight_mode 3
+                             double pu_eps = 0.25,  // eps for weight_mode 3
+                             double pu_alpha = 1.0, // normalizer exponent (outer-G probe):
+                                                    //   d_i=[own?1:eps]/(1+(m-1)eps^2)^(alpha/2)
+                             double pu_grade = 0.0) // >0: geometric layer-graded weights
+                                                    //   w=q^depth (BFS), exact global renorm;
+                                                    //   overrides eps/alpha.  q=1 == sASM.
 {
     // cheby_deg == 0 : block solve = preonly + ICC(icc_levels)   [scheme 3]
     // cheby_deg >= 1 : block solve = cheby_deg steps of Chebyshev,
@@ -412,16 +417,88 @@ static void InstallScaledASM(KSP ksp, Mat A,
                 ISGetIndices(is_with_overlap[i], &gidx);
                 PetscInt rstart = 0, rend = 0;
                 MatGetOwnershipRange(A, &rstart, &rend);
-                PetscScalar *warr = nullptr;
-                VecGetArray(w, &warr);
-                for (PetscInt l = 0; l < nloc; ++l)
+                if (pu_grade > 0.0)
                 {
-                    const PetscReal m   = PetscRealPart(warr[l]);
-                    const bool      own = (gidx[l] >= rstart && gidx[l] < rend);
-                    warr[l] = (own ? 1.0 : pu_eps)
-                              / PetscSqrtReal(1.0 + (m - 1.0)*pu_eps*pu_eps);
+                    // Layer-graded weights: w_unnorm = q^depth, where depth =
+                    // graph distance (BFS on the local overlapped block) from
+                    // the owner core; depth j == j-th MatIncreaseOverlap layer,
+                    // so the outermost (most polluted, next to the artificial
+                    // boundary) layer is damped hardest.  Then EXACT global
+                    // renormalisation sum_i w_i(k)^2 = 1 assembled like mult.
+                    // q = 1 -> w_unnorm == 1 -> w = 1/sqrt(m) == sASM (sanity).
+                    std::vector<PetscInt> depthv(nloc, -1);
+                    std::vector<PetscInt> q1, q2;
+                    for (PetscInt l = 0; l < nloc; ++l)
+                        if (gidx[l] >= rstart && gidx[l] < rend)
+                        {
+                            depthv[l] = 0;
+                            q1.push_back(l);
+                        }
+                    PetscInt lev = 0;
+                    while (!q1.empty())
+                    {
+                        ++lev;
+                        q2.clear();
+                        for (size_t u = 0; u < q1.size(); ++u)
+                        {
+                            PetscInt        ncols = 0;
+                            const PetscInt *cols  = nullptr;
+                            MatGetRow(Ai, q1[u], &ncols, &cols, NULL);
+                            for (PetscInt j = 0; j < ncols; ++j)
+                                if (depthv[cols[j]] < 0)
+                                {
+                                    depthv[cols[j]] = lev;
+                                    q2.push_back(cols[j]);
+                                }
+                            MatRestoreRow(Ai, q1[u], &ncols, &cols, NULL);
+                        }
+                        q1.swap(q2);
+                    }
+                    std::vector<PetscScalar> wun(nloc), w2(nloc);
+                    for (PetscInt l = 0; l < nloc; ++l)
+                    {
+                        const PetscInt d = (depthv[l] < 0) ? lev + 1 : depthv[l];
+                        wun[l] = PetscPowReal(pu_grade, (PetscReal)d);
+                        w2[l]  = wun[l]*wun[l];
+                    }
+                    Vec ssum = nullptr;             // global sum of squares
+                    MatCreateVecs(A, &ssum, NULL);
+                    VecSet(ssum, 0.0);
+                    VecSetValues(ssum, nloc, gidx, w2.data(), ADD_VALUES);
+                    VecAssemblyBegin(ssum);
+                    VecAssemblyEnd(ssum);
+                    Vec sloc = nullptr;
+                    VecCreateSeq(PETSC_COMM_SELF, nloc, &sloc);
+                    VecScatter sc2 = nullptr;
+                    VecScatterCreate(ssum, is_with_overlap[i], sloc, NULL, &sc2);
+                    VecScatterBegin(sc2, ssum, sloc, INSERT_VALUES, SCATTER_FORWARD);
+                    VecScatterEnd  (sc2, ssum, sloc, INSERT_VALUES, SCATTER_FORWARD);
+                    VecScatterDestroy(&sc2);
+                    VecDestroy(&ssum);
+                    const PetscScalar *sarr = nullptr;
+                    VecGetArrayRead(sloc, &sarr);
+                    PetscScalar *warr = nullptr;
+                    VecGetArray(w, &warr);
+                    for (PetscInt l = 0; l < nloc; ++l)
+                        warr[l] = wun[l] / PetscSqrtReal(PetscRealPart(sarr[l]));
+                    VecRestoreArray(w, &warr);
+                    VecRestoreArrayRead(sloc, &sarr);
+                    VecDestroy(&sloc);
                 }
-                VecRestoreArray(w, &warr);
+                else
+                {
+                    PetscScalar *warr = nullptr;
+                    VecGetArray(w, &warr);
+                    for (PetscInt l = 0; l < nloc; ++l)
+                    {
+                        const PetscReal m   = PetscRealPart(warr[l]);
+                        const bool      own = (gidx[l] >= rstart && gidx[l] < rend);
+                        warr[l] = (own ? 1.0 : pu_eps)
+                                  / PetscPowReal(1.0 + (m - 1.0)*pu_eps*pu_eps,
+                                                 0.5*pu_alpha);
+                    }
+                    VecRestoreArray(w, &warr);
+                }
                 ISRestoreIndices(is_with_overlap[i], &gidx);
                 LocalPUCtx *c = new LocalPUCtx;
                 c->icc = icc;
@@ -972,14 +1049,20 @@ int main(int argc, char *argv[])
                 if (std::string(argv[i]) == "-localcheby" && i + 1 < argc)
                     cheby_deg = std::atoi(argv[i+1]);
         }
-        double pu_eps = 0.25;
+        double pu_eps = 0.25, pu_alpha = 1.0, pu_grade = 0.0;
         if (scheme == 7)
             for (int i = 1; i < argc; ++i)
-                if (std::string(argv[i]) == "-pueps" && i + 1 < argc)
-                    pu_eps = std::atof(argv[i+1]);
+            {
+                if (std::string(argv[i]) == "-pueps"   && i + 1 < argc)
+                    pu_eps   = std::atof(argv[i+1]);
+                if (std::string(argv[i]) == "-pualpha" && i + 1 < argc)
+                    pu_alpha = std::atof(argv[i+1]);
+                if (std::string(argv[i]) == "-pugrade" && i + 1 < argc)
+                    pu_grade = std::atof(argv[i+1]);
+            }
         int weight_mode = (scheme == 5) ? 1 : (scheme == 6) ? 2 : (scheme == 7) ? 3 : 0;
         InstallScaledASM(ksp_raw, A_raw, overlap, icc_lev, my_rank, cheby_deg,
-                         weight_mode, pu_eps);
+                         weight_mode, pu_eps, pu_alpha, pu_grade);
     }
 
     if (warmup)
