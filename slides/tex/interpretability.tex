@@ -177,6 +177,32 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 \end{itemize}
 \end{frame}
 
+% ===== concept: what is the subdomain solve =====
+\begin{frame}{What does ``exact / inexact subdomain solve'' actually solve?}
+\framesubtitle{$A_i=R_iAR_i^{\top}$ --- the global Laplace restricted to subdomain $i$ (with overlap)}
+\begin{itemize}\itemsep0.45em
+  \item $A_i$ implicitly imposes \textbf{homogeneous Dirichlet} on the \emph{artificial cut} between subdomains (the cross-interface coupling is dropped), and keeps the physical BC on faces that touch the real boundary.
+  \item \textbf{Exact solve} $A_i^{-1}$ (Cholesky) $=$ \emph{exactly} solving a local Dirichlet--Laplace subproblem. $\;\omega=1$.
+  \item \textbf{Inexact solve} ICC(0) $=$ exactly solving a \emph{perturbed} operator $\tilde A_i=A_i-E_i$, where $E_i$ is the fill that ICC(0) \emph{drops}. Equivalently, the same Dirichlet subproblem solved only approximately. This $E_i$ \textbf{is} the source of $\omega>1$, and its error sits in the overlap/seam.
+\end{itemize}
+\vskip0.3em
+\begin{block}{So ``inexact'' is not mysterious}
+\footnotesize ICC(0) keeps only $A_i$'s nonzero pattern and throws away all fill-in. Whether that loses anything depends entirely on the \textbf{ordering} of the unknowns --- next slide.
+\end{block}
+\end{frame}
+
+% ===== Fig 7: reordering makes ICC inexact =====
+\begin{frame}{Reordering the unknowns turns the ICC inexact}
+\framesubtitle{same subdomains / overlap / weights --- only the ICC \emph{ordering} changes (natural / RCM / random)}
+\begin{center}\includegraphics[width=0.97\textwidth]{fig7_reorder}\end{center}
+\vskip-0.25em
+\begin{itemize}\itemsep0.1em\footnotesize
+  \item \textbf{(b)} the headline: 1D \emph{natural} \& \emph{RCM} give $\eta\approx10^{-15}$ --- ICC \emph{is} exact Cholesky (a tridiagonal has no fill); 1D \emph{random} gives $\eta=0.67$ --- ICC is now genuinely inexact.
+  \item \textbf{(a)/(d)} 1D: natural/RCM converge in 15 it; random blows up to 113 (exactness destroyed). RCM keeps 1D banded, so it stays exact --- not every permutation breaks it, only a band-widening (random) one.
+  \item \textbf{(c)/(d)} 2D: the 5-point ICC already has fill ($\eta{=}0.17$); random makes it worse ($\eta{=}0.26$), $102\!\to\!147$ it; sASM repairs both ($102\!\to\!67$, $147\!\to\!92$), more so the more inexact the solve.
+\end{itemize}
+\end{frame}
+
 % ===== Conclusion =====
 \begin{frame}{Conclusion}
 \begin{block}{The one-sentence picture}
