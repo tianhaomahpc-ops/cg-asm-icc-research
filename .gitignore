@@ -34,3 +34,7 @@ slides/tex/*.out
 slides/tex/*.snm
 slides/tex/*.toc
 slides/tex/*.jpg
+
+# infoprop data dumps (regenerable via ./infoprop)
+asm_bug_demo/infoprop_out/*.txt
+asm_bug_demo/infoprop
