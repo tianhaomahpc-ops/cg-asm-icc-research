@@ -200,3 +200,38 @@ sASM **不修不精确本身**($\omega$ 仍 $>1$),只阻止过度计数去放大
 > **订正说明**:$\mathbf D=\mathrm{diag}(m_k)$ 度量的过度计数是**最大重数 $\hat N$**(=$\max\mathrm{diag}\mathbf D$),
 > 不是染色数 $N_c$;严格链 $\hat N\le N_c\le N_k$。sASM 去掉的是 $\hat N$。规则盒状分解里 $\hat N=N_c$(Fig 8 实测重合),
 > 故早期把二者等同在数值上无害,但概念上应区分。$\eta$ 只是定性开关,严格不精确度量是 $\kappa(M_i^{-1}A_i)$、上界常数 $\omega=\lambda_{\max}(M_i^{-1}A_i)$。
+
+---
+
+## 3. 如何"很好地"降低迭代数:给 sASM 加粗空间(两层)—— Fig 9
+
+**诊断**(由 Fig 8 直接读出):sASM 已经把 $\lambda_{\max}\approx\omega=O(1)$ 压住(去掉了 $\hat N$),
+**剩下的瓶颈是 $\lambda_{\min}$ 极小**(~0.002)。$\kappa=\lambda_{\max}/\lambda_{\min}\approx590$ 几乎全由 $\lambda_{\min}$ 决定。
+$\lambda_{\min}\ge C_0^{-2}$,而单层无粗空间时 $C_0^2$ 随**子域个数增大而爆**(= Fig 2 的"每步只传一个子域"、缺全局耦合)。
+**所以再怎么调权重都没用**($\lambda_{\max}$ 已最小);**唯一的大杠杆是抬 $\lambda_{\min}$ = 加粗空间**。
+
+**改进 = 两层对称 sASM**(保持加性+对称 ⟹ 仍可用 CG、仍低内存):
+$$\mathbf M_{2}^{-1}=\underbrace{R_0^\top A_0^{-1}R_0}_{\text{粗(抬 }\lambda_{\min})}+\underbrace{\mathbf D^{-1/2}\Big(\textstyle\sum_iR_i^\top A_i^{-1}R_i\Big)\mathbf D^{-1/2}}_{\text{sASM 细(保持 }\lambda_{\max}\approx\omega)}.$$
+粗空间用 **Nicolaides 单位分解**:每个子域一个粗基 $\phi_i(k)=1/m_k\ (k\in\Omega_i)$,$\sum_i\phi_i=1$;
+$A_0=R_0AR_0^\top$ Galerkin(维数=子域数,Cholesky 直接解)。代码 [asm_bug_demo/twolevel.c](asm_bug_demo/twolevel.c)。
+
+### Fig 9 `fig9_twolevel.png` — 加粗空间把瓶颈 $\lambda_{\min}$ 抬起来、迭代变可扩展
+- **【对应问题】** 2D Laplace,ICC(0)子域解。(a)固定 $120^2$、$6\times6$、$O{=}2$;(b)固定子域尺寸($n{=}20P$)、扫子域数。
+- **【(a)左 = 固定配置,one-level vs two-level 的 $\lambda_{\min},\lambda_{\max},\kappa$】**(对数柱)
+  - 粗空间把 **$\lambda_{\min}$ 抬 14×**(0.0021→0.030),$\lambda_{\max}$ 几乎不动(1.25→2.07),
+    **$\kappa$ 降 8.7×**(596→69),**迭代 121→64**(≈ 砍半)。
+- **【(b)右 = 可扩展性(决定性)】** 横轴子域数(16→144,子域尺寸固定),纵轴 CG 迭代:
+  - **one-level**:81→121→158→188→**217**(随 $\sqrt{\#\text{子域}}$ 增长——单层的"诅咒")。
+  - **two-level**:59→64→64→65→**65**(**平**,与子域数无关 = 可扩展)。
+- **【结论】**
+  - **瓶颈是 $\lambda_{\min}$ 不是 $\lambda_{\max}$**:调权重动不了 $\lambda_{\min}$,**加粗空间**才动得了。
+  - **两层 sASM 把迭代数变得与子域数无关**(144 子域时 3.3× 少,且差距随规模继续拉大)——这才是大规模并行真正要的可扩展性。
+  - 仍是**对称、加性、CG 可用、低内存**(粗空间维数=子域数,极小),契合"新对称 CG 低内存方法"的目标。
+
+**还能再小幅改进的方向**(次要,带 tradeoff):
+- 降 $\omega$:子域用更富的 ICC(level≥1)或 RCM 排序减少丢弃的填充($\omega$ 1.25→~1),代价是内存/时间。
+- 增 overlap $\delta$:$\lambda_{\min}$ 随 $\delta$ 略升(Fig 8b 中 $\kappa$ 随 $O$ 下降),但不改子域数的标度——治标不治本。
+- 更强粗空间:Nicolaides 已够;难问题(强各向异性/跳系数)可换 **GenEO**(局部广义特征向量),更稳健但设置更贵。
+
+**一句话**:sASM 把"过度计数 $\hat N$"那一项解决了;要"很好地"再降迭代,就**加一个粗空间**把 $\lambda_{\min}$ 那一项也解决——
+两层 sASM 迭代砍半且可扩展,是直接面向大规模并行的改进。

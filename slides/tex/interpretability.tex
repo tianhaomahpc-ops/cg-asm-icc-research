@@ -215,6 +215,24 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 \end{itemize}
 \end{frame}
 
+% ===== Fig 9: two-level improvement =====
+\begin{frame}{Improving sASM: the bottleneck is now $\lambda_{\min}$ --- add a coarse space}
+\framesubtitle{sASM fixed $\lambda_{\max}\!\approx\!\omega$; what is left is tiny $\lambda_{\min}\!\ge\!C_0^{-2}$ (missing global coupling) $\Rightarrow$ two-level sASM}
+\vskip-0.3em
+{\small\[
+\mathbf M_{2}^{-1}=\underbrace{R_0^\top A_0^{-1}R_0}_{\text{coarse: lifts }\lambda_{\min}}
++\underbrace{\mathbf D^{-1/2}\big(\textstyle\sum_i R_i^\top A_i^{-1}R_i\big)\mathbf D^{-1/2}}_{\text{sASM fine: keeps }\lambda_{\max}\approx\omega}
+\quad\text{\footnotesize(Nicolaides PoU, symmetric, CG-OK)}
+\]}
+\vskip-0.4em
+\begin{center}\includegraphics[width=0.80\textwidth]{fig9_twolevel}\end{center}
+\vskip-0.4em
+\begin{center}\scriptsize
+(a) $\lambda_{\min}$ 14$\times$ up, $\kappa$ 8.7$\times$ down, its 121$\to$64.\quad
+(b) one-level $\to$217; \textbf{two-level flat ($\approx$64) = scalable}.
+\end{center}
+\end{frame}
+
 % ===== Conclusion =====
 \begin{frame}{Conclusion}
 \begin{block}{The one-sentence picture}
@@ -229,7 +247,8 @@ that product, so the inexact corrections are no longer amplified and CG recovers
 \begin{itemize}\itemsep0.28em
   \item \textbf{Q1:} inexactness is bad because BASIC \emph{multiplies} it by the multiplicity over-count $\hat N=\max_k m_k$ ($\le\Nc$); both grow with overlap, so iterations rise with overlap. Measured: $\lambda_{\max}(\text{BASIC,exact})=\hat N$, lifted to $\omega\hat N$ by ICC (Fig.~8).
   \item \textbf{Q2:} sASM removes $\hat N$ (partition of unity, Fig.~8 flat), so the inexactness is no longer amplified --- it helps \emph{exactly} when the solve is inexact, and is neutral when exact.
-  \item Information always propagates $\sim$1 subdomain/iteration (Fig.~2): a one-level cost, untouched by either method.
+  \item Information always propagates $\sim$1 subdomain/iteration (Fig.~2): a one-level cost, untouched by \emph{weighting}.
+  \item \textbf{To reduce iterations a lot:} the residual bottleneck is now $\lambda_{\min}$, not $\lambda_{\max}$ --- add a coarse space. A symmetric \textbf{two-level sASM} halves iterations and makes them \emph{scalable} (flat in \#subdomains, Fig.~9).
 \end{itemize}
 \end{frame}
 
