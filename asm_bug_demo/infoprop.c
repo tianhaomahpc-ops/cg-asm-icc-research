@@ -330,6 +330,46 @@ int main(int argc, char **argv)
             free(S); }
     }
 
+    /* ---- overlap sweep (2D, ICC(0)): residual field at a FIXED CG iteration
+     *      for O = 1, 2, 4, to show the seam error growing with overlap.
+     *      Also reports BASIC vs sASM iteration counts (the anomaly: O up -> iter up). ---- */
+    {
+        const PetscInt nO = 128, POV = 8, NSO = POV*POV, KDUMP = 40;
+        Mat AO = Laplace2D(nO);
+        Vec bO,xO; MatCreateVecs(AO,&bO,&xO); VecZeroEntries(bO);
+        { PetscScalar *ba; VecGetArray(bO,&ba);
+          for(PetscInt b=0;b<nO;++b) ba[b*nO+0]=1.0; VecRestoreArray(bO,&ba); }
+        int Ovs[3] = {1,2,4};
+        for (int oi = 0; oi < 3; ++oi) {
+            int O = Ovs[oi];
+            Sub *S = (Sub*)malloc(sizeof(Sub)*NSO); int s3 = 0;
+            for (int q=0;q<POV;++q) for (int p=0;p<POV;++p) {
+                PetscInt axlo=(p*nO)/POV, axhi=((p+1)*nO)/POV;
+                PetscInt bylo=(q*nO)/POV, byhi=((q+1)*nO)/POV;
+                PetscInt al=axlo-O<0?0:axlo-O, ar=axhi+O>nO?nO:axhi+O;
+                PetscInt bl=bylo-O<0?0:bylo-O, br=byhi+O>nO?nO:byhi+O;
+                PetscInt ni=(ar-al)*(br-bl), *idx=(PetscInt*)malloc(sizeof(PetscInt)*ni),c=0;
+                for(PetscInt b=bl;b<br;++b) for(PetscInt a=al;a<ar;++a) idx[c++]=b*nO+a;
+                BuildSub(AO,idx,ni,1,&S[s3++]); free(idx);
+            }
+            Vec mult=Multiplicity(AO,S,NSO);
+            Vec dsq; VecDuplicate(mult,&dsq); VecCopy(mult,dsq);
+            VecReciprocal(dsq); VecSqrtAbs(dsq);
+            char mfn[64]; sprintf(mfn,"ip2d_ovl_mult_O%d.txt",O); DumpField(mult,nO,mfn);
+            PetscReal hB[6000],hS[6000]; PetscInt dk[1]={KDUMP};
+            char tB[40],tS[40]; sprintf(tB,"ovlB_O%d",O); sprintf(tS,"ovlS_O%d",O);
+            PetscInt iB=PCG(AO,S,NSO,0,dsq,bO,xO,1e-8,5999,hB,nO,tB,dk,1);
+            PetscInt iS=PCG(AO,S,NSO,1,dsq,bO,xO,1e-8,5999,hS,nO,tS,dk,1);
+            PetscPrintf(PETSC_COMM_SELF,"[2D ovl O=%d, ICC(0), %dx%d %d subdoms] BASIC %d iters, sASM %d iters\n",
+                        O,(int)nO,(int)nO,(int)NSO,(int)iB,(int)iS);
+            VecDestroy(&mult); VecDestroy(&dsq);
+            for(int i=0;i<NSO;++i){ISDestroy(&S[i].is);MatDestroy(&S[i].Ai);
+                KSPDestroy(&S[i].ksp);VecDestroy(&S[i].ri);VecDestroy(&S[i].yi);free(S[i].idx);}
+            free(S);
+        }
+        VecDestroy(&bO); VecDestroy(&xO); MatDestroy(&AO);
+    }
+
     /* dump 2D multiplicity for reference */
     { FILE *f=fopen("ip2d_mult.txt","w"); const PetscScalar *ma;
       VecGetArrayRead(mult2,&ma);

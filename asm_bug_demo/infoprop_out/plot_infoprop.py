@@ -112,3 +112,51 @@ fig.suptitle("Fig. 4  —  ICC(0) subdomain solve: residual $|r|$ at MATCHED CG 
 fig.savefig("fig4_heatmap2d.png",bbox_inches="tight"); plt.close(fig)
 
 print("wrote fig1_overcount.png fig2_front.png fig3_reshist2d.png fig4_heatmap2d.png")
+
+# ---------- Fig 5: overlap sweep (2D ICC) -- seam localization widens with O ----------
+from matplotlib.colors import LogNorm
+Ovs=[1,2,4]; iterB={1:182,2:195,4:185}; iterS={1:131,2:130,4:129}
+allf=[np.abs(np.loadtxt(f"ip2d_pcg_ovl{m}_O{O}_k40.txt"))+1e-12
+      for m in ["B","S"] for O in Ovs]
+vmax=max(f.max() for f in allf); vmin=vmax*1e-4
+fig,axes=plt.subplots(2,len(Ovs),figsize=(2.3*len(Ovs)+1,4.8))
+for col,O in enumerate(Ovs):
+    for row,(m,lab,it) in enumerate([("B","BASIC",iterB),("S","sASM",iterS)]):
+        f=np.abs(np.loadtxt(f"ip2d_pcg_ovl{m}_O{O}_k40.txt"))+1e-12
+        im=axes[row,col].imshow(f,origin="lower",cmap="magma",norm=LogNorm(vmin=vmin,vmax=vmax))
+        axes[row,col].set_xticks([]); axes[row,col].set_yticks([])
+        if row==0: axes[row,col].set_title(f"overlap $O={O}$  ({iterB[O]} it)",fontsize=9,color=ACC)
+axes[0,0].set_ylabel("BASIC",fontsize=11,color=ACC,fontweight="bold")
+axes[1,0].set_ylabel("sASM",fontsize=11,color=STRUCT,fontweight="bold")
+for col,O in enumerate(Ovs): axes[1,col].set_xlabel(f"sASM {iterS[O]} it",fontsize=8,color=STRUCT)
+fig.colorbar(im,ax=axes,fraction=0.012,pad=0.01,label="$|r|$ (log)")
+fig.suptitle("Fig. 5  —  Overlap sweep ($128^2$, $8{\\times}8$, ICC(0), residual at fixed $k{=}40$): BASIC's residual sits in the\n"
+   "over-counted seams; the over-counted region (and the residual share trapped there, $0.45\\!\\to\\!0.51\\!\\to\\!0.64$) widens with $O$; sASM clears it at every $O$",
+   color=STRUCT,fontweight="bold",fontsize=9)
+fig.savefig("fig5_overlap_sweep.png",bbox_inches="tight"); plt.close(fig)
+
+# ---------- Fig 6: 3D Laplace (real Sys3) residual + overlap anomaly ----------
+def relhist(fn):
+    d=np.loadtxt(fn); it=d[:,0]; r=d[:,1]; return it, r/r[0]
+fig,(ax,ax2)=plt.subplots(1,2,figsize=(11,4.4),width_ratios=[1.25,1])
+for fn,c,ls,lab in [("res3d_BASIC_chol.txt",ACC,"-","BASIC, exact Cholesky (38 it)"),
+                    ("res3d_BASIC_icc.txt", ACC,"--","BASIC, ICC(0) (214 it)"),
+                    ("res3d_sASM_icc.txt",  STRUCT,"--","sASM, ICC(0) (134 it)")]:
+    it,r=relhist(fn); ax.semilogy(it,r,ls,color=c,lw=1.9,label=lab)
+ax.set_xlabel("CG iteration"); ax.set_ylabel(r"relative residual $\|r\|/\|r_0\|$")
+ax.grid(True,which="both",alpha=.25); ax.legend(fontsize=8.5,loc="upper right")
+ax.set_title("3D Laplace, Sys 3 ($n_x{=}48$, $O{=}2$): with ICC, BASIC 214 $\\to$ sASM 134;\n"
+             "exact Cholesky is fast (38) $=$ no anomaly",fontsize=9.5)
+# right: overlap anomaly (canonical 3D data, rtol 1e-6)
+O=[0,1,2]; B=[132,148,179]; S=[132,104,103]
+ax2.plot(O,B,"o-",color=ACC,lw=2,label="BASIC + ICC(0)")
+ax2.plot(O,S,"s-",color=STRUCT,lw=2,label="sASM + ICC(0)")
+ax2.set_xlabel("overlap $O$"); ax2.set_ylabel("CG iterations"); ax2.set_xticks(O)
+ax2.grid(True,alpha=.25); ax2.legend(fontsize=9)
+ax2.annotate("more overlap\n$\\Rightarrow$ MORE iters\n(error clears slower)",xy=(2,179),xytext=(0.4,168),
+             fontsize=8.5,color=ACC,arrowprops=dict(arrowstyle="-|>",color=ACC))
+ax2.set_title("3D: overlap $\\uparrow$ makes BASIC+ICC worse (the anomaly);\nsASM reverses it",fontsize=9.5)
+fig.suptitle("Fig. 6  —  The same effect on the real 3D Sys 3 (mixed Dirichlet/Neumann Laplace)",
+             color=STRUCT,fontweight="bold",fontsize=10.5)
+fig.tight_layout(rect=[0,0,1,0.93]); fig.savefig("fig6_3d.png"); plt.close(fig)
+print("wrote fig5_overlap_sweep.png fig6_3d.png")

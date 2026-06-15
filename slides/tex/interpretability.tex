@@ -138,6 +138,29 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 \end{beamercolorbox}
 \end{frame}
 
+% ===== Fig 5: overlap sweep =====
+\begin{frame}{Q1, deeper --- the seam error grows with overlap}
+\framesubtitle{2D Laplace, $128^2$, $8\times8$ subdomains, ICC(0); residual $|r|$ at fixed iteration $k{=}40$}
+\begin{center}\includegraphics[width=0.86\textwidth]{fig5_overlap_sweep}\end{center}
+\vskip-0.2em
+\begin{itemize}\itemsep0.15em\footnotesize
+  \item The over-counted seam region \emph{widens} with overlap, and the residual share trapped there grows $0.45\!\to\!0.51\!\to\!0.64$.
+  \item sASM is better at \emph{every} overlap (iters BASIC 182/195/185 vs sASM 131/130/129).
+  \item Honest note: in 2D the iteration count vs $O$ is non-monotone (ICC is only mildly inexact in 2D). The clean monotone ``overlap$\uparrow\Rightarrow$iter$\uparrow$'' is a 3D effect $\to$ next slide.
+\end{itemize}
+\end{frame}
+
+% ===== Fig 6: 3D real Sys3 =====
+\begin{frame}{The same effect on the real 3D problem (Sys 3)}
+\framesubtitle{mixed Dirichlet/Neumann Laplace, $n_x{=}48$, 4 ranks --- the actual torso-type solve}
+\begin{center}\includegraphics[width=0.95\textwidth]{fig6_3d}\end{center}
+\vskip-0.2em
+\begin{itemize}\itemsep0.12em\footnotesize
+  \item \textbf{Left:} ICC --- BASIC 214 slow, sASM 134 recovers; exact Cholesky 38 (no anomaly, the reference).
+  \item \textbf{Right:} the clean monotone anomaly --- BASIC$+$ICC $132\!\to\!148\!\to\!179$ (more overlap, more iters $=$ error clears slower); sASM $132\!\to\!104\!\to\!103$ reverses it.
+\end{itemize}
+\end{frame}
+
 % ===== Q2: why sASM fixes it =====
 \begin{frame}{Q2 --- Why does sASM overcome it?}
 \framesubtitle{$\mathbf M_{\mathrm{sASM}}^{-1}=\mathbf D^{-1/2}\big(\textstyle\sum_i R_i^{\top}A_i^{-1}R_i\big)\mathbf D^{-1/2}$, partition of unity $\sum_i d_i^2=1$}
