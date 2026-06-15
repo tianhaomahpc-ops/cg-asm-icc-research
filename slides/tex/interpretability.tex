@@ -70,9 +70,9 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 % ===== Fig 1: over-counting =====
 \begin{frame}{Mechanism, part 1: BASIC over-counts the overlap}
 \framesubtitle{one preconditioner apply $\sum_i R_i^{\top}A_i^{-1}R_i\,r$ to a localized residual}
-\begin{center}\includegraphics[width=0.92\textwidth]{fig1_overcount}\end{center}
-\vskip-0.2em
-\begin{itemize}\itemsep0.2em\footnotesize
+\begin{center}\includegraphics[width=0.74\textwidth]{fig1_overcount}\end{center}
+\vskip-0.6em
+\begin{itemize}\itemsep0.15em\scriptsize
   \item In the overlap a DOF belongs to $m_k$ subdomains, so its correction is \emph{added} $m_k$ times.
   \item \textbf{BASIC} (red) bumps up at every overlap seam; \textbf{sASM} (blue) is normalized by $1/\sqrt{m_k}$.
   \item This over-count is the algebraic fact $\sum_i R_i^{\top}R_i=\mathbf D=\mathrm{diag}(m_k)$. It is harmless \emph{by itself} --- the next slides show when it bites.
@@ -141,9 +141,9 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 % ===== Fig 5: overlap sweep =====
 \begin{frame}{Q1, deeper --- the seam error grows with overlap}
 \framesubtitle{2D Laplace, $128^2$, $8\times8$ subdomains, ICC(0); residual $|r|$ at fixed iteration $k{=}40$}
-\begin{center}\includegraphics[width=0.86\textwidth]{fig5_overlap_sweep}\end{center}
-\vskip-0.2em
-\begin{itemize}\itemsep0.15em\footnotesize
+\begin{center}\includegraphics[width=0.80\textwidth]{fig5_overlap_sweep}\end{center}
+\vskip-0.5em
+\begin{itemize}\itemsep0.12em\scriptsize
   \item The over-counted seam region \emph{widens} with overlap, and the residual share trapped there grows $0.45\!\to\!0.51\!\to\!0.64$.
   \item sASM is better at \emph{every} overlap (iters BASIC 182/195/185 vs sASM 131/130/129).
   \item Honest note: in 2D the iteration count vs $O$ is non-monotone (ICC is only mildly inexact in 2D). The clean monotone ``overlap$\uparrow\Rightarrow$iter$\uparrow$'' is a 3D effect $\to$ next slide.
@@ -191,15 +191,19 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 \end{block}
 \end{frame}
 
-% ===== Fig 7: reordering makes ICC inexact =====
+% ===== Fig 7: reordering makes ICC inexact (figure) =====
 \begin{frame}{Reordering the unknowns turns the ICC inexact}
-\framesubtitle{same subdomains / overlap / weights --- only the ICC \emph{ordering} changes (natural / RCM / random)}
-\begin{center}\includegraphics[width=0.97\textwidth]{fig7_reorder}\end{center}
-\vskip-0.25em
-\begin{itemize}\itemsep0.1em\footnotesize
-  \item \textbf{(b)} the headline: 1D \emph{natural} \& \emph{RCM} give $\eta\approx10^{-15}$ --- ICC \emph{is} exact Cholesky (a tridiagonal has no fill); 1D \emph{random} gives $\eta=0.67$ --- ICC is now genuinely inexact.
-  \item \textbf{(a)/(d)} 1D: natural/RCM converge in 15 it; random blows up to 113 (exactness destroyed). RCM keeps 1D banded, so it stays exact --- not every permutation breaks it, only a band-widening (random) one.
-  \item \textbf{(c)/(d)} 2D: the 5-point ICC already has fill ($\eta{=}0.17$); random makes it worse ($\eta{=}0.26$), $102\!\to\!147$ it; sASM repairs both ($102\!\to\!67$, $147\!\to\!92$), more so the more inexact the solve.
+\framesubtitle{only the ICC \emph{ordering} changes (natural / RCM / random); subdomains, overlap, weights fixed}
+\begin{center}\includegraphics[width=0.92\textwidth]{fig7_reorder}\end{center}
+\end{frame}
+
+% ===== Fig 7: reading the panels =====
+\begin{frame}{Reading Fig.~7 --- reordering breaks (or keeps) exactness}
+\framesubtitle{$\eta=\mathrm{avg}_i\|A_i u_i-v\|/\|v\|$, the inexactness proxy (one ICC solve of a random $v$; $\eta\approx0$ = exact)}
+\begin{itemize}\itemsep0.35em\footnotesize
+  \item \textbf{(b) the headline.} 1D \emph{natural} \& \emph{RCM}: $\eta\approx10^{-15}$ --- ICC \emph{is} exact Cholesky, because a tridiagonal has \emph{no fill}, so dropping fill drops nothing. 1D \emph{random}: $\eta=0.67$ --- the permutation creates fill that ICC(0) throws away, so ICC is now inexact.
+  \item \textbf{(a)/(d) 1D iterations.} natural/RCM converge in 15; random blows up to 113. RCM keeps the 1D problem banded, so it stays exact --- \emph{not every} permutation breaks exactness, only a band-widening (random) one.
+  \item \textbf{(c)/(d) 2D.} The 5-point ICC already has fill ($\eta{=}0.17$); random makes it worse ($\eta{=}0.26$): $102\!\to\!147$ it. \textbf{sASM repairs both} ($102\!\to\!67$, $147\!\to\!92$), more so the more inexact the solve.
 \end{itemize}
 \end{frame}
 

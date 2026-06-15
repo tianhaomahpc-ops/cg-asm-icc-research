@@ -27,7 +27,7 @@ def hist(dim, ordr):
     S = np.where(a[:, 2] > 0, a[:, 2], np.nan)
     return k, B, S
 
-fig, ax = plt.subplots(2, 2, figsize=(13.5, 9.2))
+fig, ax = plt.subplots(2, 2, figsize=(15.2, 7.9))
 
 # ===== (0,0) 1D residual histories =====
 a = ax[0, 0]
