@@ -1,0 +1,176 @@
+% Interpreting sASM via information propagation + over-counting (1D/2D Laplace).
+% Minimal academic style, English.  Compile: pdflatex (x2).  Figures from infoprop.c.
+\documentclass[aspectratio=169,10pt]{beamer}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\graphicspath{{../../asm_bug_demo/infoprop_out/}}
+
+\definecolor{Struct}{HTML}{1F3A5F}
+\definecolor{Gray}{HTML}{6E6E6E}
+\definecolor{Accent}{HTML}{8C2D04}
+\usetheme{default}
+\usefonttheme{professionalfonts}
+\setbeamertemplate{navigation symbols}{}
+\setbeamercolor{structure}{fg=Struct}
+\setbeamercolor{frametitle}{fg=Struct}
+\setbeamerfont{frametitle}{series=\bfseries,size=\large}
+\setbeamercolor{block title}{fg=white,bg=Struct}
+\setbeamercolor{block body}{bg=Struct!6}
+\setbeamercolor{block title alerted}{fg=white,bg=Accent}
+\setbeamercolor{block body alerted}{bg=Accent!8}
+\setbeamertemplate{frametitle}{\vskip0.45em\hspace{0.2em}\usebeamerfont{frametitle}\insertframetitle%
+  {\ifx\insertframesubtitle\empty\else\\[0.1em]\small\color{Gray}\insertframesubtitle\fi}\par}
+\setbeamertemplate{footline}{\hfill\footnotesize\color{Gray}\insertframenumber\,/\,\inserttotalframenumber\hspace{0.4cm}\vspace{3pt}}
+\renewcommand{\arraystretch}{1.2}
+\newcommand{\Nc}{N_{\mathrm c}}
+
+\begin{document}
+
+% ===== Title =====
+\begin{frame}[plain]
+  \vskip1.0cm
+  {\color{Struct}\large\bfseries Why does sASM work --- and only when the subdomain solve is inexact?\par}
+  \vskip0.5em
+  {\color{Gray} An interpretation through information propagation and overlap over-counting\par}
+  \vskip0.9em\hrule height0.4pt\vskip0.7em
+  \footnotesize
+  Minimal 1D / 2D Laplace experiment (all numerics in PETSc): BASIC vs.\ sASM additive Schwarz,\\[0.2em]
+  with \emph{exact} (Cholesky) and \emph{inexact} (ICC(0)) subdomain solves.\\[0.3em]
+  1D: 256 DOF, 8 subdomains.\qquad 2D: $64^2$ grid, $4\times4$ subdomains.
+\end{frame}
+
+% ===== The result that frames everything =====
+\begin{frame}{The result that frames everything}
+\framesubtitle{CG iterations to $\|r\|/\|b\|<10^{-8}$, same problem, only the subdomain solver changes}
+\begin{center}
+\begin{tabular}{l cc cc}
+\toprule
+ & \multicolumn{2}{c}{\textbf{1D} Laplace} & \multicolumn{2}{c}{\textbf{2D} Laplace} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+ & exact & ICC(0) & exact & ICC(0) \\
+\midrule
+BASIC & 15 & 15 & 23 & \textbf{102} \\
+sASM  & 25 & 25 & 27 & \textbf{67} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vskip0.5em
+\begin{itemize}\itemsep0.35em
+  \item \textbf{sASM beats BASIC only in one cell: 2D with an inexact solve} (67 vs 102).
+        Everywhere else sASM $\approx$ or slightly worse than BASIC.
+  \item 1D ``ICC'' $=$ exact: a tridiagonal matrix has no fill, so ICC(0) is the complete Cholesky.
+        Hence 1D cannot show the anomaly at all.
+  \item \textbf{Question:} what makes the \emph{inexact} solve bad, and why does sASM fix it precisely there?
+\end{itemize}
+\end{frame}
+
+% ===== Fig 1: over-counting =====
+\begin{frame}{Mechanism, part 1: BASIC over-counts the overlap}
+\framesubtitle{one preconditioner apply $\sum_i R_i^{\top}A_i^{-1}R_i\,r$ to a localized residual}
+\begin{center}\includegraphics[width=0.92\textwidth]{fig1_overcount}\end{center}
+\vskip-0.2em
+\begin{itemize}\itemsep0.2em\footnotesize
+  \item In the overlap a DOF belongs to $m_k$ subdomains, so its correction is \emph{added} $m_k$ times.
+  \item \textbf{BASIC} (red) bumps up at every overlap seam; \textbf{sASM} (blue) is normalized by $1/\sqrt{m_k}$.
+  \item This over-count is the algebraic fact $\sum_i R_i^{\top}R_i=\mathbf D=\mathrm{diag}(m_k)$. It is harmless \emph{by itself} --- the next slides show when it bites.
+\end{itemize}
+\end{frame}
+
+% ===== Fig 2: information propagation =====
+\begin{frame}{Mechanism, part 2: information propagates one subdomain per iteration}
+\begin{columns}[T]
+\begin{column}{0.6\textwidth}
+\includegraphics[width=\textwidth]{fig2_front}
+\end{column}
+\begin{column}{0.4\textwidth}
+\footnotesize
+\begin{itemize}\itemsep0.3em
+  \item Laplace is globally coupled, but each Schwarz step solves only \emph{local} problems.
+  \item So the boundary's influence advances $\sim$1 subdomain per iteration (fast at first $=$ overlap reach).
+  \item The deep interior lags --- that slow global mode is what a coarse space (two-level) would remove.
+  \item \textbf{One-level cost is $O(\#\text{subdomains})$ iterations}, independent of BASIC vs sASM.
+        Overlap helps by speeding this propagation.
+\end{itemize}
+\end{column}
+\end{columns}
+\end{frame}
+
+% ===== Q1: why inexact is bad =====
+\begin{frame}{Q1 --- Why is the inexact (ICC) solve bad?}
+\framesubtitle{the abstract Schwarz bound: the two factors \emph{multiply}}
+\[
+\kappa(\mathbf M^{-1}\mathbf A)\ \le\ C_0^2\ \cdot\
+\underbrace{\omega}_{\substack{\text{(A) inexactness}\\ \text{exact}=1,\ \text{ICC}>1}}\ \cdot\
+\underbrace{\Nc}_{\substack{\text{(B) over-count}\\ \text{(colouring / }m_k)}}
+\]
+\begin{itemize}\itemsep0.28em
+  \item \textbf{Exact} ($\omega{=}1$): each local correction is the \emph{exact} local solution; over-counting only lifts $\lambda_{\max}\!\le\!\Nc$ --- bounded, CG tolerates it. \emph{No anomaly} (table: 23 vs 27).
+  \item \textbf{ICC} ($\omega{>}1$): each local correction carries an \emph{error}, and BASIC \textbf{adds $m_k$ of these errors} in the overlap. They do not cancel --- they accumulate:
+  \begin{itemize}\footnotesize\itemsep0.15em
+    \item $\lambda_{\max}\le \omega\,\Nc$: the inexactness is \emph{multiplied} by the over-count;
+    \item wider overlap makes the block bigger, so fixed-fill ICC is a worse approximation ($\omega\!\uparrow$) \emph{and} $\Nc\!\uparrow$ --- so $\kappa$ \emph{rises} with overlap (the anomaly).
+  \end{itemize}
+  \item The accumulated, amplified error \textbf{piles up at the subdomain seams} and the outer CG must clear it.
+\end{itemize}
+\end{frame}
+
+% ===== Q1 evidence: Fig 3 + Fig 4 =====
+\begin{frame}{Q1 --- the evidence}
+\begin{columns}[T]
+\begin{column}{0.52\textwidth}
+\includegraphics[width=\textwidth]{fig3_reshist2d}
+\vskip-0.1em
+{\footnotesize \textbf{Residual history.} Exact: BASIC$\approx$sASM (both fast). ICC: BASIC \textbf{102} blows up.}
+\end{column}
+\begin{column}{0.48\textwidth}
+\includegraphics[width=\textwidth]{fig4_heatmap2d}
+\vskip-0.1em
+{\footnotesize \textbf{ICC residual field} at matched CG iterations: at $k{=}60$ BASIC is still bright (error not cleared), the seams lit up by the over-counted ICC error.}
+\end{column}
+\end{columns}
+\vskip0.35em
+\centering
+\begin{beamercolorbox}[wd=0.92\textwidth,sep=4pt,rounded=true]{block body alerted}
+\footnotesize ``Inexact is bad'' $=$ the local error is \textbf{counted $m_k$ times in the overlap} (A$\times$B), accumulating into seam residual that costs iterations --- and worsens as overlap grows.
+\end{beamercolorbox}
+\end{frame}
+
+% ===== Q2: why sASM fixes it =====
+\begin{frame}{Q2 --- Why does sASM overcome it?}
+\framesubtitle{$\mathbf M_{\mathrm{sASM}}^{-1}=\mathbf D^{-1/2}\big(\textstyle\sum_i R_i^{\top}A_i^{-1}R_i\big)\mathbf D^{-1/2}$, partition of unity $\sum_i d_i^2=1$}
+\[
+\text{BASIC: } \lambda_{\max}\le \omega\,\Nc
+\qquad\xrightarrow{\ \mathbf D^{-1/2}(\cdot)\mathbf D^{-1/2}\ }\qquad
+\text{sASM: } \lambda_{\max}\le \omega
+\]
+\begin{itemize}\itemsep0.3em
+  \item The $\mathbf D^{-1/2}$ sandwich normalizes the overlap so each DOF's correction is counted \textbf{once}: the over-count factor $\Nc$ is \textbf{removed} (Fig.~1, blue is flat).
+  \item \textbf{This breaks the multiplication.} The inexactness $\omega$ is no longer multiplied by $\Nc$: the ICC error in the overlap is counted once, \emph{not accumulated} $\Rightarrow$ no seam pile-up.
+  \item Result (ICC): the seam residual clears (Fig.~4, sASM nearly dark at $k{=}60$); CG recovers \textbf{102 $\to$ 67}.
+  \item \textbf{sASM does not fix the inexactness} ($\omega$ is still $>1$) --- it stops the over-count from \emph{amplifying} it. So $\kappa\sim C_0^2\,\omega$, and overlap helps again.
+\end{itemize}
+\end{frame}
+
+% ===== Conclusion =====
+\begin{frame}{Conclusion}
+\begin{block}{The one-sentence picture}
+\footnotesize
+BASIC counts the overlap twice (Fig.~1). With \emph{exact} solves that is harmless --- it only lifts
+$\lambda_{\max}$, which CG tolerates (Fig.~3, solid). With an \emph{inexact} ICC solve the local error is
+counted $m_k$ times, so ``inexactness $\times$ over-count'' accumulates at the seams (Fig.~4) and convergence
+degrades (Fig.~3, dashed, 102). sASM's $\mathbf D^{-1/2}$ partition of unity removes the over-count, breaking
+that product, so the inexact corrections are no longer amplified and CG recovers (102 $\to$ 67).
+\end{block}
+\vskip0.3em
+\begin{itemize}\itemsep0.3em
+  \item \textbf{Q1:} inexactness is bad because BASIC \emph{multiplies} it by the overlap over-count $\Nc$;
+        and both grow with overlap, so iterations rise with overlap.
+  \item \textbf{Q2:} sASM removes $\Nc$ (partition of unity), so the inexactness is no longer amplified --- it helps \emph{exactly} when the solve is inexact, and is neutral when it is exact.
+  \item Information always propagates $\sim$1 subdomain/iteration (Fig.~2): a one-level cost, untouched by either method.
+\end{itemize}
+\end{frame}
+
+\end{document}
