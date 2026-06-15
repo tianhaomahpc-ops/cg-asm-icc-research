@@ -119,6 +119,23 @@ static PetscReal BuildSubOrd(Mat A, PetscInt *idx, PetscInt ni, int ordering,
     return rn / vn;                            /* ~0 exact, grows as ICC degrades */
 }
 
+/* rigorous inexactness: kappa = lambda_max/lambda_min of ICC(0)^{-1} Aip,
+ * via a KSPCG run with singular-value tracking. =1 when ICC is exact. */
+static PetscReal KappaICC(Mat Aip) {
+    KSP k; KSPCreate(PETSC_COMM_SELF, &k); KSPSetType(k, KSPCG);
+    KSPSetOperators(k, Aip, Aip);
+    PC pc; KSPGetPC(k, &pc); PCSetType(pc, PCICC); PCFactorSetLevels(pc, 0);
+    KSPSetComputeSingularValues(k, PETSC_TRUE);
+    KSPSetTolerances(k, 1e-12, 1e-50, PETSC_DEFAULT, 400);
+    Vec b, x; MatCreateVecs(Aip, &b, &x);
+    PetscRandom rng; PetscRandomCreate(PETSC_COMM_SELF, &rng); PetscRandomSetSeed(rng, 7); PetscRandomSeed(rng);
+    VecSetRandom(b, rng); PetscRandomDestroy(&rng);
+    KSPSolve(k, b, x);
+    PetscReal emax = 1, emin = 1; KSPComputeExtremeSingularValues(k, &emax, &emin);
+    VecDestroy(&b); VecDestroy(&x); KSPDestroy(&k);
+    return (emin > 1e-30) ? emax/emin : 1.0;
+}
+
 static Vec Multiplicity(Mat A, Sub *subs, PetscInt nsub) {
     Vec m; MatCreateVecs(A, &m, NULL); VecZeroEntries(m);
     PetscScalar *ma; VecGetArray(m, &ma);
@@ -188,7 +205,7 @@ static const char *OTAG[3]  = {"nat", "rcm", "rnd"};
 int main(int argc, char **argv) {
     PetscInitialize(&argc, &argv, NULL, NULL);
     FILE *sum = fopen("reorder_summary.txt", "w");
-    fprintf(sum, "# dim ordering eta_inexact iterBASIC iter_sASM\n");
+    fprintf(sum, "# dim ordering eta_inexact kappa_icc iterBASIC iter_sASM\n");
 
     /* =====================  1D : N=256, 8 subdomains, O=2  ===================== */
     {
@@ -198,16 +215,17 @@ int main(int argc, char **argv) {
         VecZeroEntries(b); VecSetValue(b, 0, 1.0, INSERT_VALUES);
         VecAssemblyBegin(b); VecAssemblyEnd(b);
         for (int ord = 0; ord < 3; ++ord) {
-            Sub S[8]; PetscReal eta = 0;
+            Sub S[8]; PetscReal eta = 0, kap = 0;
             for (PetscInt i = 0; i < NSUB; ++i) {
                 PetscInt lo=(i*N)/NSUB, hi=((i+1)*N)/NSUB;
                 PetscInt a=lo-O<0?0:lo-O, c=hi+O>N?N:hi+O;
                 PetscInt ni=c-a, *idx=(PetscInt*)malloc(sizeof(PetscInt)*ni);
                 for (PetscInt j=0;j<ni;++j) idx[j]=a+j;
                 eta += BuildSubOrd(A, idx, ni, ord, (unsigned)(100*ord+i+1), &S[i]);
+                kap += KappaICC(S[i].Aip);
                 free(idx);
             }
-            eta /= NSUB;
+            eta /= NSUB; kap /= NSUB;
             Vec mult=Multiplicity(A,S,NSUB), dsq; VecDuplicate(mult,&dsq);
             VecCopy(mult,dsq); VecReciprocal(dsq); VecSqrtAbs(dsq);
             PetscReal hB[4000], hS[4000];
@@ -219,8 +237,8 @@ int main(int argc, char **argv) {
                 k<=iB?(double)hB[k]:-1.0, k<=iS?(double)hS[k]:-1.0);
             fclose(f);
             PetscPrintf(PETSC_COMM_SELF,
-                "[1D %-7s] eta=%.3e  BASIC %d  sASM %d\n",ONAME[ord],(double)eta,(int)iB,(int)iS);
-            fprintf(sum,"1D %s %.6e %d %d\n",OTAG[ord],(double)eta,(int)iB,(int)iS);
+                "[1D %-7s] eta=%.3e  kappa=%.3g  BASIC %d  sASM %d\n",ONAME[ord],(double)eta,(double)kap,(int)iB,(int)iS);
+            fprintf(sum,"1D %s %.6e %.6e %d %d\n",OTAG[ord],(double)eta,(double)kap,(int)iB,(int)iS);
             VecDestroy(&mult); VecDestroy(&dsq); FreeSubs(S,NSUB);
         }
         VecDestroy(&b); VecDestroy(&x); MatDestroy(&A);
@@ -234,17 +252,18 @@ int main(int argc, char **argv) {
         { PetscScalar *ba; VecGetArray(b,&ba);
           for(PetscInt bb=0;bb<n;++bb) ba[bb*n+0]=1.0; VecRestoreArray(b,&ba); }
         for (int ord = 0; ord < 3; ++ord) {
-            Sub *S=(Sub*)malloc(sizeof(Sub)*NSUB); PetscReal eta=0; int sc=0;
+            Sub *S=(Sub*)malloc(sizeof(Sub)*NSUB); PetscReal eta=0, kap=0; int sc=0;
             for (int q=0;q<PY;++q) for (int p=0;p<PX;++p) {
                 PetscInt axlo=(p*n)/PX, axhi=((p+1)*n)/PX, bylo=(q*n)/PY, byhi=((q+1)*n)/PY;
                 PetscInt al=axlo-O<0?0:axlo-O, ar=axhi+O>n?n:axhi+O;
                 PetscInt bl=bylo-O<0?0:bylo-O, br=byhi+O>n?n:byhi+O;
                 PetscInt ni=(ar-al)*(br-bl), *idx=(PetscInt*)malloc(sizeof(PetscInt)*ni), c=0;
                 for(PetscInt bb=bl;bb<br;++bb) for(PetscInt a=al;a<ar;++a) idx[c++]=bb*n+a;
-                eta += BuildSubOrd(A, idx, ni, ord, (unsigned)(1000*ord+sc+1), &S[sc]); sc++;
+                eta += BuildSubOrd(A, idx, ni, ord, (unsigned)(1000*ord+sc+1), &S[sc]);
+                kap += KappaICC(S[sc].Aip); sc++;
                 free(idx);
             }
-            eta /= NSUB;
+            eta /= NSUB; kap /= NSUB;
             Vec mult=Multiplicity(A,S,NSUB), dsq; VecDuplicate(mult,&dsq);
             VecCopy(mult,dsq); VecReciprocal(dsq); VecSqrtAbs(dsq);
             PetscReal hB[6000], hS[6000];
@@ -256,8 +275,8 @@ int main(int argc, char **argv) {
                 k<=iB?(double)hB[k]:-1.0, k<=iS?(double)hS[k]:-1.0);
             fclose(f);
             PetscPrintf(PETSC_COMM_SELF,
-                "[2D %-7s] eta=%.3e  BASIC %d  sASM %d\n",ONAME[ord],(double)eta,(int)iB,(int)iS);
-            fprintf(sum,"2D %s %.6e %d %d\n",OTAG[ord],(double)eta,(int)iB,(int)iS);
+                "[2D %-7s] eta=%.3e  kappa=%.3g  BASIC %d  sASM %d\n",ONAME[ord],(double)eta,(double)kap,(int)iB,(int)iS);
+            fprintf(sum,"2D %s %.6e %.6e %d %d\n",OTAG[ord],(double)eta,(double)kap,(int)iB,(int)iS);
             VecDestroy(&mult); VecDestroy(&dsq); FreeSubs(S,NSUB); free(S);
         }
         VecDestroy(&b); VecDestroy(&x); MatDestroy(&A);

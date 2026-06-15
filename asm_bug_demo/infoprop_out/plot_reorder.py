@@ -17,8 +17,8 @@ summ = {}
 for ln in open("reorder_summary.txt"):
     if ln.startswith("#") or not ln.strip():
         continue
-    dim, ordr, eta, ib, is_ = ln.split()
-    summ[(dim.lower(), ordr)] = (float(eta), int(ib), int(is_))
+    dim, ordr, eta, kappa, ib, is_ = ln.split()
+    summ[(dim.lower(), ordr)] = (float(eta), float(kappa), int(ib), int(is_))
 
 def hist(dim, ordr):
     a = np.loadtxt(f"reorder_{dim}_{ordr}_reshist.txt")
@@ -62,6 +62,7 @@ cases = [("1d", "nat"), ("1d", "rcm"), ("1d", "rnd"),
 labels = [f"{d.upper()}\n{ONAME[o]}" for d, o in cases]
 etas = [max(summ[c][0], 1e-16) for c in cases]
 cols = [STRUCT, MID, ACC, STRUCT, MID, ACC]
+kaps = [summ[c][1] for c in cases]
 bars = a.bar(range(6), etas, color=cols, edgecolor="k", lw=0.5)
 a.set_yscale("log"); a.set_ylim(1e-16, 3)
 a.axhline(1e-12, color=GREY, ls=":", lw=1.2)
@@ -71,10 +72,20 @@ for i, (b, e) in enumerate(zip(bars, etas)):
            f"{e:.1e}" if e > 1e-3 else "≈0\n(exact)", ha="center",
            fontsize=8.4, color="k" if e > 1e-3 else STRUCT, fontweight="bold")
 a.set_xticks(range(6)); a.set_xticklabels(labels, fontsize=8.6)
-a.set_ylabel(r"$\eta=\mathrm{avg}_i\,\|A_i u_i-v\|/\|v\|$  (ICC inexactness)")
-a.set_title("(b) Subdomain-solve inexactness vs ordering\n"
-            "1D natural/RCM ≈ 1e-15 (ICC IS exact);  1D random = 0.67 (now inexact)",
-            fontsize=10.5)
+a.set_ylabel(r"$\eta=\mathrm{avg}_i\,\|A_i u_i-v\|/\|v\|$  (cheap proxy)", color="#555")
+# twin axis: rigorous kappa(M^-1 A_i) -- the real condition number
+a2 = a.twinx()
+a2.plot(range(6), kaps, "D-", color="#117733", lw=2.0, ms=8, label=r"rigorous $\kappa(M^{-1}A_i)$")
+a2.set_yscale("log"); a2.set_ylim(0.7, 300)
+a2.set_ylabel(r"$\kappa=\lambda_{\max}/\lambda_{\min}$  (rigorous)", color="#117733")
+a2.tick_params(axis="y", labelcolor="#117733")
+for i, kp in enumerate(kaps):
+    a2.text(i, kp*1.35, f"{kp:.0f}" if kp >= 2 else "1.0", ha="center",
+            fontsize=8.2, color="#117733", fontweight="bold")
+a2.legend(fontsize=8.2, loc="upper left")
+a.set_title("(b) Inexactness vs ordering: cheap $\\eta$ (bars) tracks rigorous $\\kappa$ (green)\n"
+            "1D natural/RCM: $\\eta\\approx$1e-15, $\\kappa=1$ (ICC exact);  1D random: $\\eta=0.67$, $\\kappa=89$",
+            fontsize=10.0)
 
 # ===== (1,1) iteration counts =====
 a = ax[1, 1]

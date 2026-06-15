@@ -29,18 +29,39 @@
 - 把子域内 DOF **随机重排** → $\hat A_i=PA_iP^\top$ 不再带状 → 精确 Cholesky 产生大量填充 →
   ICC(0) 把这些填充全丢掉 → **ICC 变不精确**($\omega$ 从 1 跳到很大)。
 
-**总览迭代数**(CG 到 $\|r\|/\|b\|<10^{-8}$;$\eta$=子域 ICC 一次求解的相对残差,≈0 即精确):
+**概念前提 3 — 上界里到底是哪个常数?(订正:$N_c$ vs 重数 $\hat N$)**
+抽象界 $\kappa(M^{-1}A)\le C_0^2\,\omega\,N_c$(单层无粗空间;Gander–Halpern–Santugini-Repiquet,
+*ESAIM:M2AN* **49**(2):713,2015,定理 2.7;= Toselli–Widlund 定理 2.7)。其中三个整数有严格链
+(Gander 等,Remark 2.8):
+$$\hat N\ \le\ N_c\ \le\ N_k.$$
+- $\hat N$ = **最大重数** = 一个点最多属于几个子域 = $\max_k m_k$ = $\max\mathrm{diag}(\mathbf D)$。**这才是 $\mathbf D$ 度量的"过度计数"**。
+- $N_c$ = **着色数** = 子域"相互作用图"(两子域共享 DOF 即相邻)的染色数,$\ge\hat N$。
+- $N_k$ = 连通度(邻居数上限),$\rho(E)\le N_k$。
+- **订正**:之前写"$N_c$ = 最大重数"是把两者混为一谈。正确说法是 **$m_{\max}=\hat N\le N_c$**;
+  **sASM 的 $\mathbf D^{-1/2}$ 单位分解去掉的是重数过度计数 $\hat N$**(而非染色数 $N_c$)。
+  在规则盒状分解里 $\hat N=N_c$(本文 Fig 8 实测二者都 = 4 然后 9),所以数值上恰好重合,但一般 $\hat N\le N_c$。
 
-| 设定 | $\eta$(不精确度) | BASIC | sASM | 说明 |
-|---|---|---|---|---|
-| 1D 自然序 | **1.8e-15** | 15 | 25 | **ICC=精确**(三对角无填充)⟹ 无反常;sASM 略亏 |
-| 1D RCM | **2.5e-15** | 15 | 25 | RCM 对 1D 仍带状 ⟹ 仍精确 |
-| **1D 随机序** | **0.67** | **113** | 108 | **重排把 ICC 变不精确**;迭代 15→113 |
-| 2D 自然序 | 0.17 | 102 | 67 | 2D 五点本就有填充 ⟹ ICC 不精确 ⟹ 反常+修复 |
-| 2D RCM | 0.17 | 102 | 67 | RCM≈自然(质量相当) |
-| 2D 随机序 | 0.26 | 147 | 92 | 随机使 ICC 更差;sASM 修复幅度更大 |
-| **3D ICC(0)**($O{=}2$ 真实 Sys3) | — | **214** | **134** | 反常+修复(真实问题) |
-| 3D 精确 Cholesky | — | 38 | — | 对照:精确很快,无反常 |
+**两个不精确度量**(都在 Fig 7 panel b):
+- $\eta=\mathrm{avg}_i\|A_iu_i-v\|/\|v\|$(对一个随机 $v$ 的一次 ICC 求解相对残差)——**便宜、只能当"精确/不精确"的定性开关**,
+  $\eta\approx0$=精确、$\eta>0$=不精确;**它不是 $\omega$ 的标定值**(单样本、用的是 $\ell_2$ 范数而非能量范数)。
+- $\kappa(M_i^{-1}A_i)=\lambda_{\max}/\lambda_{\min}$(用 KSPCG+ICC 估计)——**严格的局部条件数**;
+  上界里的 $\omega$ 严格说 = $\lambda_{\max}(M_i^{-1}A_i)$(单侧上界,$\lambda_{\min}$ 那侧归入 $C_0^2$)。
+
+**总览**(CG 到 $\|r\|/\|b\|<10^{-8}$):
+
+| 设定 | $\eta$(定性) | $\kappa(M_i^{-1}A_i)$(严格) | BASIC | sASM | 说明 |
+|---|---|---|---|---|---|
+| 1D 自然序 | 1.8e-15 | **1.0** | 15 | 25 | **ICC=精确**(三对角无填充)⟹ 无反常;sASM 略亏 |
+| 1D RCM | 2.5e-15 | **1.0** | 15 | 25 | RCM 对 1D 仍带状 ⟹ 仍精确 |
+| **1D 随机序** | 0.67 | **88.7** | **113** | 108 | **重排把 ICC 变不精确**;迭代 15→113 |
+| 2D 自然序 | 0.17 | 15.1 | 102 | 67 | 2D 五点本就有填充 ⟹ ICC 不精确 ⟹ 反常+修复 |
+| 2D RCM | 0.17 | 15.1 | 102 | 67 | RCM≈自然(质量相当) |
+| 2D 随机序 | 0.26 | 28.5 | 147 | 92 | 随机使 ICC 更差;sASM 修复幅度更大 |
+| **3D ICC(0)**($O{=}2$ 真实 Sys3) | — | — | **214** | **134** | 反常+修复(真实问题) |
+| 3D 精确 Cholesky | — | — | 38 | — | 对照:精确很快,无反常 |
+
+**注**:$\eta$ 与 $\kappa$ 完全同向:$\eta\to0\Leftrightarrow\kappa\to1$(精确),$\eta$ 大 $\Leftrightarrow\kappa$ 大(不精确)。
+$\kappa$ 是驱动 CG 迭代数的量(迭代 $\sim\sqrt{\kappa}$),$\eta$ 只做定性判断。
 
 ---
 
@@ -123,9 +144,10 @@
   - **(a) 左上 = 1D 残差史**:横轴 CG 迭代、纵轴(对数)相对残差;
     深蓝实线 = 自然序 BASIC(15 it)、蓝点线 = RCM BASIC(15 it,与自然重合)、
     红实线 = 随机序 BASIC(113 it)、橙虚线 = 随机序 sASM(108 it)。
-  - **(b) 右上 = 不精确度 $\eta$(头条数字)**:6 根柱(1D/2D × 自然/RCM/随机),**纵轴对数**;
-    $\eta=\mathrm{avg}_i\|A_iu_i-v\|/\|v\|$($u_i$=该子域 ICC 对随机向量 $v$ 的一次求解),
-    $\eta\approx0$ 即子域解精确;灰虚线 = 精确求解地板。
+  - **(b) 右上 = 不精确度(头条)**:6 组(1D/2D × 自然/RCM/随机)。
+    **柱(左轴,对数)= 便宜代理 $\eta$**;**绿色菱形(右轴,对数)= 严格条件数 $\kappa(M_i^{-1}A_i)$**。
+    两者同向:1D 自然/RCM $\eta\approx$1e-15、$\kappa=1$(ICC 精确);1D 随机 $\eta=0.67$、$\kappa=89$(不精确)。
+    灰虚线 = 精确求解地板。
   - **(c) 左下 = 2D 残差史**:深蓝 = 自然 BASIC(102)、蓝虚 = 自然 sASM(67)、
     红 = 随机 BASIC(147)、橙虚 = 随机 sASM(92)。
   - **(d) 右下 = 迭代数柱状**:6 组,红 = BASIC、深蓝 = sASM,柱顶标数字。
@@ -141,15 +163,40 @@
   - **大结论**:**"不精确"不是 ICC 的玄学,而是"排序产生的填充被丢弃"这件具体的事**;
     重排序能人为地把 1D 的 ICC 从精确推成不精确,从而把反常/sASM 的价值"打开"。
 
+### Fig 8 `fig8_coloring.png` — 直接测出过度计数 $\hat N$,并证明 sASM 去掉它($\omega\times\hat N$ 相乘)
+- **【对应问题】** 2D Laplace,$120^2$,$6\times6$ 子域,扫 overlap $O\in\{1,2,4,8,12,16\}$;
+  四种组合 BASIC/sASM × 精确(Cholesky)/ICC(0)。用 **PCSHELL 包住 BASIC/sASM 的 apply + PETSc KSPCG**,
+  由 CG-Lanczos 的 Ritz 值经 `KSPComputeExtremeSingularValues` 取出 $\lambda_{\max},\lambda_{\min}$。
+- **【坐标/参数】**
+  - **(a) 左 = $\lambda_{\max}(M^{-1}A)$ vs $O$**:黑虚阶梯 = 着色数/重数($N_c=\hat N$,本几何二者重合,= 4 然后在 $O{=}12$ 跳到 9——
+    此时 overlap 触达第二邻居,角点被 $3\times3{=}9$ 个子域共享);
+    红圆实 = BASIC 精确、橙方虚 = BASIC ICC、蓝圆实 = sASM 精确、蓝方虚 = sASM ICC。
+  - **(b) 右 = 条件数 $\kappa=\lambda_{\max}/\lambda_{\min}$ vs $O$(对数)**:四条同色线;这是真正驱动 CG 迭代的量。
+- **【看什么】** (a) 里 BASIC 两条是否贴着阶梯 $\hat N$、sASM 两条是否压平;(b) 里 ICC 把 $\kappa$ 抬多少、sASM 收回多少。
+- **【结论】**
+  - **$\lambda_{\max}(\text{BASIC,精确})=\hat N$ 精确成立**:实测 4,4,4,4,**9**,8.7,逐点等于最大重数(过度计数的字面定义)。
+  - **$\lambda_{\max}(\text{BASIC,ICC})\approx\omega\hat N$**:略高于 $\hat N$(4.3→10.7),即不精确 $\omega$($\approx$1.1–1.2)**乘上** $\hat N$。
+  - **$\lambda_{\max}(\text{sASM,}\cdot)$ 平**:精确 $\approx2$、**ICC 恒 $\approx1.25=\omega$**——
+    $\mathbf D^{-1/2}$ 单位分解**去掉 $\hat N$**,只剩 $\omega$。**$\omega\times\hat N$ 的乘积被打断,这是整套说法最直接的测量证据。**
+  - (b) ICC 把 $\kappa$ 抬约 $5$–$10\times$;sASM-ICC 的 $\kappa$ 比 BASIC-ICC 小约 $3\times$ ⟹ 迭代 $\sim\sqrt3\approx1.7\times$ 更少(与观测一致)。
+
 ---
 
-## 2. 两个核心问题(简版)
+## 2. 两个核心问题(订正版,带文献)
 
-**Q(inexact 为什么不好)**:抽象上界 $\kappa\le C_0^2\cdot\omega\cdot N_c$,**A(不精确 $\omega$)与 B(重复计数 $N_c$)相乘**。
-精确解 $\omega{=}1$,过度计数只把 $\lambda_{\max}\le N_c$ 抬一下、CG 容忍(无反常);
-ICC 时 $\omega{>}1$,BASIC 把**带误差的修正在重叠区叠加 $m_k$ 次** ⟹ 误差累积、$\lambda_{\max}\le\omega N_c$,
-且 overlap 越大 $\omega,N_c$ 越大 ⟹ 迭代随 overlap 上升(Fig 6 右),残差堆在缝处清不掉(Fig 4/5)。
+抽象界(单层、无粗空间):$\boxed{\ \kappa(M^{-1}A)\le C_0^2\,\omega\,N_c\ }$,其中 $\lambda_{\min}\ge C_0^{-2}$、$\lambda_{\max}\le\omega N_c$;
+$m_{\max}=\hat N\le N_c\le N_k$。(Gander–Halpern–Santugini-Repiquet,*M2AN* **49**(2):713,2015,定理 2.7 + Remark 2.8;Toselli–Widlund 定理 2.7。)
 
-**Q(sASM 为什么能克服)**:$\mathbf D^{-1/2}(\cdot)\mathbf D^{-1/2}$ 单位分解把重叠区计一次、**移除 $N_c$**($\lambda_{\max}\le\omega$),
-**打断 A×B 相乘** ⟹ 不精确修正不再被放大叠加,缝处不累积(Fig 4/5),收敛恢复(102→67、214→134)。
+**Q(inexact 为什么不好)**:$\lambda_{\max}\le\omega N_c$ 里 **$\omega$(不精确)与过度计数因子相乘**。
+精确解 $\omega{=}1$,过度计数只把 $\lambda_{\max}$ 抬到 $\hat N$(有界、与网格无关)、CG 容忍(无反常,Fig 3 实线、Fig 8 蓝圆);
+ICC 时 $\omega{>}1$,BASIC 把**带误差的修正在重叠区叠加 $m_k$ 次** ⟹ $\lambda_{\max}\approx\omega\hat N$(Fig 8 橙方),
+且 overlap 越大 $\omega,\hat N$ 越大 ⟹ 迭代随 overlap 上升(Fig 6 右),残差堆在缝处清不掉(Fig 4/5)。
+
+**Q(sASM 为什么能克服)**:$\mathbf D^{-1/2}(\cdot)\mathbf D^{-1/2}$ 单位分解($\sum_i$ 加权 $R_i^\top R_i=I$)把重叠区计一次、
+**去掉重数过度计数 $\hat N$**($\lambda_{\max}\le\omega$;Fig 8 蓝方恒 $\approx1.25=\omega$),**打断 $\omega\times\hat N$ 相乘**
+⟹ 不精确修正不再被放大叠加,缝处不累积(Fig 4/5),收敛恢复(102→67、214→134)。
 sASM **不修不精确本身**($\omega$ 仍 $>1$),只阻止过度计数去放大它——所以**恰好在子域解不精确时有用**,精确时中性甚至略亏。
+
+> **订正说明**:$\mathbf D=\mathrm{diag}(m_k)$ 度量的过度计数是**最大重数 $\hat N$**(=$\max\mathrm{diag}\mathbf D$),
+> 不是染色数 $N_c$;严格链 $\hat N\le N_c\le N_k$。sASM 去掉的是 $\hat N$。规则盒状分解里 $\hat N=N_c$(Fig 8 实测重合),
+> 故早期把二者等同在数值上无害,但概念上应区分。$\eta$ 只是定性开关,严格不精确度量是 $\kappa(M_i^{-1}A_i)$、上界常数 $\omega=\lambda_{\max}(M_i^{-1}A_i)$。

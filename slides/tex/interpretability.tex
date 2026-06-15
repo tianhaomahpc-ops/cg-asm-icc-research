@@ -104,16 +104,13 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 \[
 \kappa(\mathbf M^{-1}\mathbf A)\ \le\ C_0^2\ \cdot\
 \underbrace{\omega}_{\substack{\text{(A) inexactness}\\ \text{exact}=1,\ \text{ICC}>1}}\ \cdot\
-\underbrace{\Nc}_{\substack{\text{(B) over-count}\\ \text{(colouring / }m_k)}}
+\underbrace{\Nc}_{\substack{\text{(B) over-count}\\ \hat N=\max_k m_k\,\le\,\Nc}}
 \]
-\begin{itemize}\itemsep0.28em
-  \item \textbf{Exact} ($\omega{=}1$): each local correction is the \emph{exact} local solution; over-counting only lifts $\lambda_{\max}\!\le\!\Nc$ --- bounded, CG tolerates it. \emph{No anomaly} (table: 23 vs 27).
-  \item \textbf{ICC} ($\omega{>}1$): each local correction carries an \emph{error}, and BASIC \textbf{adds $m_k$ of these errors} in the overlap. They do not cancel --- they accumulate:
-  \begin{itemize}\footnotesize\itemsep0.15em
-    \item $\lambda_{\max}\le \omega\,\Nc$: the inexactness is \emph{multiplied} by the over-count;
-    \item wider overlap makes the block bigger, so fixed-fill ICC is a worse approximation ($\omega\!\uparrow$) \emph{and} $\Nc\!\uparrow$ --- so $\kappa$ \emph{rises} with overlap (the anomaly).
-  \end{itemize}
-  \item The accumulated, amplified error \textbf{piles up at the subdomain seams} and the outer CG must clear it.
+\begin{itemize}\itemsep0.26em
+  \item Over-count factor: $\mathbf D=\mathrm{diag}(m_k)$ measures the \textbf{max multiplicity} $\hat N$; rigorously $\hat N\le\Nc$ (colour count), Gander et al.\ 2015, Rem.~2.8. It is what the scaling removes.
+  \item \textbf{Exact} ($\omega{=}1$): each local correction is the \emph{exact} local solution; over-counting only lifts $\lambda_{\max}\!\le\!\hat N$ --- bounded, CG tolerates it. \emph{No anomaly} (table: 23 vs 27).
+  \item \textbf{ICC} ($\omega{>}1$): each correction carries an \emph{error}; BASIC \textbf{adds $m_k$ of them} in the overlap. They accumulate: $\lambda_{\max}\!\approx\!\omega\,\hat N$ --- inexactness \emph{multiplied} by the over-count.
+  \item Wider overlap: fixed-fill ICC is a worse approximation ($\omega\!\uparrow$) \emph{and} $\hat N\!\uparrow$ --- so $\kappa$ \emph{rises} with overlap (the anomaly). The amplified error \textbf{piles up at the seams}.
 \end{itemize}
 \end{frame}
 
@@ -165,15 +162,15 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 \begin{frame}{Q2 --- Why does sASM overcome it?}
 \framesubtitle{$\mathbf M_{\mathrm{sASM}}^{-1}=\mathbf D^{-1/2}\big(\textstyle\sum_i R_i^{\top}A_i^{-1}R_i\big)\mathbf D^{-1/2}$, partition of unity $\sum_i d_i^2=1$}
 \[
-\text{BASIC: } \lambda_{\max}\le \omega\,\Nc
+\text{BASIC: } \lambda_{\max}\le \omega\,\hat N
 \qquad\xrightarrow{\ \mathbf D^{-1/2}(\cdot)\mathbf D^{-1/2}\ }\qquad
 \text{sASM: } \lambda_{\max}\le \omega
 \]
 \begin{itemize}\itemsep0.3em
-  \item The $\mathbf D^{-1/2}$ sandwich normalizes the overlap so each DOF's correction is counted \textbf{once}: the over-count factor $\Nc$ is \textbf{removed} (Fig.~1, blue is flat).
-  \item \textbf{This breaks the multiplication.} The inexactness $\omega$ is no longer multiplied by $\Nc$: the ICC error in the overlap is counted once, \emph{not accumulated} $\Rightarrow$ no seam pile-up.
-  \item Result (ICC): the seam residual clears (Fig.~4, sASM nearly dark at $k{=}60$); CG recovers \textbf{102 $\to$ 67}.
-  \item \textbf{sASM does not fix the inexactness} ($\omega$ is still $>1$) --- it stops the over-count from \emph{amplifying} it. So $\kappa\sim C_0^2\,\omega$, and overlap helps again.
+  \item The $\mathbf D^{-1/2}$ sandwich restores a partition of unity ($\sum_i$ scaled $R_i^{\top}R_i=I$), so each DOF is counted \textbf{once}: the multiplicity over-count $\hat N$ is \textbf{removed} (Fig.~1 blue flat; Fig.~8 sASM flat).
+  \item \textbf{This breaks the multiplication.} $\omega$ is no longer multiplied by $\hat N$: the ICC error in the overlap is counted once, \emph{not accumulated} $\Rightarrow$ no seam pile-up.
+  \item Result (ICC): seam residual clears (Fig.~4, sASM nearly dark at $k{=}60$); CG recovers \textbf{102 $\to$ 67}. Measured: $\lambda_{\max}(\text{sASM,ICC})\!\approx\!1.25\!=\!\omega$, flat in overlap (Fig.~8a).
+  \item \textbf{sASM does not fix the inexactness} ($\omega$ still $>1$) --- it stops the over-count from \emph{amplifying} it. So $\kappa\lesssim C_0^2\,\omega$, and overlap helps again.
 \end{itemize}
 \end{frame}
 
@@ -199,11 +196,22 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 
 % ===== Fig 7: reading the panels =====
 \begin{frame}{Reading Fig.~7 --- reordering breaks (or keeps) exactness}
-\framesubtitle{$\eta=\mathrm{avg}_i\|A_i u_i-v\|/\|v\|$, the inexactness proxy (one ICC solve of a random $v$; $\eta\approx0$ = exact)}
+\framesubtitle{$\eta$ (cheap $\ell_2$ residual, a yes/no exact-flag) and the rigorous $\kappa(M_i^{-1}A_i)=\lambda_{\max}/\lambda_{\min}$ track together}
 \begin{itemize}\itemsep0.35em\footnotesize
-  \item \textbf{(b) the headline.} 1D \emph{natural} \& \emph{RCM}: $\eta\approx10^{-15}$ --- ICC \emph{is} exact Cholesky, because a tridiagonal has \emph{no fill}, so dropping fill drops nothing. 1D \emph{random}: $\eta=0.67$ --- the permutation creates fill that ICC(0) throws away, so ICC is now inexact.
+  \item \textbf{(b) the headline.} 1D \emph{natural} \& \emph{RCM}: $\eta\approx10^{-15}$, $\kappa=1$ --- ICC \emph{is} exact Cholesky (a tridiagonal has \emph{no fill}, so dropping fill drops nothing). 1D \emph{random}: $\eta=0.67$, $\kappa=89$ --- the permutation creates fill that ICC(0) throws away, so ICC is now inexact. ($\eta$ is only a flag; $\kappa$, the green line, is the rigorous condition number.)
   \item \textbf{(a)/(d) 1D iterations.} natural/RCM converge in 15; random blows up to 113. RCM keeps the 1D problem banded, so it stays exact --- \emph{not every} permutation breaks exactness, only a band-widening (random) one.
   \item \textbf{(c)/(d) 2D.} The 5-point ICC already has fill ($\eta{=}0.17$); random makes it worse ($\eta{=}0.26$): $102\!\to\!147$ it. \textbf{sASM repairs both} ($102\!\to\!67$, $147\!\to\!92$), more so the more inexact the solve.
+\end{itemize}
+\end{frame}
+
+% ===== Fig 8: coloring number measured =====
+\begin{frame}{Measuring the over-count directly: $\lambda_{\max}$ of $\mathbf M^{-1}\mathbf A$}
+\framesubtitle{2D Laplace $120^2$, $6\times6$ subdomains; $\lambda_{\max}/\lambda_{\min}$ from KSPCG (PCSHELL wrapping BASIC/sASM)}
+\begin{center}\includegraphics[width=0.86\textwidth]{fig8_coloring}\end{center}
+\vskip-0.3em
+\begin{itemize}\itemsep0.1em\scriptsize
+  \item \textbf{(a)} $\lambda_{\max}(\text{BASIC,exact})=\hat N$ \emph{exactly} (4, then 9 when overlap reaches the 2nd neighbour). ICC lifts it to $\approx\omega\hat N$. \textbf{sASM is flat} ($\approx\!\omega\!=\!1.25$ for ICC): the multiplicity $\hat N$ is removed --- the $\omega\!\times\!\hat N$ product is broken.
+  \item \textbf{(b)} ICC inflates $\kappa$ $\sim$5--10$\times$; sASM-ICC keeps it $\sim$3$\times$ below BASIC-ICC $\Rightarrow\sim\!\sqrt3$ fewer CG iters. ($\hat N\le N_c$; they coincide in this regular layout.)
 \end{itemize}
 \end{frame}
 
@@ -214,14 +222,13 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 BASIC counts the overlap twice (Fig.~1). With \emph{exact} solves that is harmless --- it only lifts
 $\lambda_{\max}$, which CG tolerates (Fig.~3, solid). With an \emph{inexact} ICC solve the local error is
 counted $m_k$ times, so ``inexactness $\times$ over-count'' accumulates at the seams (Fig.~4) and convergence
-degrades (Fig.~3, dashed, 102). sASM's $\mathbf D^{-1/2}$ partition of unity removes the over-count, breaking
+degrades (Fig.~3, dashed, 102). sASM's $\mathbf D^{-1/2}$ partition of unity removes the multiplicity over-count, breaking
 that product, so the inexact corrections are no longer amplified and CG recovers (102 $\to$ 67).
 \end{block}
 \vskip0.3em
-\begin{itemize}\itemsep0.3em
-  \item \textbf{Q1:} inexactness is bad because BASIC \emph{multiplies} it by the overlap over-count $\Nc$;
-        and both grow with overlap, so iterations rise with overlap.
-  \item \textbf{Q2:} sASM removes $\Nc$ (partition of unity), so the inexactness is no longer amplified --- it helps \emph{exactly} when the solve is inexact, and is neutral when it is exact.
+\begin{itemize}\itemsep0.28em
+  \item \textbf{Q1:} inexactness is bad because BASIC \emph{multiplies} it by the multiplicity over-count $\hat N=\max_k m_k$ ($\le\Nc$); both grow with overlap, so iterations rise with overlap. Measured: $\lambda_{\max}(\text{BASIC,exact})=\hat N$, lifted to $\omega\hat N$ by ICC (Fig.~8).
+  \item \textbf{Q2:} sASM removes $\hat N$ (partition of unity, Fig.~8 flat), so the inexactness is no longer amplified --- it helps \emph{exactly} when the solve is inexact, and is neutral when exact.
   \item Information always propagates $\sim$1 subdomain/iteration (Fig.~2): a one-level cost, untouched by either method.
 \end{itemize}
 \end{frame}
