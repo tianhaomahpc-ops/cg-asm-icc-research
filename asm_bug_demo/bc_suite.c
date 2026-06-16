@@ -185,9 +185,10 @@ int main(int argc,char**argv){
         PetscInt itBI=PCGit(A,&cBI,b,x,1e-8,4000);FreeCtx(&cBI);
         Ctx cSI=MakeCtx(A,Si,NS,N,1,0,sing);Spectrum(A,&cSI,b,sing,&lSI,&mSI);
         PetscInt itSI=PCGit(A,&cSI,b,x,1e-8,4000);FreeCtx(&cSI);
-        Ctx c2=MakeCtx(A,Si,NS,N,1,1,sing); PetscInt it2=PCGit(A,&c2,b,x,1e-8,4000);FreeCtx(&c2);
-        fprintf(f,"%d %s %d  %.5g %.5g %.5g %.5g  %.5g %.5g %.5g %.5g  %d %d %d\n",
-            dim,bcname[bci],(int)nhat,lBE,mBE,lSE,mSE,lBI,mBI,lSI,mSI,(int)itBI,(int)itSI,(int)it2);
+        Ctx c2=MakeCtx(A,Si,NS,N,1,1,sing); PetscReal l2,m2; Spectrum(A,&c2,b,sing,&l2,&m2);
+        PetscInt it2=PCGit(A,&c2,b,x,1e-8,4000);FreeCtx(&c2);
+        fprintf(f,"%d %s %d  %.5g %.5g %.5g %.5g  %.5g %.5g %.5g %.5g  %d %d %d  %.5g %.5g\n",
+            dim,bcname[bci],(int)nhat,lBE,mBE,lSE,mSE,lBI,mBI,lSI,mSI,(int)itBI,(int)itSI,(int)it2,l2,m2);
         PetscPrintf(PETSC_COMM_SELF,"%-3d %-10s %4d | %9.2f %9.1f %9.3f %9.1f | %6d %6d %6d\n",
             dim,bcname[bci],(int)nhat,lBE,(mBE>0?lBE/mBE:-1),lSI,(mSI>0?lSI/mSI:-1),(int)itBI,(int)itSI,(int)it2);
         FreeSubs(Sx,NS);FreeSubs(Si,NS);VecDestroy(&b);VecDestroy(&x);MatDestroy(&A);
