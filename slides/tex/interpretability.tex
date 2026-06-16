@@ -1,5 +1,5 @@
-% Interpreting sASM via information propagation + over-counting (1D/2D Laplace).
-% Minimal academic style, English.  Compile: pdflatex (x2).  Figures from infoprop.c.
+% Interpreting sASM via over-counting + information propagation (1D/2D/3D Laplace).
+% Minimal academic style, English.  Compile: pdflatex (x2).  Figures from asm_bug_demo/.
 \documentclass[aspectratio=169,10pt]{beamer}
 \usepackage[T1]{fontenc}
 \usepackage{lmodern}
@@ -29,26 +29,53 @@
 
 \begin{document}
 
-% ===== Title =====
+% ===== 1. Title =====
 \begin{frame}[plain]
   \vskip1.0cm
   {\color{Struct}\large\bfseries Why does sASM work --- and only when the subdomain solve is inexact?\par}
   \vskip0.5em
-  {\color{Gray} An interpretation through information propagation and overlap over-counting\par}
+  {\color{Gray} An interpretation through overlap over-counting and information propagation\par}
   \vskip0.9em\hrule height0.4pt\vskip0.7em
   \footnotesize
-  Minimal 1D / 2D Laplace experiment (all numerics in PETSc): BASIC vs.\ sASM additive Schwarz,\\[0.2em]
+  Minimal 1D / 2D / 3D Laplace experiments (all numerics in PETSc): BASIC vs.\ sASM additive Schwarz,\\[0.2em]
   with \emph{exact} (Cholesky) and \emph{inexact} (ICC(0)) subdomain solves.\\[0.3em]
-  1D: 256 DOF, 8 subdomains.\qquad 2D: $64^2$ grid, $4\times4$ subdomains.
+  BASIC $=$ unscaled additive Schwarz; \ sASM $=\mathbf D^{-1/2}$-scaled (partition of unity).
+  \ Full case list overleaf.
 \end{frame}
 
-% ===== The result that frames everything =====
-\begin{frame}{The result that frames everything}
-\framesubtitle{CG iterations to $\|r\|/\|b\|<10^{-8}$, same problem, only the subdomain solver changes}
+% ===== 2. Case specifications (reference table) =====
+\begin{frame}{Case specifications}
+\framesubtitle{every experiment in this deck; all 2D/3D are constant-coefficient Laplace, BASIC/sASM additive Schwarz}
+\centering\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{llllccll}
+\toprule
+\textbf{Fig} & \textbf{Dim} & \textbf{Grid} & \textbf{Subdomains} & \textbf{$O$} & \textbf{Subdomain solver} & \textbf{Measures} & \textbf{Tol / $k$} \\
+\midrule
+1     & 1D    & 256 DOF      & 8                  & 2,\,4            & exact Cholesky          & one PC apply              & --- \\
+2/10  & 1D    & 256 / 384    & 8 / 12             & 2/6/12           & exact Cholesky          & stationary front speed    & --- \\
+3     & 2D    & $64^2$       & $4{\times}4$       & 2                & exact \& ICC(0)         & CG iterations             & $10^{-8}$ \\
+4     & 2D    & $64^2$       & $4{\times}4$       & 2                & ICC(0)                  & residual field            & $k{=}5/15/30/60$ \\
+5     & 2D    & $128^2$      & $8{\times}8$       & 1/2/4            & ICC(0)                  & residual field, iters     & $k{=}40$ \\
+6     & 3D    & $n_x{=}48$   & 4 (MPI ranks)      & 0/1/2            & exact \& ICC(0)         & CG iterations             & $10^{-8}\!/10^{-6}$ \\
+7     & 1D,2D & 256 / $64^2$ & 8 / $4{\times}4$   & 2                & ICC(0), nat/RCM/rnd     & iters, $\eta$, $\kappa$   & $10^{-8}$ \\
+8     & 2D    & $120^2$      & $6{\times}6$       & 1..16            & exact \& ICC(0)         & $\lambda_{\max},\lambda_{\min}$ (KSPCG) & eig.\ est. \\
+9a    & 2D    & $120^2$      & $6{\times}6$       & 2                & ICC(0)                  & $\lambda,\kappa$, iters (1 vs 2-lvl) & $10^{-8}$ \\
+9b    & 2D    & $n{=}20P$    & $P^2,\,P{=}4..12$  & 2                & ICC(0)                  & weak-scaling iters        & $10^{-8}$ \\
+\bottomrule
+\end{tabular}
+\vskip0.5em
+{\scriptsize\color{Gray} BC: 1D $=$ left-node Dirichlet source; 2D $=$ Dirichlet; 3D Sys\,3 $=$ 1 face Dirichlet $+$ 5 faces Neumann.
+\ 1D ICC(0) $=$ exact Cholesky (tridiagonal $\Rightarrow$ no fill). \ Bound $\kappa\le C_0^2\,\omega\,N_{\mathrm c}$, \ $\hat N{=}\max_k m_k\le N_{\mathrm c}$.}
+\end{frame}
+
+% ===== 3. The framing result =====
+\begin{frame}{sASM beats BASIC only with an inexact solve: 67 vs 102 (2D, ICC)}
+\framesubtitle{CG iterations to $\|r\|/\|b\|<10^{-8}$; overlap $O{=}2$; only the subdomain solver changes}
 \begin{center}
 \begin{tabular}{l cc cc}
 \toprule
- & \multicolumn{2}{c}{\textbf{1D} Laplace} & \multicolumn{2}{c}{\textbf{2D} Laplace} \\
+ & \multicolumn{2}{c}{\textbf{1D} Laplace (256, 8 sub)} & \multicolumn{2}{c}{\textbf{2D} Laplace ($64^2$, $4{\times}4$)} \\
 \cmidrule(lr){2-3}\cmidrule(lr){4-5}
  & exact & ICC(0) & exact & ICC(0) \\
 \midrule
@@ -57,101 +84,119 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 \bottomrule
 \end{tabular}
 \end{center}
-\vskip0.5em
-\begin{itemize}\itemsep0.35em
-  \item \textbf{sASM beats BASIC only in one cell: 2D with an inexact solve} (67 vs 102).
-        Everywhere else sASM $\approx$ or slightly worse than BASIC.
-  \item 1D ``ICC'' $=$ exact: a tridiagonal matrix has no fill, so ICC(0) is the complete Cholesky.
-        Hence 1D cannot show the anomaly at all.
+\vskip0.4em
+\begin{itemize}\itemsep0.25em
+  \item \textbf{sASM beats BASIC only in one cell: 2D with an inexact solve} (67 vs 102). Elsewhere sASM $\approx$ or slightly worse.
+  \item 1D ``ICC'' $=$ exact: a tridiagonal has no fill, so ICC(0) is the complete Cholesky --- 1D cannot show the anomaly.
   \item \textbf{Question:} what makes the \emph{inexact} solve bad, and why does sASM fix it precisely there?
 \end{itemize}
 \end{frame}
 
-% ===== Fig 1: over-counting =====
-\begin{frame}{Mechanism, part 1: BASIC over-counts the overlap}
-\framesubtitle{one preconditioner apply $\sum_i R_i^{\top}A_i^{-1}R_i\,r$ to a localized residual}
-\begin{center}\includegraphics[width=0.74\textwidth]{fig1_overcount}\end{center}
+% ===== 4. Concept: what is the subdomain solve (MOVED EARLY) =====
+\begin{frame}{First, what is an ``exact / inexact subdomain solve''?}
+\framesubtitle{$A_i=R_iAR_i^{\top}$ --- the global Laplace restricted to subdomain $i$ (with overlap)}
+\begin{itemize}\itemsep0.3em
+  \item $A_i$ implicitly imposes \textbf{homogeneous Dirichlet} on the \emph{artificial cut} between subdomains (cross-interface coupling dropped), keeping the physical BC on faces touching the real boundary.
+  \item \textbf{Exact solve} $A_i^{-1}$ (Cholesky) $=$ \emph{exactly} solving that local Dirichlet--Laplace subproblem. The inexactness factor $\omega=1$.
+  \item \textbf{Inexact solve} ICC(0) $=$ exact solve of a \emph{perturbed} operator $\tilde A_i=A_i-E_i$, where $E_i$ is the fill ICC(0) \emph{drops}. This $E_i$ \textbf{is} the source of $\omega>1$, and its error sits in the overlap/seam.
+\end{itemize}
+\vskip0.2em
+\begin{block}{So ``inexact'' is not mysterious}
+\footnotesize ICC(0) keeps only $A_i$'s nonzero pattern and throws away all fill-in. Whether that loses anything depends entirely on the \textbf{ordering} of the unknowns --- demonstrated later by reordering (Fig.~7). The rigorous measure is $\omega=\lambda_{\max}(M_i^{-1}A_i)$, the local condition factor.
+\end{block}
+\end{frame}
+
+% ===== 5. Fig 1: over-counting (factor B) =====
+\begin{frame}{Mechanism: BASIC over-counts the overlap (the factor $\hat N$)}
+\framesubtitle{1D Laplace, 256 DOF, 8 subdomains, \emph{exact} Cholesky; one apply $\sum_i R_i^{\top}A_i^{-1}R_i\,r$ to a localized residual}
+\begin{center}\includegraphics[width=0.69\textwidth]{fig1_overcount}\end{center}
 \vskip-0.6em
-\begin{itemize}\itemsep0.15em\scriptsize
+\begin{itemize}\itemsep0.12em\scriptsize
   \item In the overlap a DOF belongs to $m_k$ subdomains, so its correction is \emph{added} $m_k$ times.
   \item \textbf{BASIC} (red) bumps up at every overlap seam; \textbf{sASM} (blue) is normalized by $1/\sqrt{m_k}$.
-  \item This over-count is the algebraic fact $\sum_i R_i^{\top}R_i=\mathbf D=\mathrm{diag}(m_k)$. It is harmless \emph{by itself} --- the next slides show when it bites.
+  \item This over-count is the algebraic fact $\sum_i R_i^{\top}R_i=\mathbf D=\mathrm{diag}(m_k)$; the max multiplicity is $\hat N=\max_k m_k$. It is harmless \emph{by itself} (note: exact solve here) --- the next slides show when it bites.
 \end{itemize}
 \end{frame}
 
-% ===== Fig 2: information propagation =====
-\begin{frame}{Mechanism, part 2: information propagation --- the one-level latency}
-\framesubtitle{Laplace is globally coupled ($A$ sparse, $A^{-1}$ dense), but each Schwarz step solves only \emph{local} problems}
-\begin{center}\includegraphics[width=0.85\textwidth]{fig10_frontprop}\end{center}
-\vskip-0.4em
-\begin{itemize}\itemsep0.05em\scriptsize
-  \item (a) the solution \emph{crawls in} from the boundary; (b) the converged front advances at \textbf{finite speed}, \textbf{growing with overlap} (0.039/0.080/0.149 sub/iter for O=2/6/12) --- additive Schwarz, slower than the ``1 subdomain/iter'' multiplicative slogan.
-  \item So one-level coupling costs iterations that \textbf{grow with \#subdomains} --- this latency \emph{is} the small $\lambda_{\min}$ (slow global mode); a coarse space transfers it globally in one step (Fig.~9).
-\end{itemize}
-\end{frame}
-
-% ===== Q1: why inexact is bad =====
-\begin{frame}{Q1 --- Why is the inexact (ICC) solve bad?}
-\framesubtitle{the abstract Schwarz bound: the two factors \emph{multiply}}
+% ===== 6. Q1: the bound (assertive title) =====
+\begin{frame}{Q1: inexactness bites because BASIC \emph{multiplies} it by the over-count}
+\framesubtitle{the abstract additive-Schwarz bound: the two factors multiply in $\lambda_{\max}$}
 \[
 \kappa(\mathbf M^{-1}\mathbf A)\ \le\ C_0^2\ \cdot\
 \underbrace{\omega}_{\substack{\text{(A) inexactness}\\ \text{exact}=1,\ \text{ICC}>1}}\ \cdot\
 \underbrace{\Nc}_{\substack{\text{(B) over-count}\\ \hat N=\max_k m_k\,\le\,\Nc}}
 \]
-\begin{itemize}\itemsep0.26em
-  \item Over-count factor: $\mathbf D=\mathrm{diag}(m_k)$ measures the \textbf{max multiplicity} $\hat N$; rigorously $\hat N\le\Nc$ (colour count), Gander et al.\ 2015, Rem.~2.8. It is what the scaling removes.
-  \item \textbf{Exact} ($\omega{=}1$): each local correction is the \emph{exact} local solution; over-counting only lifts $\lambda_{\max}\!\le\!\hat N$ --- bounded, CG tolerates it. \emph{No anomaly} (table: 23 vs 27).
-  \item \textbf{ICC} ($\omega{>}1$): each correction carries an \emph{error}; BASIC \textbf{adds $m_k$ of them} in the overlap. They accumulate: $\lambda_{\max}\!\approx\!\omega\,\hat N$ --- inexactness \emph{multiplied} by the over-count.
-  \item Wider overlap: fixed-fill ICC is a worse approximation ($\omega\!\uparrow$) \emph{and} $\hat N\!\uparrow$ --- so $\kappa$ \emph{rises} with overlap (the anomaly). The amplified error \textbf{piles up at the seams}.
+\begin{itemize}\itemsep0.16em
+  \item Over-count factor: $\mathbf D=\mathrm{diag}(m_k)$ measures the \textbf{max multiplicity} $\hat N$; rigorously $\hat N\le\Nc$ (Gander et al.\ 2015, Rem.~2.8). It is what the scaling removes.
+  \item \textbf{Exact} ($\omega{=}1$): corrections are exact; over-counting only lifts $\lambda_{\max}\!\le\!\hat N$ --- bounded, CG tolerates it. \emph{No anomaly} (23 vs 27).
+  \item \textbf{ICC} ($\omega{>}1$): each correction carries an \emph{error}; BASIC \textbf{adds $m_k$ of them} in the overlap $\Rightarrow$ $\lambda_{\max}\!\approx\!\omega\,\hat N$, inexactness \emph{times} over-count.
+  \item Wider overlap: $\omega\!\uparrow$ \emph{and} $\hat N\!\uparrow$ $\Rightarrow$ $\kappa$ \emph{rises} with overlap (the anomaly); the amplified error \textbf{piles up at the seams}.
 \end{itemize}
 \end{frame}
 
-% ===== Q1 evidence: Fig 3 + Fig 4 =====
-\begin{frame}{Q1 --- the evidence}
+% ===== 7. Q1 evidence: Fig 3 + Fig 4 =====
+\begin{frame}{Q1 evidence: the over-counted ICC error stalls CG at the seams}
+\framesubtitle{2D Laplace, $64^2$, $4{\times}4$ subdomains, overlap $O{=}2$}
 \begin{columns}[T]
 \begin{column}{0.52\textwidth}
 \includegraphics[width=\textwidth]{fig3_reshist2d}
 \vskip-0.1em
-{\footnotesize \textbf{Residual history.} Exact: BASIC$\approx$sASM (both fast). ICC: BASIC \textbf{102} blows up.}
+{\footnotesize \textbf{Residual history (CG).} Exact: BASIC$\approx$sASM (both fast). ICC: BASIC \textbf{102} blows up, sASM \textbf{67}.}
 \end{column}
 \begin{column}{0.48\textwidth}
 \includegraphics[width=\textwidth]{fig4_heatmap2d}
 \vskip-0.1em
-{\footnotesize \textbf{ICC residual field} at matched CG iterations: at $k{=}60$ BASIC is still bright (error not cleared), the seams lit up by the over-counted ICC error.}
+{\footnotesize \textbf{ICC residual field} at matched CG iters $k{=}5/15/30/60$: at $k{=}60$ BASIC is still bright, the seams lit by the over-counted ICC error; sASM nearly dark.}
 \end{column}
 \end{columns}
-\vskip0.35em
+\vskip0.2em
 \centering
-\begin{beamercolorbox}[wd=0.92\textwidth,sep=4pt,rounded=true]{block body alerted}
-\footnotesize ``Inexact is bad'' $=$ the local error is \textbf{counted $m_k$ times in the overlap} (A$\times$B), accumulating into seam residual that costs iterations --- and worsens as overlap grows.
+\begin{beamercolorbox}[wd=0.92\textwidth,sep=3pt,rounded=true]{block body alerted}
+\footnotesize ``Inexact is bad'' $=$ the local error is \textbf{counted $m_k$ times in the overlap} (A$\times$B), accumulating into seam residual that costs iterations --- and worsens with overlap.
 \end{beamercolorbox}
 \end{frame}
 
-% ===== Fig 5: overlap sweep =====
-\begin{frame}{Q1, deeper --- the seam error grows with overlap}
-\framesubtitle{2D Laplace, $128^2$, $8\times8$ subdomains, ICC(0); residual $|r|$ at fixed iteration $k{=}40$}
+% ===== 8. Fig 5: overlap sweep =====
+\begin{frame}{Q1, deeper: the seam error concentrates as overlap grows}
+\framesubtitle{2D Laplace, $128^2$, $8{\times}8$ subdomains, ICC(0); residual $|r|$ at fixed iteration $k{=}40$, overlap $O{=}1,2,4$}
 \begin{center}\includegraphics[width=0.80\textwidth]{fig5_overlap_sweep}\end{center}
 \vskip-0.5em
 \begin{itemize}\itemsep0.12em\scriptsize
   \item The over-counted seam region \emph{widens} with overlap, and the residual share trapped there grows $0.45\!\to\!0.51\!\to\!0.64$.
   \item sASM is better at \emph{every} overlap (iters BASIC 182/195/185 vs sASM 131/130/129).
-  \item Honest note: in 2D the iteration count vs $O$ is non-monotone (ICC is only mildly inexact in 2D). The clean monotone ``overlap$\uparrow\Rightarrow$iter$\uparrow$'' is a 3D effect $\to$ next slide.
+  \item Honest note: in 2D the iteration count vs $O$ is non-monotone (ICC only mildly inexact in 2D). The clean monotone ``overlap$\uparrow\Rightarrow$iter$\uparrow$'' is a 3D effect $\to$ shown later (Fig.~6).
 \end{itemize}
 \end{frame}
 
-% ===== Fig 6: 3D real Sys3 =====
-\begin{frame}{The same effect on the real 3D problem (Sys 3)}
-\framesubtitle{mixed Dirichlet/Neumann Laplace, $n_x{=}48$, 4 ranks --- the actual torso-type solve}
-\begin{center}\includegraphics[width=0.95\textwidth]{fig6_3d}\end{center}
+% ===== 9. Fig 7: reordering makes ICC inexact (figure) =====
+\begin{frame}{What ``inexact'' really is: reordering turns the ICC inexact}
+\framesubtitle{1D (256, 8 sub) and 2D ($64^2$, $4{\times}4$), $O{=}2$, ICC(0); only the ICC \emph{ordering} changes (natural / RCM / random)}
+\begin{center}\includegraphics[width=0.86\textwidth]{fig7_reorder}\end{center}
+\end{frame}
+
+% ===== 10. Fig 7 reading + pin omega =====
+\begin{frame}{Only band-widening reorderings break exactness; sASM repairs them}
+\framesubtitle{$\eta$ (cheap $\ell_2$ residual flag) and the rigorous $\kappa(M_i^{-1}A_i)=\lambda_{\max}/\lambda_{\min}$ track together; recall $\omega=\lambda_{\max}(M_i^{-1}A_i)$}
+\begin{itemize}\itemsep0.22em\footnotesize
+  \item \textbf{(b) the headline.} 1D \emph{natural} \& \emph{RCM}: $\eta\approx10^{-15}$, $\kappa=1$ --- ICC \emph{is} exact Cholesky (tridiagonal has \emph{no fill}). 1D \emph{random}: $\eta=0.67$, $\kappa=89$ --- the permutation creates fill ICC(0) throws away, so ICC is now inexact. ($\eta$ is only a flag; $\kappa$, the green line, is the rigorous condition number $=\omega$.)
+  \item \textbf{(a)/(d) 1D.} natural/RCM converge in 15; random blows up to 113. RCM keeps the 1D problem banded $\Rightarrow$ stays exact --- \emph{not every} permutation breaks exactness, only a band-widening (random) one.
+  \item \textbf{(c)/(d) 2D.} The 5-point ICC already has fill ($\kappa{=}15$); random makes it worse ($\kappa{=}28$): $102\!\to\!147$ it. \textbf{sASM repairs both} ($102\!\to\!67$, $147\!\to\!92$), more so the more inexact the solve.
+\end{itemize}
+\end{frame}
+
+% ===== 11. Fig 6: 3D real Sys3 =====
+\begin{frame}{On the real 3D solve (Sys 3): more overlap $\Rightarrow$ more BASIC+ICC iters; sASM reverses it}
+\framesubtitle{3D Laplace, 1 face Dirichlet $+$ 5 faces Neumann, $n_x{=}48$, 4 MPI ranks --- the actual torso-type solve}
+\begin{center}\includegraphics[width=0.80\textwidth]{fig6_3d}\end{center}
 \vskip-0.2em
-\begin{itemize}\itemsep0.12em\footnotesize
-  \item \textbf{Left:} ICC --- BASIC 214 slow, sASM 134 recovers; exact Cholesky 38 (no anomaly, the reference).
-  \item \textbf{Right:} the clean monotone anomaly --- BASIC$+$ICC $132\!\to\!148\!\to\!179$ (more overlap, more iters $=$ error clears slower); sASM $132\!\to\!104\!\to\!103$ reverses it.
+\begin{itemize}\itemsep0.1em\footnotesize
+  \item \textbf{Left ($O{=}2$, rtol $10^{-8}$):} ICC --- BASIC 214 slow, sASM 134 recovers; exact Cholesky 38 (no anomaly, the reference).
+  \item \textbf{Right (overlap $O{=}0/1/2$, rtol $10^{-6}$):} the clean monotone anomaly --- BASIC$+$ICC $132\!\to\!148\!\to\!179$; sASM $132\!\to\!104\!\to\!103$ reverses it.
 \end{itemize}
 \end{frame}
 
-% ===== Q2: why sASM fixes it =====
-\begin{frame}{Q2 --- Why does sASM overcome it?}
+% ===== 12. Q2: why sASM fixes it =====
+\begin{frame}{Q2: the $\mathbf D^{-1/2}$ partition of unity removes $\hat N$, so $\lambda_{\max}\le\omega$}
 \framesubtitle{$\mathbf M_{\mathrm{sASM}}^{-1}=\mathbf D^{-1/2}\big(\textstyle\sum_i R_i^{\top}A_i^{-1}R_i\big)\mathbf D^{-1/2}$, partition of unity $\sum_i d_i^2=1$}
 \[
 \text{BASIC: } \lambda_{\max}\le \omega\,\hat N
@@ -159,88 +204,78 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 \text{sASM: } \lambda_{\max}\le \omega
 \]
 \begin{itemize}\itemsep0.3em
-  \item The $\mathbf D^{-1/2}$ sandwich restores a partition of unity ($\sum_i$ scaled $R_i^{\top}R_i=I$), so each DOF is counted \textbf{once}: the multiplicity over-count $\hat N$ is \textbf{removed} (Fig.~1 blue flat; Fig.~8 sASM flat).
-  \item \textbf{This breaks the multiplication.} $\omega$ is no longer multiplied by $\hat N$: the ICC error in the overlap is counted once, \emph{not accumulated} $\Rightarrow$ no seam pile-up.
-  \item Result (ICC): seam residual clears (Fig.~4, sASM nearly dark at $k{=}60$); CG recovers \textbf{102 $\to$ 67}. Measured: $\lambda_{\max}(\text{sASM,ICC})\!\approx\!1.25\!=\!\omega$, flat in overlap (Fig.~8a).
-  \item \textbf{sASM does not fix the inexactness} ($\omega$ still $>1$) --- it stops the over-count from \emph{amplifying} it. So $\kappa\lesssim C_0^2\,\omega$, and overlap helps again.
+  \item The $\mathbf D^{-1/2}$ sandwich restores a partition of unity ($\sum_i$ scaled $R_i^{\top}R_i=I$), so each DOF is counted \textbf{once}: the multiplicity over-count $\hat N$ is \textbf{removed} (Fig.~1 blue flat).
+  \item \textbf{This breaks the multiplication.} $\omega$ is no longer multiplied by $\hat N$: the ICC error in the overlap is counted once, \emph{not accumulated} $\Rightarrow$ no seam pile-up; CG recovers \textbf{102 $\to$ 67}.
+  \item \textbf{sASM does not fix the inexactness} ($\omega$ still $>1$) --- it stops the over-count from \emph{amplifying} it. So $\kappa\lesssim C_0^2\,\omega$, and overlap helps again. Measured next.
 \end{itemize}
 \end{frame}
 
-% ===== concept: what is the subdomain solve =====
-\begin{frame}{What does ``exact / inexact subdomain solve'' actually solve?}
-\framesubtitle{$A_i=R_iAR_i^{\top}$ --- the global Laplace restricted to subdomain $i$ (with overlap)}
-\begin{itemize}\itemsep0.45em
-  \item $A_i$ implicitly imposes \textbf{homogeneous Dirichlet} on the \emph{artificial cut} between subdomains (the cross-interface coupling is dropped), and keeps the physical BC on faces that touch the real boundary.
-  \item \textbf{Exact solve} $A_i^{-1}$ (Cholesky) $=$ \emph{exactly} solving a local Dirichlet--Laplace subproblem. $\;\omega=1$.
-  \item \textbf{Inexact solve} ICC(0) $=$ exactly solving a \emph{perturbed} operator $\tilde A_i=A_i-E_i$, where $E_i$ is the fill that ICC(0) \emph{drops}. Equivalently, the same Dirichlet subproblem solved only approximately. This $E_i$ \textbf{is} the source of $\omega>1$, and its error sits in the overlap/seam.
-\end{itemize}
-\vskip0.3em
-\begin{block}{So ``inexact'' is not mysterious}
-\footnotesize ICC(0) keeps only $A_i$'s nonzero pattern and throws away all fill-in. Whether that loses anything depends entirely on the \textbf{ordering} of the unknowns --- next slide.
-\end{block}
-\end{frame}
-
-% ===== Fig 7: reordering makes ICC inexact (figure) =====
-\begin{frame}{Reordering the unknowns turns the ICC inexact}
-\framesubtitle{only the ICC \emph{ordering} changes (natural / RCM / random); subdomains, overlap, weights fixed}
-\begin{center}\includegraphics[width=0.92\textwidth]{fig7_reorder}\end{center}
-\end{frame}
-
-% ===== Fig 7: reading the panels =====
-\begin{frame}{Reading Fig.~7 --- reordering breaks (or keeps) exactness}
-\framesubtitle{$\eta$ (cheap $\ell_2$ residual, a yes/no exact-flag) and the rigorous $\kappa(M_i^{-1}A_i)=\lambda_{\max}/\lambda_{\min}$ track together}
-\begin{itemize}\itemsep0.35em\footnotesize
-  \item \textbf{(b) the headline.} 1D \emph{natural} \& \emph{RCM}: $\eta\approx10^{-15}$, $\kappa=1$ --- ICC \emph{is} exact Cholesky (a tridiagonal has \emph{no fill}, so dropping fill drops nothing). 1D \emph{random}: $\eta=0.67$, $\kappa=89$ --- the permutation creates fill that ICC(0) throws away, so ICC is now inexact. ($\eta$ is only a flag; $\kappa$, the green line, is the rigorous condition number.)
-  \item \textbf{(a)/(d) 1D iterations.} natural/RCM converge in 15; random blows up to 113. RCM keeps the 1D problem banded, so it stays exact --- \emph{not every} permutation breaks exactness, only a band-widening (random) one.
-  \item \textbf{(c)/(d) 2D.} The 5-point ICC already has fill ($\eta{=}0.17$); random makes it worse ($\eta{=}0.26$): $102\!\to\!147$ it. \textbf{sASM repairs both} ($102\!\to\!67$, $147\!\to\!92$), more so the more inexact the solve.
-\end{itemize}
-\end{frame}
-
-% ===== Fig 8: coloring number measured =====
-\begin{frame}{Measuring the over-count directly: $\lambda_{\max}$ of $\mathbf M^{-1}\mathbf A$}
-\framesubtitle{2D Laplace $120^2$, $6\times6$ subdomains; $\lambda_{\max}/\lambda_{\min}$ from KSPCG (PCSHELL wrapping BASIC/sASM)}
+% ===== 13. Fig 8: coloring number measured (right after Q2) =====
+\begin{frame}{Measured directly: $\lambda_{\max}(\text{BASIC,exact})=\hat N$, and sASM is flat}
+\framesubtitle{2D Laplace $120^2$, $6{\times}6$ subdomains, overlap $O{=}1..16$; $\lambda_{\max}/\lambda_{\min}$ from KSPCG (PCSHELL wrapping BASIC/sASM)}
 \begin{center}\includegraphics[width=0.86\textwidth]{fig8_coloring}\end{center}
 \vskip-0.3em
 \begin{itemize}\itemsep0.1em\scriptsize
-  \item \textbf{(a)} $\lambda_{\max}(\text{BASIC,exact})=\hat N$ \emph{exactly} (4, then 9 when overlap reaches the 2nd neighbour). ICC lifts it to $\approx\omega\hat N$. \textbf{sASM is flat} ($\approx\!\omega\!=\!1.25$ for ICC): the multiplicity $\hat N$ is removed --- the $\omega\!\times\!\hat N$ product is broken.
+  \item \textbf{(a)} $\lambda_{\max}(\text{BASIC,exact})=\hat N$ \emph{exactly} (4, then 9 when overlap reaches the 2nd neighbour). ICC lifts it to $\approx\omega\hat N$. \textbf{sASM is flat} ($\lambda_{\max}\!\approx\!\omega\!=\!1.25$ for ICC): $\hat N$ removed, the $\omega\!\times\!\hat N$ product broken.
   \item \textbf{(b)} ICC inflates $\kappa$ $\sim$5--10$\times$; sASM-ICC keeps it $\sim$3$\times$ below BASIC-ICC $\Rightarrow\sim\!\sqrt3$ fewer CG iters. ($\hat N\le N_c$; they coincide in this regular layout.)
 \end{itemize}
 \end{frame}
 
-% ===== Fig 9: two-level improvement =====
-\begin{frame}{Improving sASM: the bottleneck is now $\lambda_{\min}$ --- add a coarse space}
-\framesubtitle{sASM fixed $\lambda_{\max}\!\approx\!\omega$; what is left is tiny $\lambda_{\min}\!\ge\!C_0^{-2}$ (missing global coupling) $\Rightarrow$ two-level sASM}
+% ===== 14. Fig 2/10: information propagation (the second thread) =====
+\begin{frame}{Second thread: why one-level is slow at all --- information propagation}
+\framesubtitle{1D Laplace, left-node Dirichlet, 12 subdomains (stride 32), \emph{exact} \emph{stationary} BASIC iteration --- $A$ sparse but $A^{-1}$ dense}
+\begin{center}\includegraphics[width=0.78\textwidth]{fig10_frontprop}\end{center}
+\vskip-0.35em
+\begin{columns}[T]
+\begin{column}{0.62\textwidth}\scriptsize
+\begin{itemize}\itemsep0.04em
+  \item Each Schwarz step solves only \emph{local} problems, so the converged front advances at \textbf{finite speed} (0.039/0.080/0.149 sub/iter for $O{=}2/6/12$) --- additive, slower than the ``1 subdomain/iter'' multiplicative slogan.
+  \item Cost to couple the domain \textbf{grows with \#subdomains}, shrinks with overlap.
+\end{itemize}
+\end{column}
+\begin{column}{0.36\textwidth}
+\scriptsize
+\begin{beamercolorbox}[sep=3pt,rounded=true]{block body}
+\textbf{One thing, three views:}\\
+front speed (physical) $=$ small $\lambda_{\min}$ (spectral) $=$ no coarse level (algorithmic). The next slide fixes all three.
+\end{beamercolorbox}
+\end{column}
+\end{columns}
+\end{frame}
+
+% ===== 15. Fig 9: two-level improvement =====
+\begin{frame}{Improving sASM: add a coarse space to lift $\lambda_{\min}$ (scalable)}
+\framesubtitle{sASM fixed $\lambda_{\max}\!\approx\!\omega$; the bottleneck is now tiny $\lambda_{\min}\!\ge\!C_0^{-2}$ (the propagation latency) $\Rightarrow$ two-level sASM}
 \vskip-0.3em
 {\small\[
 \mathbf M_{2}^{-1}=\underbrace{R_0^\top A_0^{-1}R_0}_{\text{coarse: lifts }\lambda_{\min}}
 +\underbrace{\mathbf D^{-1/2}\big(\textstyle\sum_i R_i^\top A_i^{-1}R_i\big)\mathbf D^{-1/2}}_{\text{sASM fine: keeps }\lambda_{\max}\approx\omega}
 \quad\text{\footnotesize(Nicolaides PoU, symmetric, CG-OK)}
 \]}
-\vskip-0.4em
-\begin{center}\includegraphics[width=0.80\textwidth]{fig9_twolevel}\end{center}
-\vskip-0.4em
+\vskip-0.5em
+\begin{center}\includegraphics[width=0.70\textwidth]{fig9_twolevel}\end{center}
+\vskip-0.5em
 \begin{center}\scriptsize
-(a) $\lambda_{\min}$ 14$\times$ up, $\kappa$ 8.7$\times$ down, its 121$\to$64.\quad
-(b) one-level $\to$217; \textbf{two-level flat ($\approx$64) = scalable}.
+(a) fixed $120^2$/$6{\times}6$/$O{=}2$: $\lambda_{\min}$ 14$\times$ up, $\kappa$ 8.7$\times$ down, its 121$\to$64.\quad
+(b) weak scaling: one-level $\to$217; \textbf{two-level flat ($\approx$64) = scalable}.
 \end{center}
 \end{frame}
 
-% ===== Conclusion =====
-\begin{frame}{Conclusion}
+% ===== 16. Conclusion =====
+\begin{frame}{Conclusion: over-count multiplies inexactness; the partition of unity breaks it}
 \begin{block}{The one-sentence picture}
 \footnotesize
-BASIC counts the overlap twice (Fig.~1). With \emph{exact} solves that is harmless --- it only lifts
-$\lambda_{\max}$, which CG tolerates (Fig.~3, solid). With an \emph{inexact} ICC solve the local error is
-counted $m_k$ times, so ``inexactness $\times$ over-count'' accumulates at the seams (Fig.~4) and convergence
+BASIC counts the overlap $m_k$ times (Fig.~1). With \emph{exact} solves that is harmless --- it only lifts
+$\lambda_{\max}\!\le\!\hat N$, which CG tolerates (Fig.~3, solid). With an \emph{inexact} ICC solve the local error is
+counted $m_k$ times, so ``inexactness $\times$ over-count'' ($\omega\hat N$) accumulates at the seams (Fig.~4) and convergence
 degrades (Fig.~3, dashed, 102). sASM's $\mathbf D^{-1/2}$ partition of unity removes the multiplicity over-count, breaking
-that product, so the inexact corrections are no longer amplified and CG recovers (102 $\to$ 67).
+the product, so the inexact corrections are no longer amplified and CG recovers (102 $\to$ 67).
 \end{block}
 \vskip0.3em
-\begin{itemize}\itemsep0.28em
-  \item \textbf{Q1:} inexactness is bad because BASIC \emph{multiplies} it by the multiplicity over-count $\hat N=\max_k m_k$ ($\le\Nc$); both grow with overlap, so iterations rise with overlap. Measured: $\lambda_{\max}(\text{BASIC,exact})=\hat N$, lifted to $\omega\hat N$ by ICC (Fig.~8).
-  \item \textbf{Q2:} sASM removes $\hat N$ (partition of unity, Fig.~8 flat), so the inexactness is no longer amplified --- it helps \emph{exactly} when the solve is inexact, and is neutral when exact.
-  \item Information propagates at a finite, overlap-set speed (Fig.~2/10): a one-level latency that grows with \#subdomains, untouched by \emph{weighting}.
-  \item \textbf{To reduce iterations a lot:} the residual bottleneck is now $\lambda_{\min}$, not $\lambda_{\max}$ --- add a coarse space. A symmetric \textbf{two-level sASM} halves iterations and makes them \emph{scalable} (flat in \#subdomains, Fig.~9).
+\begin{itemize}\itemsep0.26em\footnotesize
+  \item \textbf{Q1:} inexactness is bad because BASIC \emph{multiplies} it by $\hat N=\max_k m_k$; both grow with overlap (the anomaly). Measured: $\lambda_{\max}(\text{BASIC,exact})=\hat N$, lifted to $\omega\hat N$ by ICC (Fig.~8).
+  \item \textbf{Q2:} sASM removes $\hat N$ (partition of unity, Fig.~8 flat), so it helps \emph{exactly} when the solve is inexact, and is neutral when exact.
+  \item \textbf{Second thread:} information propagates at finite, overlap-set speed (Fig.~2/10) $=$ the small $\lambda_{\min}$; a symmetric \textbf{two-level sASM} (coarse space) lifts it, halving iterations and making them \emph{scalable} (Fig.~9).
 \end{itemize}
 \end{frame}
 
