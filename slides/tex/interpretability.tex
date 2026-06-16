@@ -87,7 +87,7 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 \vskip0.4em
 \begin{itemize}\itemsep0.25em
   \item \textbf{sASM beats BASIC only in one cell: 2D with an inexact solve} (67 vs 102). Elsewhere sASM $\approx$ or slightly worse.
-  \item 1D ``ICC'' $=$ exact: a tridiagonal has no fill, so ICC(0) is the complete Cholesky --- 1D cannot show the anomaly.
+  \item 1D ``ICC'' $=$ exact \emph{in natural ordering} (tridiagonal $\Rightarrow$ no fill), so 1D shows no anomaly \emph{by default}. (Reorder the unknowns and 1D becomes inexact too --- Fig.~7.)
   \item \textbf{Question:} what makes the \emph{inexact} solve bad, and why does sASM fix it precisely there?
 \end{itemize}
 \end{frame}
@@ -179,8 +179,8 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 \framesubtitle{$\eta$ (cheap $\ell_2$ residual flag) and the rigorous $\kappa(M_i^{-1}A_i)=\lambda_{\max}/\lambda_{\min}$ track together; recall $\omega=\lambda_{\max}(M_i^{-1}A_i)$}
 \begin{itemize}\itemsep0.22em\footnotesize
   \item \textbf{(b) the headline.} 1D \emph{natural} \& \emph{RCM}: $\eta\approx10^{-15}$, $\kappa=1$ --- ICC \emph{is} exact Cholesky (tridiagonal has \emph{no fill}). 1D \emph{random}: $\eta=0.67$, $\kappa=89$ --- the permutation creates fill ICC(0) throws away, so ICC is now inexact. ($\eta$ is only a flag; $\kappa$, the green line, is the rigorous condition number $=\omega$.)
-  \item \textbf{(a)/(d) 1D.} natural/RCM converge in 15; random blows up to 113. RCM keeps the 1D problem banded $\Rightarrow$ stays exact --- \emph{not every} permutation breaks exactness, only a band-widening (random) one.
-  \item \textbf{(c)/(d) 2D.} The 5-point ICC already has fill ($\kappa{=}15$); random makes it worse ($\kappa{=}28$): $102\!\to\!147$ it. \textbf{sASM repairs both} ($102\!\to\!67$, $147\!\to\!92$), more so the more inexact the solve.
+  \item \textbf{(a)/(d) 1D.} natural/RCM: 15; random blows up to 113 --- yet \textbf{sASM barely helps} (113$\to$108), because 1D's over-count is only $\hat N{=}2$: A ($\kappa{=}89$) is large but B ($\hat N$) is small, so there is little to remove. (RCM stays banded $\Rightarrow$ exact: not every permutation breaks it.)
+  \item \textbf{(c)/(d) 2D.} The 5-point ICC already has fill ($\kappa{=}15$); random makes it worse ($\kappa{=}28$): $102\!\to\!147$ it. Here $\hat N{=}4$, so \textbf{sASM repairs both} ($102\!\to\!67$, $147\!\to\!92$). \emph{The sASM win needs both A and B large} --- 1D random (A only) vs 2D/3D.
 \end{itemize}
 \end{frame}
 
