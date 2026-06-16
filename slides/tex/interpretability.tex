@@ -261,6 +261,17 @@ front speed (physical) $=$ small $\lambda_{\min}$ (spectral) $=$ no coarse level
 \end{center}
 \end{frame}
 
+% ===== 15b. Controls (rigor.c) =====
+\begin{frame}{Controls: it is the over-count (not size), and a coarse space can't replace sASM}
+\framesubtitle{$M^{-1}$ verified fixed SPD (symmetry $2.9\!\times\!10^{-16}$, $\lambda_{\min}{>}0$) $\Rightarrow$ CG valid; outer stop $\|r\|/\|b\|$ uniform}
+\begin{center}\includegraphics[width=0.86\textwidth]{fig11_controls}\end{center}
+\vskip-0.4em
+\begin{itemize}\itemsep0.03em\scriptsize
+  \item \textbf{(a)} strip ($\hat N{=}2$, 1728 DOF) has \emph{half} the $\lambda_{\max}$ of box ($\hat N{=}4$, 324 DOF) despite 5$\times$ the size: $\lambda_{\max}$ tracks $\hat N$, not subdomain size.
+  \item \textbf{(b)} two-level BASIC keeps $\lambda_{\max}{=}4.5$ (92 its); only sASM lowers it to 2.1 (64 its). Coarse fixes $\lambda_{\min}$, sASM fixes $\lambda_{\max}$ --- \textbf{orthogonal, both needed} (cost agrees: sASM-two 40\,ms fastest).
+\end{itemize}
+\end{frame}
+
 % ===== 16. Conclusion =====
 \begin{frame}{Conclusion: over-count multiplies inexactness; the partition of unity breaks it}
 \begin{block}{The one-sentence picture}
