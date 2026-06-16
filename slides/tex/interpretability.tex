@@ -116,6 +116,17 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 \end{itemize}
 \end{frame}
 
+% ===== 5b. over-count at every seam (global residual) =====
+\begin{frame}{...and it is at \emph{every} seam, not just one}
+\framesubtitle{same apply but with a domain-wide residual $r{=}1$, so all 7 overlaps react (1D, 256 DOF, 8 subdomains, exact)}
+\begin{center}\includegraphics[width=0.72\textwidth]{fig1c_overcount_global}\end{center}
+\vskip-0.3em
+\begin{itemize}\itemsep0.04em\scriptsize
+  \item \textbf{Top:} interiors $z_{\rm BASIC}\!\approx\!z_{\rm sASM}$ ($\approx$171); at \emph{every} seam BASIC sits above sASM (86 vs 57) --- the overlap is double-counted.
+  \item \textbf{Bottom:} $z_{\rm BASIC}-z_{\rm sASM}$ is \textbf{7 clean bumps} (one per seam, $\approx$0 in interiors): the pure over-count, at all 7 overlaps. (Fig.~1's \emph{localized} bump reacted only at the central seam.)
+\end{itemize}
+\end{frame}
+
 % ===== 6. Q1: the bound (assertive title) =====
 \begin{frame}{Q1: inexactness bites because BASIC \emph{multiplies} it by the over-count}
 \framesubtitle{the abstract additive-Schwarz bound: the two factors multiply in $\lambda_{\max}$}

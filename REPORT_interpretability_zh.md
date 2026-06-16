@@ -77,6 +77,10 @@ $\kappa$ 是驱动 CG 迭代数的量(迭代 $\sim\sqrt{\kappa}$),$\eta$ 只做�
 - **【看什么】** 红线在每条重叠缝处**隆起**(那里被叠加了 $m_k{=}2$ 次);蓝线被 $1/\sqrt{m_k}$ 归一、保持平滑。
 - **【结论】** 这是"因素 B = 重复计数"的**直接可视化**:$\sum_iR_i^\top R_i=\mathrm{diag}(m_k)$,
   BASIC 在重叠区把局部贡献多加了 $m_k$ 倍。**注意:这本身无害**——下面的图说明它何时才致命。
+- **【补充 `fig1c_overcount_global.png`】** Fig 1 喂的是**局部包**,所以只有中央 1 条缝反应(z 两边为 0=那些子域没收到输入)。
+  把输入换成**全域常数 $r{=}1$**(`overcount_global.c`):z 全域非零,**7 条缝全部显出过度计数**——
+  内部 $z_{\rm BASIC}\approx z_{\rm sASM}\approx171$,每条缝 $z_{\rm BASIC}{=}86$ vs $z_{\rm sASM}{=}57.5$;
+  差 $z_{\rm BASIC}-z_{\rm sASM}$ = **7 个干净的鼓包(每缝一个,内部≈0)**= 纯过度计数。
 
 ### Fig 2 / Fig 10 — 信息传播:单层 Schwarz 的"有限传播速度"延迟
 - **【对应问题】** 1D Laplace,左边界 Dirichlet$=1$,**精确子域解的平稳 BASIC 迭代**
