@@ -80,22 +80,14 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 \end{frame}
 
 % ===== Fig 2: information propagation =====
-\begin{frame}{Mechanism, part 2: information propagates one subdomain per iteration}
-\begin{columns}[T]
-\begin{column}{0.6\textwidth}
-\includegraphics[width=\textwidth]{fig2_front}
-\end{column}
-\begin{column}{0.4\textwidth}
-\footnotesize
-\begin{itemize}\itemsep0.3em
-  \item Laplace is globally coupled, but each Schwarz step solves only \emph{local} problems.
-  \item So the boundary's influence advances $\sim$1 subdomain per iteration (fast at first $=$ overlap reach).
-  \item The deep interior lags --- that slow global mode is what a coarse space (two-level) would remove.
-  \item \textbf{One-level cost is $O(\#\text{subdomains})$ iterations}, independent of BASIC vs sASM.
-        Overlap helps by speeding this propagation.
+\begin{frame}{Mechanism, part 2: information propagation --- the one-level latency}
+\framesubtitle{Laplace is globally coupled ($A$ sparse, $A^{-1}$ dense), but each Schwarz step solves only \emph{local} problems}
+\begin{center}\includegraphics[width=0.85\textwidth]{fig10_frontprop}\end{center}
+\vskip-0.4em
+\begin{itemize}\itemsep0.05em\scriptsize
+  \item (a) the solution \emph{crawls in} from the boundary; (b) the converged front advances at \textbf{finite speed}, \textbf{growing with overlap} (0.039/0.080/0.149 sub/iter for O=2/6/12) --- additive Schwarz, slower than the ``1 subdomain/iter'' multiplicative slogan.
+  \item So one-level coupling costs iterations that \textbf{grow with \#subdomains} --- this latency \emph{is} the small $\lambda_{\min}$ (slow global mode); a coarse space transfers it globally in one step (Fig.~9).
 \end{itemize}
-\end{column}
-\end{columns}
 \end{frame}
 
 % ===== Q1: why inexact is bad =====
@@ -247,7 +239,7 @@ that product, so the inexact corrections are no longer amplified and CG recovers
 \begin{itemize}\itemsep0.28em
   \item \textbf{Q1:} inexactness is bad because BASIC \emph{multiplies} it by the multiplicity over-count $\hat N=\max_k m_k$ ($\le\Nc$); both grow with overlap, so iterations rise with overlap. Measured: $\lambda_{\max}(\text{BASIC,exact})=\hat N$, lifted to $\omega\hat N$ by ICC (Fig.~8).
   \item \textbf{Q2:} sASM removes $\hat N$ (partition of unity, Fig.~8 flat), so the inexactness is no longer amplified --- it helps \emph{exactly} when the solve is inexact, and is neutral when exact.
-  \item Information always propagates $\sim$1 subdomain/iteration (Fig.~2): a one-level cost, untouched by \emph{weighting}.
+  \item Information propagates at a finite, overlap-set speed (Fig.~2/10): a one-level latency that grows with \#subdomains, untouched by \emph{weighting}.
   \item \textbf{To reduce iterations a lot:} the residual bottleneck is now $\lambda_{\min}$, not $\lambda_{\max}$ --- add a coarse space. A symmetric \textbf{two-level sASM} halves iterations and makes them \emph{scalable} (flat in \#subdomains, Fig.~9).
 \end{itemize}
 \end{frame}
