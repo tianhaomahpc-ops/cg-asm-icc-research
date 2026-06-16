@@ -106,6 +106,17 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 \end{block}
 \end{frame}
 
+% ===== 4b. what the inexact solve does to z =====
+\begin{frame}{What an inexact solve does to the correction $z$: it undershoots the smooth mode}
+\framesubtitle{BASIC, 2D Laplace $64^2$, $4{\times}4$, $O{=}2$, $r{=}1$ --- in 1D ICC$=$exact so $z$ is identical; 2D differs}
+\begin{center}\includegraphics[width=0.99\textwidth]{fig_zfield_exact_vs_icc}\end{center}
+\vskip-0.1em
+\begin{itemize}\itemsep0.05em\scriptsize
+  \item Exact $A_i^{-1}$ amplifies the smooth small-$\lambda$ mode $\Rightarrow$ $z=$ big domes ($\|z\|{=}1458$). ICC(0) misses that amplification $\Rightarrow$ it \textbf{undershoots} ($\|z\|{=}142$, 10$\times$ smaller; the change is $\approx$91\%).
+  \item \textbf{The inexactness lives on the smooth global mode} --- exactly the slow-to-converge $\lambda_{\min}$ / information-propagation mode (Fig.~10). So ``ICC inexact'' and ``the global mode is slow'' are one thing. (BASIC then double-counts this $z$ at the seams.)
+\end{itemize}
+\end{frame}
+
 % ===== 5. Fig 1: over-counting (factor B) =====
 \begin{frame}{Mechanism: BASIC over-counts the overlap (the factor $\hat N$)}
 \framesubtitle{1D Laplace, 256 DOF, 8 subdomains; one apply to a localized residual --- \emph{both} curves are exact Cholesky}
