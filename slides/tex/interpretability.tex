@@ -108,13 +108,11 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 
 % ===== 5. Fig 1: over-counting (factor B) =====
 \begin{frame}{Mechanism: BASIC over-counts the overlap (the factor $\hat N$)}
-\framesubtitle{1D Laplace, 256 DOF, 8 subdomains, \emph{exact} Cholesky; one apply $\sum_i R_i^{\top}A_i^{-1}R_i\,r$ to a localized residual}
-\begin{center}\includegraphics[width=0.69\textwidth]{fig1_overcount}\end{center}
-\vskip-0.6em
-\begin{itemize}\itemsep0.12em\scriptsize
-  \item In the overlap a DOF belongs to $m_k$ subdomains, so its correction is \emph{added} $m_k$ times.
-  \item \textbf{BASIC} (red) bumps up at every overlap seam; \textbf{sASM} (blue) is normalized by $1/\sqrt{m_k}$.
-  \item This over-count is the algebraic fact $\sum_i R_i^{\top}R_i=\mathbf D=\mathrm{diag}(m_k)$; the max multiplicity is $\hat N=\max_k m_k$. It is harmless \emph{by itself} (note: exact solve here) --- the next slides show when it bites.
+\framesubtitle{1D Laplace, 256 DOF, 8 subdomains; one apply to a localized residual --- \emph{both} curves are exact Cholesky}
+\begin{center}\includegraphics[width=0.72\textwidth]{fig1b_overcount_annotated}\end{center}
+\vskip-0.35em
+\begin{itemize}\itemsep0.1em\scriptsize
+  \item Over-count $=\sum_i R_i^{\top}R_i=\mathbf D=\mathrm{diag}(m_k)$, $\hat N=\max_k m_k$. \textbf{Harmless with an exact solve} (red $\approx$ blue); bites only once the solve is \emph{inexact}. In 1D, ICC(0)$=$exact $\Rightarrow$ no separate inexact curve here (that is 2D, Fig.~3).
 \end{itemize}
 \end{frame}
 
@@ -154,6 +152,17 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 \begin{beamercolorbox}[wd=0.92\textwidth,sep=3pt,rounded=true]{block body alerted}
 \footnotesize ``Inexact is bad'' $=$ the local error is \textbf{counted $m_k$ times in the overlap} (A$\times$B), accumulating into seam residual that costs iterations --- and worsens with overlap.
 \end{beamercolorbox}
+\end{frame}
+
+% ===== 7b. Fig 13: seam error accumulation, exact vs inexact =====
+\begin{frame}{Q1 evidence, localized: WHERE the inexact error accumulates}
+\framesubtitle{2D Laplace $64^2$, $4{\times}4$, $O{=}2$; seam-residual fraction $=\|r\|^2_{\rm overlap}/\|r\|^2$ per CG iteration}
+\begin{center}\includegraphics[width=0.84\textwidth]{fig13_seamacc}\end{center}
+\vskip-0.35em
+\begin{itemize}\itemsep0.05em\scriptsize
+  \item \textbf{Fig.~3 (= panel a) shows only the global convergence gap} (exact 23, BASIC-ICC 102, sASM-ICC 68) --- the \emph{symptom}, not where it comes from.
+  \item \textbf{Panel (b) localizes it:} BASIC traps the residual at the over-counted seams (fraction $\sim$0.5--0.8); with ICC that trapped error is the bottleneck. sASM does not over-count $\Rightarrow$ seam fraction stays $\sim$0.3 $\Rightarrow$ clears faster. \emph{This} is the boundary error accumulation.
+\end{itemize}
 \end{frame}
 
 % ===== 8. Fig 5: overlap sweep =====
