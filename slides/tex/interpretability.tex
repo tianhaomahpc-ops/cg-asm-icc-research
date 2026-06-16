@@ -272,6 +272,17 @@ front speed (physical) $=$ small $\lambda_{\min}$ (spectral) $=$ no coarse level
 \end{itemize}
 \end{frame}
 
+% ===== 15c. Spectral localization + phase map =====
+\begin{frame}{Locating the mechanism: over-count at the high end; penalty $\propto$ inexactness}
+\framesubtitle{(a) full spectrum via CG Ritz values; (b) over-count penalty $\kappa_{\rm BASIC}/\kappa_{\rm sASM}$ over (overlap $\times$ ICC fill level)}
+\begin{center}\includegraphics[width=0.83\textwidth]{fig12_phasespec}\end{center}
+\vskip-0.4em
+\begin{itemize}\itemsep0.02em\scriptsize
+  \item \textbf{(a)} BASIC-ICC reaches $\lambda_{\max}{=}4.5$ (high-end outliers $=$ over-count); sASM-ICC capped at 1.25. The low-end $\lambda_{\min}$ cluster is common --- sASM acts at the \emph{high} end, the coarse space at the \emph{low} end.
+  \item \textbf{(b)} the over-count penalty is $\sim$2.9$\times$ at ICC(0), fading to $\sim$1 at exact: it scales with $\omega$ --- sASM pays off exactly where the solve is inexact.
+\end{itemize}
+\end{frame}
+
 % ===== 16. Conclusion =====
 \begin{frame}{Conclusion: over-count multiplies inexactness; the partition of unity breaks it}
 \begin{block}{The one-sentence picture}
