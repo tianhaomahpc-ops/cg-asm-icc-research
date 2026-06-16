@@ -156,12 +156,12 @@ sASM  & 25 & 25 & 27 & \textbf{67} \\
 
 % ===== 7b. Fig 13: seam error accumulation, exact vs inexact =====
 \begin{frame}{Q1 evidence, localized: WHERE the inexact error accumulates}
-\framesubtitle{2D Laplace $64^2$, $4{\times}4$, $O{=}2$; seam-residual fraction $=\|r\|^2_{\rm overlap}/\|r\|^2$ per CG iteration}
-\begin{center}\includegraphics[width=0.84\textwidth]{fig13_seamacc}\end{center}
-\vskip-0.35em
-\begin{itemize}\itemsep0.05em\scriptsize
-  \item \textbf{Fig.~3 (= panel a) shows only the global convergence gap} (exact 23, BASIC-ICC 102, sASM-ICC 68) --- the \emph{symptom}, not where it comes from.
-  \item \textbf{Panel (b) localizes it:} BASIC traps the residual at the over-counted seams (fraction $\sim$0.5--0.8); with ICC that trapped error is the bottleneck. sASM does not over-count $\Rightarrow$ seam fraction stays $\sim$0.3 $\Rightarrow$ clears faster. \emph{This} is the boundary error accumulation.
+\framesubtitle{2D Laplace $64^2$, $4{\times}4$, $O{=}2$; residual fields at $k{=}15$ (top) + seam-residual fraction (bottom)}
+\begin{center}\includegraphics[width=0.70\textwidth]{fig13_seamacc}\end{center}
+\vskip-0.3em
+\begin{itemize}\itemsep0.04em\scriptsize
+  \item \textbf{Top fields ($k{=}15$):} exact has \emph{converged} (dark); BASIC-ICC residual is \textbf{stuck at the seams} (bright); sASM-ICC less. \textbf{(a)} Fig.~3's global gap is only the \emph{symptom}.
+  \item \textbf{(b)} BASIC traps the inexact error at the over-counted seams (fraction $\sim$0.5--0.8) $\Rightarrow$ the bottleneck; sASM does not over-count $\Rightarrow\sim$0.3 $\Rightarrow$ clears faster. \emph{This} is the boundary error accumulation.
 \end{itemize}
 \end{frame}
 
