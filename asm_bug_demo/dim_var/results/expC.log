@@ -1,0 +1,69 @@
+
+##### Experiment C : variable coefficient #####
+--- C1 : coefficient fields at contrast 1e4 ---
+C1 d=1 const            basic O=0 c=     1 | iter=  7 w=1.000 kap=     317.6 Nhat=1
+C1 d=1 const            basic O=1 c=     1 | iter=  8 w=1.000 kap=     106.8 Nhat=2
+C1 d=1 const            basic O=2 c=     1 | iter=  8 w=1.000 kap=      64.3 Nhat=2
+C1 d=1 const            basic O=3 c=     1 | iter=  8 w=1.000 kap=      46.1 Nhat=2
+C1 d=1 const            sasm  O=0 c=     1 | iter=  7 w=1.000 kap=     317.6 Nhat=1
+C1 d=1 const            sasm  O=1 c=     1 | iter= 12 w=1.000 kap=     143.6 Nhat=2
+C1 d=1 const            sasm  O=2 c=     1 | iter= 13 w=1.000 kap=     110.2 Nhat=2
+C1 d=1 const            sasm  O=3 c=     1 | iter= 13 w=1.000 kap=      97.0 Nhat=2
+C1 d=1 smooth           basic O=0 c=     1 | iter=  7 w=1.000 kap=     205.5 Nhat=1
+C1 d=1 smooth           basic O=1 c=     1 | iter=  8 w=1.000 kap=      69.5 Nhat=2
+C1 d=1 smooth           basic O=2 c=     1 | iter=  8 w=1.000 kap=      42.1 Nhat=2
+C1 d=1 smooth           basic O=3 c=     1 | iter=  8 w=1.000 kap=      30.3 Nhat=2
+C1 d=1 smooth           sasm  O=0 c=     1 | iter=  7 w=1.000 kap=     205.5 Nhat=1
+C1 d=1 smooth           sasm  O=1 c=     1 | iter= 12 w=1.000 kap=      92.9 Nhat=2
+C1 d=1 smooth           sasm  O=2 c=     1 | iter= 13 w=1.000 kap=      71.4 Nhat=2
+C1 d=1 smooth           sasm  O=3 c=     1 | iter= 13 w=1.000 kap=      63.0 Nhat=2
+C1 d=1 layers           basic O=0 c= 10000 | iter=  7 w=1.000 kap=     423.3 Nhat=1
+C1 d=1 layers           basic O=1 c= 10000 | iter=  8 w=1.000 kap=     140.8 Nhat=2
+C1 d=1 layers           basic O=2 c= 10000 | iter=  8 w=1.000 kap=      84.1 Nhat=2
+C1 d=1 layers           basic O=3 c= 10000 | iter=  8 w=1.000 kap=      59.7 Nhat=2
+C1 d=1 layers           sasm  O=0 c= 10000 | iter=  7 w=1.000 kap=     423.3 Nhat=1
+C1 d=1 layers           sasm  O=1 c= 10000 | iter= 18 w=1.000 kap=58888964.5 Nhat=2
+C1 d=1 layers           sasm  O=2 c= 10000 | iter= 18 w=1.000 kap=98028952.6 Nhat=2
+C1 d=1 layers           sasm  O=3 c= 10000 | iter= 19 w=1.000 kap=137168894.8 Nhat=2
+C1 d=1 layers_unaligned basic O=0 c= 10000 | iter=  8 w=1.000 kap=  640141.9 Nhat=1
+C1 d=1 layers_unaligned basic O=1 c= 10000 | iter=  9 w=1.000 kap=  213381.5 Nhat=2
+C1 d=1 layers_unaligned basic O=2 c= 10000 | iter=  8 w=1.000 kap=  128029.1 Nhat=2
+C1 d=1 layers_unaligned basic O=3 c= 10000 | iter=  8 w=1.000 kap=   91449.4 Nhat=2
+C1 d=1 layers_unaligned sasm  O=0 c= 10000 | iter=  8 w=1.000 kap=  640141.9 Nhat=1
+C1 d=1 layers_unaligned sasm  O=1 c= 10000 | iter= 12 w=1.000 kap=  289726.9 Nhat=2
+C1 d=1 layers_unaligned sasm  O=2 c= 10000 | iter= 13 w=1.000 kap=  222872.4 Nhat=2
+C1 d=1 layers_unaligned sasm  O=3 c= 10000 | iter= 15 w=1.000 kap=  196397.8 Nhat=2
+C1 d=2 const            basic O=0 c=     1 | iter= 62 w=1.356 kap=     575.0 Nhat=1
+C1 d=2 const            basic O=1 c=     1 | iter= 70 w=1.357 kap=    1002.3 Nhat=4
+C1 d=2 const            basic O=2 c=     1 | iter= 74 w=1.357 kap=     848.2 Nhat=4
+C1 d=2 const            basic O=3 c=     1 | iter= 69 w=1.357 kap=     698.0 Nhat=4
+C1 d=2 const            sasm  O=0 c=     1 | iter= 62 w=1.356 kap=     575.0 Nhat=1
+C1 d=2 const            sasm  O=1 c=     1 | iter= 49 w=1.357 kap=     366.5 Nhat=4
+C1 d=2 const            sasm  O=2 c=     1 | iter= 48 w=1.357 kap=     355.6 Nhat=4
+C1 d=2 const            sasm  O=3 c=     1 | iter= 48 w=1.357 kap=     358.1 Nhat=4
+C1 d=2 smooth           basic O=0 c=     1 | iter= 62 w=1.353 kap=     596.4 Nhat=1
+C1 d=2 smooth           basic O=1 c=     1 | iter= 72 w=1.353 kap=    1040.0 Nhat=4
+C1 d=2 smooth           basic O=2 c=     1 | iter= 77 w=1.353 kap=     881.4 Nhat=4
+C1 d=2 smooth           basic O=3 c=     1 | iter= 74 w=1.353 kap=     726.3 Nhat=4
+C1 d=2 smooth           sasm  O=0 c=     1 | iter= 62 w=1.353 kap=     596.4 Nhat=1
+C1 d=2 smooth           sasm  O=1 c=     1 | iter= 50 w=1.353 kap=     380.8 Nhat=4
+C1 d=2 smooth           sasm  O=2 c=     1 | iter= 49 w=1.353 kap=     369.8 Nhat=4
+C1 d=2 smooth           sasm  O=3 c=     1 | iter= 50 w=1.353 kap=     371.7 Nhat=4
+C1 d=2 layers           basic O=0 c= 10000 | iter= 78 w=1.539 kap= 1593830.8 Nhat=1
+C1 d=2 layers           basic O=1 c= 10000 | iter= 99 w=1.539 kap= 3339471.9 Nhat=4
+C1 d=2 layers           basic O=2 c= 10000 | iter=111 w=1.539 kap= 3150824.0 Nhat=4
+C1 d=2 layers           basic O=3 c= 10000 | iter=106 w=1.539 kap= 2617359.8 Nhat=4
+C1 d=2 layers           sasm  O=0 c= 10000 | iter= 78 w=1.539 kap= 1593830.8 Nhat=1
+C1 d=2 layers           sasm  O=1 c= 10000 | iter= 72 w=1.539 kap= 1339335.5 Nhat=4
+C1 d=2 layers           sasm  O=2 c= 10000 | iter= 70 w=1.539 kap= 1276189.2 Nhat=4
+C1 d=2 layers           sasm  O=3 c= 10000 | iter= 70 w=1.539 kap= 1266337.5 Nhat=4
+C1 d=2 layers_unaligned basic O=0 c= 10000 | iter= 89 w=1.457 kap= 1468705.1 Nhat=1
+C1 d=2 layers_unaligned basic O=1 c= 10000 | iter= 98 w=1.458 kap= 2674788.1 Nhat=4
+C1 d=2 layers_unaligned basic O=2 c= 10000 | iter=103 w=1.459 kap= 2346571.5 Nhat=4
+C1 d=2 layers_unaligned basic O=3 c= 10000 | iter= 98 w=1.459 kap= 2007275.2 Nhat=4
+C1 d=2 layers_unaligned sasm  O=0 c= 10000 | iter= 89 w=1.457 kap= 1468705.1 Nhat=1
+C1 d=2 layers_unaligned sasm  O=1 c= 10000 | iter= 69 w=1.458 kap=  958617.6 Nhat=4
+C1 d=2 layers_unaligned sasm  O=2 c= 10000 | iter= 68 w=1.459 kap=  955487.4 Nhat=4
+C1 d=2 layers_unaligned sasm  O=3 c= 10000 | iter= 69 w=1.459 kap=  995730.2 Nhat=4
+C1 d=3 const            basic O=0 c=     1 | iter= 37 w=1.167 kap=     156.4 Nhat=1
+C1 d=3 const            basic O=1 c=     1 | iter= 44 w=1.185 kap=     224.5 Nhat=8

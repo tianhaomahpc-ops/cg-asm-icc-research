@@ -1,0 +1,16 @@
+# Regenerable / build artefacts for the dim_var study.
+# Sources, results (csv+figures), reports and slides ARE committed;
+# the items below are reproducible from the scripts.
+__pycache__/
+# PETSc-binary K/b + partition IS: regenerate via fem_build.py
+mesh/
+# compiled C drivers: mpicc schwarz_{lab,fem}.c
+schwarz_lab
+schwarz_fem
+# LaTeX aux
+*.aux
+*.nav
+*.out
+*.snm
+*.toc
+slides_fem.log
