@@ -1,0 +1,106 @@
+d=2 full       basic O=0 | it= 28 Nhat=1 w=1.165 lmax=  1.66 lmin=3.15e-02 kap=     52.9
+d=2 full       basic O=1 | it= 31 Nhat=4 w=1.179 lmax=  4.30 lmin=6.02e-02 kap=     71.4
+d=2 full       basic O=2 | it= 31 Nhat=4 w=1.188 lmax=  4.54 lmin=9.12e-02 kap=     49.8
+d=2 full       basic O=3 | it= 28 Nhat=4 w=1.193 lmax=  5.33 lmin=1.66e-01 kap=     32.2
+d=2 full       sasm  O=0 | it= 28 Nhat=1 w=1.165 lmax=  1.66 lmin=3.15e-02 kap=     52.9
+d=2 full       sasm  O=1 | it= 21 Nhat=4 w=1.179 lmax=  1.26 lmin=4.19e-02 kap=     30.0
+d=2 full       sasm  O=2 | it= 21 Nhat=4 w=1.188 lmax=  1.27 lmin=4.35e-02 kap=     29.2
+d=2 full       sasm  O=3 | it= 22 Nhat=4 w=1.193 lmax=  1.33 lmin=4.43e-02 kap=     30.1
+d=2 kfaces     basic O=0 | it= 40 Nhat=1 w=1.247 lmax=  1.66 lmin=1.72e-02 kap=     96.7
+d=2 kfaces     basic O=1 | it= 40 Nhat=4 w=1.261 lmax=  4.30 lmin=3.09e-02 kap=    139.1
+d=2 kfaces     basic O=2 | it= 42 Nhat=4 w=1.266 lmax=  4.54 lmin=4.44e-02 kap=    102.4
+d=2 kfaces     basic O=3 | it= 38 Nhat=4 w=1.268 lmax=  5.33 lmin=7.17e-02 kap=     74.4
+d=2 kfaces     sasm  O=0 | it= 40 Nhat=1 w=1.247 lmax=  1.66 lmin=1.72e-02 kap=     96.7
+d=2 kfaces     sasm  O=1 | it= 31 Nhat=4 w=1.261 lmax=  1.28 lmin=2.24e-02 kap=     56.9
+d=2 kfaces     sasm  O=2 | it= 30 Nhat=4 w=1.266 lmax=  1.28 lmin=2.32e-02 kap=     55.1
+d=2 kfaces     sasm  O=3 | it= 30 Nhat=4 w=1.268 lmax=  1.33 lmin=2.35e-02 kap=     56.7
+d=2 mixed      basic O=0 | it= 49 Nhat=1 w=1.356 lmax=  1.66 lmin=4.65e-03 kap=    357.6
+d=2 mixed      basic O=1 | it= 55 Nhat=4 w=1.356 lmax=  4.30 lmin=7.73e-03 kap=    556.7
+d=2 mixed      basic O=2 | it= 55 Nhat=4 w=1.356 lmax=  4.54 lmin=1.04e-02 kap=    436.2
+d=2 mixed      basic O=3 | it= 51 Nhat=4 w=1.357 lmax=  5.33 lmin=1.50e-02 kap=    354.7
+d=2 mixed      sasm  O=0 | it= 49 Nhat=1 w=1.356 lmax=  1.66 lmin=4.65e-03 kap=    357.6
+d=2 mixed      sasm  O=1 | it= 38 Nhat=4 w=1.356 lmax=  1.28 lmin=5.89e-03 kap=    216.6
+d=2 mixed      sasm  O=2 | it= 38 Nhat=4 w=1.356 lmax=  1.28 lmin=6.06e-03 kap=    211.1
+d=2 mixed      sasm  O=3 | it= 38 Nhat=4 w=1.357 lmax=  1.33 lmin=6.10e-03 kap=    218.4
+d=2 neu_s10    basic O=0 | it= 39 Nhat=1 w=1.346 lmax=  1.66 lmin=1.88e-02 kap=     88.1
+d=2 neu_s10    basic O=1 | it= 43 Nhat=4 w=1.346 lmax=  4.30 lmin=3.16e-02 kap=    135.9
+d=2 neu_s10    basic O=2 | it= 44 Nhat=4 w=1.346 lmax=  4.54 lmin=4.27e-02 kap=    106.1
+d=2 neu_s10    basic O=3 | it= 42 Nhat=4 w=1.346 lmax=  5.32 lmin=6.16e-02 kap=     86.5
+d=2 neu_s10    sasm  O=0 | it= 39 Nhat=1 w=1.346 lmax=  1.66 lmin=1.88e-02 kap=     88.1
+d=2 neu_s10    sasm  O=1 | it= 29 Nhat=4 w=1.346 lmax=  1.27 lmin=2.39e-02 kap=     53.2
+d=2 neu_s10    sasm  O=2 | it= 29 Nhat=4 w=1.346 lmax=  1.28 lmin=2.46e-02 kap=     51.8
+d=2 neu_s10    sasm  O=3 | it= 30 Nhat=4 w=1.346 lmax=  1.33 lmin=2.49e-02 kap=     53.5
+d=2 neu_s1     basic O=0 | it= 45 Nhat=1 w=1.355 lmax=  1.66 lmin=1.93e-03 kap=    859.8
+d=2 neu_s1     basic O=1 | it= 51 Nhat=4 w=1.355 lmax=  4.30 lmin=3.23e-03 kap=   1330.4
+d=2 neu_s1     basic O=2 | it= 52 Nhat=4 w=1.355 lmax=  4.54 lmin=4.39e-03 kap=   1033.7
+d=2 neu_s1     basic O=3 | it= 48 Nhat=4 w=1.355 lmax=  5.33 lmin=6.44e-03 kap=    827.9
+d=2 neu_s1     sasm  O=0 | it= 45 Nhat=1 w=1.355 lmax=  1.66 lmin=1.93e-03 kap=    859.8
+d=2 neu_s1     sasm  O=1 | it= 35 Nhat=4 w=1.355 lmax=  1.28 lmin=2.45e-03 kap=    521.1
+d=2 neu_s1     sasm  O=2 | it= 35 Nhat=4 w=1.355 lmax=  1.28 lmin=2.52e-03 kap=    508.0
+d=2 neu_s1     sasm  O=3 | it= 36 Nhat=4 w=1.355 lmax=  1.33 lmin=2.54e-03 kap=    523.9
+d=2 neu_s.1    basic O=0 | it= 48 Nhat=1 w=1.356 lmax=  1.66 lmin=1.94e-04 kap=   8576.5
+d=2 neu_s.1    basic O=1 | it= 54 Nhat=4 w=1.356 lmax=  4.30 lmin=3.24e-04 kap=  13275.6
+d=2 neu_s.1    basic O=2 | it= 56 Nhat=4 w=1.356 lmax=  4.54 lmin=4.41e-04 kap=  10309.9
+d=2 neu_s.1    basic O=3 | it= 53 Nhat=4 w=1.356 lmax=  5.33 lmin=6.47e-04 kap=   8243.7
+d=2 neu_s.1    sasm  O=0 | it= 48 Nhat=1 w=1.356 lmax=  1.66 lmin=1.94e-04 kap=   8576.5
+d=2 neu_s.1    sasm  O=1 | it= 38 Nhat=4 w=1.356 lmax=  1.28 lmin=2.46e-04 kap=   5199.6
+d=2 neu_s.1    sasm  O=2 | it= 37 Nhat=4 w=1.356 lmax=  1.28 lmin=2.53e-04 kap=   5069.2
+d=2 neu_s.1    sasm  O=3 | it= 38 Nhat=4 w=1.356 lmax=  1.33 lmin=2.55e-04 kap=   5227.0
+d=3 full       basic O=0 | it= 21 Nhat=1 w=1.063 lmax=  1.69 lmin=7.91e-02 kap=     21.3
+d=3 full       basic O=1 | it= 26 Nhat=8 w=1.088 lmax=  8.31 lmin=3.18e-01 kap=     26.1
+d=3 full       basic O=2 | it= 29 Nhat=27 w=1.098 lmax= 27.13 lmin=9.86e-01 kap=     27.5
+d=3 full       basic O=3 | it= 20 Nhat=27 w=1.103 lmax= 32.48 lmin=1.00e+00 kap=     32.5
+d=3 full       sasm  O=0 | it= 21 Nhat=1 w=1.063 lmax=  1.69 lmin=7.91e-02 kap=     21.3
+d=3 full       sasm  O=1 | it= 15 Nhat=8 w=1.088 lmax=  1.21 lmin=1.12e-01 kap=     10.8
+d=3 full       sasm  O=2 | it= 14 Nhat=27 w=1.098 lmax=  1.17 lmin=1.29e-01 kap=      9.1
+d=3 full       sasm  O=3 | it= 14 Nhat=27 w=1.103 lmax=  1.20 lmin=1.37e-01 kap=      8.8
+d=3 kfaces     basic O=0 | it= 31 Nhat=1 w=1.119 lmax=  1.69 lmin=3.93e-02 kap=     43.0
+d=3 kfaces     basic O=1 | it= 41 Nhat=8 w=1.139 lmax=  8.31 lmin=1.25e-01 kap=     66.5
+d=3 kfaces     basic O=2 | it= 46 Nhat=27 w=1.145 lmax= 27.13 lmin=3.30e-01 kap=     82.1
+d=3 kfaces     basic O=3 | it= 41 Nhat=27 w=1.147 lmax= 32.48 lmin=6.56e-01 kap=     49.5
+d=3 kfaces     sasm  O=0 | it= 31 Nhat=1 w=1.119 lmax=  1.69 lmin=3.93e-02 kap=     43.0
+d=3 kfaces     sasm  O=1 | it= 23 Nhat=8 w=1.139 lmax=  1.25 lmin=5.39e-02 kap=     23.2
+d=3 kfaces     sasm  O=2 | it= 22 Nhat=27 w=1.145 lmax=  1.22 lmin=5.97e-02 kap=     20.4
+d=3 kfaces     sasm  O=3 | it= 22 Nhat=27 w=1.147 lmax=  1.24 lmin=6.29e-02 kap=     19.7
+d=3 mixed      basic O=0 | it= 41 Nhat=1 w=1.185 lmax=  1.69 lmin=8.28e-03 kap=    204.0
+d=3 mixed      basic O=1 | it= 54 Nhat=8 w=1.188 lmax=  8.31 lmin=2.36e-02 kap=    353.0
+d=3 mixed      basic O=2 | it= 64 Nhat=27 w=1.188 lmax= 27.13 lmin=5.68e-02 kap=    477.6
+d=3 mixed      basic O=3 | it= 59 Nhat=27 w=1.188 lmax= 32.48 lmin=1.18e-01 kap=    275.9
+d=3 mixed      sasm  O=0 | it= 41 Nhat=1 w=1.185 lmax=  1.69 lmin=8.28e-03 kap=    204.0
+d=3 mixed      sasm  O=1 | it= 31 Nhat=8 w=1.188 lmax=  1.25 lmin=1.11e-02 kap=    112.7
+d=3 mixed      sasm  O=2 | it= 29 Nhat=27 w=1.188 lmax=  1.26 lmin=1.20e-02 kap=    104.9
+d=3 mixed      sasm  O=3 | it= 28 Nhat=27 w=1.188 lmax=  1.27 lmin=1.27e-02 kap=    100.4
+d=3 neu_s10    basic O=0 | it= 30 Nhat=1 w=1.173 lmax=  1.68 lmin=3.42e-02 kap=     49.1
+d=3 neu_s10    basic O=1 | it= 39 Nhat=8 w=1.176 lmax=  8.30 lmin=9.95e-02 kap=     83.5
+d=3 neu_s10    basic O=2 | it= 55 Nhat=27 w=1.176 lmax= 27.12 lmin=2.35e-01 kap=    115.5
+d=3 neu_s10    basic O=3 | it= 47 Nhat=27 w=1.177 lmax= 32.38 lmin=4.70e-01 kap=     68.9
+d=3 neu_s10    sasm  O=0 | it= 30 Nhat=1 w=1.173 lmax=  1.68 lmin=3.42e-02 kap=     49.1
+d=3 neu_s10    sasm  O=1 | it= 22 Nhat=8 w=1.176 lmax=  1.24 lmin=4.61e-02 kap=     27.0
+d=3 neu_s10    sasm  O=2 | it= 22 Nhat=27 w=1.176 lmax=  1.25 lmin=5.02e-02 kap=     25.0
+d=3 neu_s10    sasm  O=3 | it= 21 Nhat=27 w=1.177 lmax=  1.26 lmin=5.38e-02 kap=     23.5
+d=3 neu_s1     basic O=0 | it= 39 Nhat=1 w=1.184 lmax=  1.69 lmin=3.57e-03 kap=    473.3
+d=3 neu_s1     basic O=1 | it= 51 Nhat=8 w=1.186 lmax=  8.31 lmin=1.05e-02 kap=    790.9
+d=3 neu_s1     basic O=2 | it= 66 Nhat=27 w=1.187 lmax= 27.13 lmin=2.68e-02 kap=   1011.0
+d=3 neu_s1     basic O=3 | it= 58 Nhat=27 w=1.187 lmax= 32.47 lmin=5.87e-02 kap=    552.7
+d=3 neu_s1     sasm  O=0 | it= 39 Nhat=1 w=1.184 lmax=  1.69 lmin=3.57e-03 kap=    473.3
+d=3 neu_s1     sasm  O=1 | it= 29 Nhat=8 w=1.186 lmax=  1.25 lmin=4.81e-03 kap=    260.0
+d=3 neu_s1     sasm  O=2 | it= 28 Nhat=27 w=1.187 lmax=  1.26 lmin=5.24e-03 kap=    240.8
+d=3 neu_s1     sasm  O=3 | it= 27 Nhat=27 w=1.187 lmax=  1.27 lmin=5.62e-03 kap=    226.1
+d=3 neu_s.1    basic O=0 | it= 43 Nhat=1 w=1.185 lmax=  1.69 lmin=3.58e-04 kap=   4714.8
+d=3 neu_s.1    basic O=1 | it= 57 Nhat=8 w=1.187 lmax=  8.31 lmin=1.06e-03 kap=   7865.9
+d=3 neu_s.1    basic O=2 | it= 72 Nhat=27 w=1.188 lmax= 27.13 lmin=2.72e-03 kap=   9990.2
+d=3 neu_s.1    basic O=3 | it= 63 Nhat=27 w=1.188 lmax= 32.48 lmin=5.97e-03 kap=   5436.1
+d=3 neu_s.1    sasm  O=0 | it= 43 Nhat=1 w=1.185 lmax=  1.69 lmin=3.58e-04 kap=   4714.8
+d=3 neu_s.1    sasm  O=1 | it= 31 Nhat=8 w=1.187 lmax=  1.25 lmin=4.83e-04 kap=   2589.9
+d=3 neu_s.1    sasm  O=2 | it= 31 Nhat=27 w=1.188 lmax=  1.26 lmin=5.26e-04 kap=   2399.3
+d=3 neu_s.1    sasm  O=3 | it= 30 Nhat=27 w=1.188 lmax=  1.27 lmin=5.64e-04 kap=   2252.8
+  fig_attrib_channels_2d.png
+  fig_attrib_channels_3d.png
+Traceback (most recent call last):
+  File "/Users/tianhaoma/Downloads/cardioid-torso-v2.0-hpc-test-PODsolver/asm_bug_demo/dim_var/run_attrib.py", line 115, in <module>
+    fig_channels(rows, 2); fig_channels(rows, 3); fig_sigma(rows)
+  File "/Users/tianhaoma/Downloads/cardioid-torso-v2.0-hpc-test-PODsolver/asm_bug_demo/dim_var/run_attrib.py", line 96, in fig_sigma
+    pts = [r for r in rows if r['dim'] == dim and r['scheme'] == 'basic'
+  File "/Users/tianhaoma/Downloads/cardioid-torso-v2.0-hpc-test-PODsolver/asm_bug_demo/dim_var/run_attrib.py", line 96, in <listcomp>
+    pts = [r for r in rows if r['dim'] == dim and r['scheme'] == 'basic'
+KeyError: 'scheme'

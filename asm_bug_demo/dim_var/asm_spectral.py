@@ -92,14 +92,17 @@ def coef_field(name, dim, M, contrast=1.0, n_layers=4, rng_seed=0):
 # --------------------------------------------------------------------------
 #  Operator assembly:  -div(a grad u) = f , Dirichlet on x0=0, Neumann else
 # --------------------------------------------------------------------------
-def assemble(dim, M, a_nodal):
-    """Return (A csr, b) for the variable-coefficient operator on an M^dim grid.
+def assemble(dim, M, a_nodal, bc='mixed', k=1, sigma=0.0):
+    """Return (A csr, b) for  (sigma*Mlump + K) u = f  on an M^dim grid.
 
-    Conservative vertex-centred FD: face coefficient = harmonic mean of the two
-    adjacent nodal a's.  Missing neighbour (domain boundary) -> zero-flux Neumann
-    (term simply dropped).  x0 == 0 face -> Dirichlet u = 0, imposed by SYMMETRIC
-    elimination (zero the row AND column, unit diagonal) so A stays SPD -- this is
-    essential: IC(0)/Cholesky and the M^{-1}A spectrum require symmetry.
+    K = conservative vertex-centred FD with harmonic face coefficients (a==1 -> std
+    Laplacian).  sigma*Mlump = mass SHIFT (lumped mass Mlump=h^dim) -- mimics the
+    monodomain (1/dt)M term (sigma=1/dt).  Boundary:
+      bc='full'    Dirichlet on the whole boundary
+      bc='kfaces'  Dirichlet on the first k faces (order: x0-,x0+,x1-,x1+,...)
+      bc='mixed'   Dirichlet on x0=0 only  (== kfaces, k=1)
+      bc='neumann' pure Neumann (NO Dirichlet) -> SINGULAR if sigma==0 (= Sys2)
+    Dirichlet by symmetric elimination so A stays symmetric.
     """
     shp = grid_shape(dim, M)
     Npts = int(np.prod(shp))
@@ -109,31 +112,48 @@ def assemble(dim, M, a_nodal):
     a = a_nodal.reshape(shp)
 
     rows = []; cols = []; vals = []
-    # symmetric Neumann operator on ALL nodes, built face-by-face per axis
     for d in range(dim):
         lo = idx.take(np.arange(0, M - 1), axis=d).ravel(order='C')
         hi = idx.take(np.arange(1, M),     axis=d).ravel(order='C')
         a_lo = a.take(np.arange(0, M - 1), axis=d).ravel(order='C')
         a_hi = a.take(np.arange(1, M),     axis=d).ravel(order='C')
-        w = (2.0 * a_lo * a_hi / (a_lo + a_hi)) * hinv2          # harmonic face coef
-        # off-diagonals (both directions -> symmetric)
+        w = (2.0 * a_lo * a_hi / (a_lo + a_hi)) * hinv2
         rows += [lo, hi]; cols += [hi, lo]; vals += [-w, -w]
-        # diagonal contributions to both endpoints
         rows += [lo, hi]; cols += [lo, hi]; vals += [w, w]
     A = sp.csr_matrix((np.concatenate(vals),
                        (np.concatenate(rows), np.concatenate(cols))),
                       shape=(Npts, Npts))
+    # mass/time-step shift: A <- K + sigma*I  (sigma directly regularizes the
+    # constant mode; sigma ~ (1/dt)*lumped-mass. sigma large -> well-conditioned
+    # (Sys1-like); sigma->0 on pure Neumann -> singular (Sys2-like).
+    if sigma != 0.0:
+        A = (A + sp.diags(np.full(Npts, float(sigma)))).tocsr()
 
-    # Dirichlet on x0 = 0 face by symmetric elimination:  A <- P A P + diag(dmask)
-    multi0 = np.indices(shp)[0].ravel(order='C')      # x0-index of each node
-    dmask = (multi0 == 0)
-    keep = (~dmask).astype(float)
-    P = sp.diags(keep)
-    A = (P @ A @ P + sp.diags(dmask.astype(float))).tocsr()
-    A.eliminate_zeros()
+    # select Dirichlet faces
+    face_list = [(ax, side) for ax in range(dim) for side in (0, 1)]
+    if bc == 'full':
+        faces = face_list
+    elif bc == 'mixed':
+        faces = [(0, 0)]
+    elif bc == 'kfaces':
+        faces = face_list[:k]
+    elif bc == 'neumann':
+        faces = []
+    else:
+        raise ValueError('bc=%r' % bc)
+    multi = np.indices(shp)
+    dmask = np.zeros(Npts, bool)
+    for (ax, side) in faces:
+        val = 0 if side == 0 else (M - 1)
+        dmask |= (multi[ax].ravel(order='C') == val)
 
+    if dmask.any():
+        keep = (~dmask).astype(float)
+        P = sp.diags(keep)
+        A = (P @ A @ P + sp.diags(dmask.astype(float))).tocsr()
+        A.eliminate_zeros()
     b = np.ones(Npts)
-    b[dmask] = 0.0                                     # u = 0 on Dirichlet face
+    b[dmask] = 0.0
     return A, b
 
 
@@ -341,13 +361,15 @@ def _cg_compat(A, b, asm, rtol, maxit, cb):
 #  One experiment cell
 # --------------------------------------------------------------------------
 def run_cell(dim, M, S, overlap, local_mode, scaling, coef='const',
-             contrast=1.0, n_layers=4, want_spectrum=True, rtol=1e-6):
+             contrast=1.0, n_layers=4, want_spectrum=True, rtol=1e-6,
+             bc='mixed', k=1, sigma=0.0):
     a = coef_field(coef, dim, M, contrast=contrast, n_layers=n_layers)
-    A, b = assemble(dim, M, a)
+    A, b = assemble(dim, M, a, bc=bc, k=k, sigma=sigma)
     subs = box_subdomains(dim, M, S, overlap)
     asm = AdditiveSchwarz(A, subs, local_mode, scaling)
     out = dict(dim=dim, M=M, S=S, overlap=overlap, local=local_mode,
                scaling=scaling, coef=coef, contrast=contrast,
+               bc=bc, k=k, sigma=sigma,
                N=A.shape[0], n_sub=len(subs), Nhat=asm.Nhat)
     its, info = cg_iters(A, b, asm, rtol=rtol)
     out['iter'] = its
