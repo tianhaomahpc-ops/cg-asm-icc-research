@@ -16,6 +16,7 @@ Validate: (i) it lifts the collapsed lambda_min on pure-Neumann small-sigma,
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import LinearOperator
+from scipy import ndimage
 import asm_spectral as A
 
 
@@ -24,6 +25,57 @@ def low_modes(K, m):
     lowest is ~constant (eigenvalue ~0) = the nullspace mode."""
     w, V = np.linalg.eigh(K.toarray())
     return V[:, :m], w[:m]
+
+
+def coef_region_modes(a_nodal, dim, M, include_low=False):
+    """KNOWN-coefficient coarse construction (non-GenEO, problem-flow-aligned):
+    the high-contrast near-kernel is ~piecewise-constant on the connected
+    high-conductivity regions -- and those regions are KNOWN a priori (the cardiac
+    fiber / conductivity map). So build one indicator mode per connected high-coef
+    component (+ the constant), instead of computing many global eigenmodes.
+
+    Returns V0 (N x n_modes): [constant, indicator(high-region_1), ...].
+    """
+    grid = a_nodal.reshape((M,) * dim)
+    thr = np.sqrt(a_nodal.min() * a_nodal.max())      # geometric-mean threshold
+    cols = [np.ones(a_nodal.size)]                     # the constant (nullspace)
+    masks = [grid > thr] + ([grid <= thr] if include_low else [])
+    for mask in masks:
+        lab, n = ndimage.label(mask)                   # face-connectivity components
+        for j in range(1, n + 1):
+            col = (lab == j).ravel(order='C').astype(float)
+            if col.sum() > 0:
+                cols.append(col)
+    return np.column_stack(cols)
+
+
+def coef_harmonic_modes(a_nodal, dim, M, Amat):
+    """Energy-minimizing (A-harmonic / MsFEM) version of the known-coef modes:
+    each region mode = 1 on its high-conductivity core, 0 on the other cores,
+    A-HARMONIC on the rest (one shared AFF factorization). Still non-GenEO
+    (no eigenproblems) -- uses only the KNOWN coefficient regions + the operator.
+    Returns V0 = [constant, harmonic-extension(region_j), ...]."""
+    grid = a_nodal.reshape((M,) * dim)
+    thr = np.sqrt(a_nodal.min() * a_nodal.max())
+    lab, n = ndimage.label(grid > thr)
+    lab = lab.ravel(order='C')
+    cores = np.where(lab > 0)[0]                        # all high-conductivity nodes
+    if n == 0 or len(cores) == 0:
+        return np.ones((a_nodal.size, 1))
+    free = np.where(lab == 0)[0]
+    Acsr = Amat.tocsr()
+    AFF = Acsr[free][:, free].tocsc()
+    AFC = Acsr[free][:, cores]
+    from scipy.sparse.linalg import splu
+    lu = splu(AFF)
+    cols = [np.ones(a_nodal.size)]                      # constant (nullspace)
+    for j in range(1, n + 1):
+        bc = (lab[cores] == j).astype(float)           # 1 on core_j, 0 on other cores
+        phi = np.zeros(a_nodal.size)
+        phi[cores] = bc
+        phi[free] = lu.solve(-(AFC @ bc))              # A-harmonic extension
+        cols.append(phi)
+    return np.column_stack(cols)
 
 
 class TwoLevel(LinearOperator):
