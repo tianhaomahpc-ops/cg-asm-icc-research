@@ -20,6 +20,8 @@ from scipy.sparse.linalg import cg
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+plt.rcParams.update({'font.size': 12, 'axes.titlesize': 12, 'axes.labelsize': 12,
+                     'legend.fontsize': 10, 'xtick.labelsize': 10, 'ytick.labelsize': 10})
 import asm_spectral as A
 import coarse_proto as C
 

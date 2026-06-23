@@ -23,6 +23,8 @@ import scipy.sparse as sp
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+plt.rcParams.update({'font.size': 12, 'axes.titlesize': 12, 'axes.labelsize': 12,
+                     'legend.fontsize': 10, 'xtick.labelsize': 10, 'ytick.labelsize': 10})
 import asm_spectral as A
 import coarse_proto as C
 from xsys_proto import cg_count
@@ -119,7 +121,7 @@ def run(dim=2, Mtorso=41, S=4, ov=1, T=12):
     ax[1].semilogy(range(1, T + 1), sS2 / sS2[0], 's--', color='C0', label='Sys2 heart (eff-rank %d)' % rS2)
     ax[1].axhline(0.01, color='0.6', ls=':', label='1% threshold')
     ax[1].set_xlabel('singular value index'); ax[1].set_ylabel('normalized singular value')
-    ax[1].set_title('(b) solution-sequence spectrum: torso $\\approx$ heart rank $\\Rightarrow$ warm marginal')
+    ax[1].set_title('(b) solution-sequence spectrum (torso $\\approx$ heart rank)')
     ax[1].legend(fontsize=8); ax[1].grid(alpha=0.3)
     sp_c = tot['one_cold'] / tot['two_cold']; sp_w = tot['one_cold'] / tot['two_warm']
     fig.suptitle('Sys3 cross-mesh: per-mesh coarse + temporal coherence (two-cold %.2fx, two-warm %.2fx)'

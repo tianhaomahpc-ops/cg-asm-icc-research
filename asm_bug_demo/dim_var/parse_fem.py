@@ -8,6 +8,8 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+plt.rcParams.update({'font.size': 13, 'axes.titlesize': 12, 'axes.labelsize': 12,
+                     'legend.fontsize': 11, 'xtick.labelsize': 11, 'ytick.labelsize': 11})
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RES = os.path.join(HERE, 'results')
