@@ -79,14 +79,15 @@ def coef_harmonic_modes(a_nodal, dim, M, Amat):
 
 
 class TwoLevel(LinearOperator):
-    def __init__(self, Amat, onelevel, V0):
+    def __init__(self, Amat, onelevel, V0, pinv=False):
         self.A = Amat.tocsr(); self.N = Amat.shape[0]
         super().__init__(dtype=np.float64, shape=(self.N, self.N))
         self.M1 = onelevel                       # AdditiveSchwarz (M1^-1)
         Q, _ = np.linalg.qr(V0)                  # orthonormal coarse basis
         self.V0 = Q
         self.A0 = Q.T @ (self.A @ Q)             # coarse operator (m x m)
-        self.A0inv = np.linalg.inv(self.A0)
+        # pinv handles the singular pure-Neumann case (constant in V0 -> rank-deficient A0)
+        self.A0inv = np.linalg.pinv(self.A0, rcond=1e-12) if pinv else np.linalg.inv(self.A0)
         self.Nhat = onelevel.Nhat
 
     def _matvec(self, r):
