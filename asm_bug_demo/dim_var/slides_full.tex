@@ -162,6 +162,42 @@
   \concl{$\kappa$, spectrum and iterations agree; the anomaly is the geometric over-count $\hat N$ amplified by inexactness.}
 \end{frame}
 
+% ----- Part I addendum: does sASM also lower lambda_min? -----
+\begin{frame}{Does sASM also lower $\lambda_{\min}$? (both spectral ends)}{Part I $\cdot$ spectrum, both ends}
+  \begin{columns}[T]
+  \begin{column}{0.42\linewidth}\footnotesize
+   \spec{Studies:}{the Ritz slide showed the distribution; here we track BOTH ends of $M^{-1}A$ for BASIC vs sASM.}
+   \spec{Size/params:}{2D N=1089, S=4, O=0–4, ICC(0).}
+   \spec{Result ($O{=}4$):}{$\lambda_{\max}$ 5.33$\to$1.33 ($\sim$4$\times$ down); $\lambda_{\min}$ 0.0089$\to$0.0036 (ratio 0.40).}
+   \spec{Net $\kappa$:}{BASIC 599 $\to$ sASM 369 — still better.}
+   \smallskip
+   \textcolor{teal}{\textbf{Analysis.}} The $D^{-1/2}$ weighting scales down the overlap region, so sASM \emph{forgoes part of the overlap $\lambda_{\min}$ gain} (ratio $1.00\to0.40$) — \emph{yes, $\lambda_{\min}$ drops}. But $\lambda_{\max}$ falls $\sim$4$\times$ vs $\lambda_{\min}$ only $\sim$2.5$\times$, so net $\kappa$ improves.
+  \end{column}
+  \begin{column}{0.56\linewidth}\centering
+   \rfig[1.0]{fig_sasm_both_ends.png}\\
+   {\scriptsize\color{muted}\textit{sASM cuts $\lambda_{\max}$ (over-count) hard; it also lowers $\lambda_{\min}$, but less.}}
+  \end{column}
+  \end{columns}
+  \concl{sASM lowers \emph{both} ends; the large $\lambda_{\max}$ reduction dominates the smaller $\lambda_{\min}$ loss $\Rightarrow$ net $\kappa$ down. The remaining small $\lambda_{\min}$ is the coarse-space target (Part III).}
+\end{frame}
+
+% ----- Part I addendum: information propagation from the Dirichlet boundary -----
+\begin{frame}{How Dirichlet data propagates: with vs without a source}{Part I $\cdot$ information propagation}
+  \begin{columns}[T]
+  \begin{column}{0.64\linewidth}\centering
+   \includegraphics[width=\linewidth,height=0.62\textheight,keepaspectratio]{results/fig_info_prop_maps.png}
+  \end{column}
+  \begin{column}{0.34\linewidth}\footnotesize
+   \spec{Setup:}{stationary (damped) Schwarz, $b{=}0$, $x_0{=}$constant (the global mode); plot $|$error$|$ per sweep.}
+   \spec{Read it as:}{the Dirichlet boundary is the \emph{source} — error drains \emph{from} it inward, $\sim$one subdomain/sweep.}
+   \spec{full Dirichlet:}{drains from all 4 sides $\Rightarrow$ fast, large $\lambda_{\min}$.}
+   \spec{1 Dirichlet face:}{drains from one side only; far side lags $\Rightarrow$ small $\lambda_{\min}$.}
+   \spec{pure Neumann:}{flat at every iter — \emph{no source}, the constant can't drain ($\lambda_{\min}{\to}0$, singular = Sys2).}
+  \end{column}
+  \end{columns}
+  \concl{``Information propagation'' = the boundary value draining inward each sweep. \textbf{More Dirichlet boundary = more sources = faster fill = larger $\lambda_{\min}$.} Pure-Neumann has no source $\Rightarrow$ the global mode is undamped $\Rightarrow$ Sys2 is hardest — exactly what a coarse space must supply.}
+\end{frame}
+
 % ===================================================== PART II
 {\setbeamercolor{background canvas}{bg=navy}\begin{frame}[plain]\centering\vfill
  {\color{amber}\Large\textbf{Part II}}\\[0.3em]{\color{white}\LARGE\bfseries Attribution}\\[0.4em]
