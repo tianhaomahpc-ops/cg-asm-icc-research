@@ -252,6 +252,15 @@ $$
 $\omega(\delta)$ 随 overlap 单调变差的定量下界,我们未在文献中查到闭式证明**——
 这是一个**潜在可发表的小理论点**。
 
+> **推进(见 [`REPORT_theory_overlap_zh.md`](./REPORT_theory_overlap_zh.md))**:已把这条缺口
+> 大部分闭合。给出 **(i)** 闭式律 $\omega(\delta)=\Theta\big((H+2\delta)^2/h^2\big)$
+> (= 经典未修正 IC(0) 的 $\Theta(L^2)$ 阶,实测常数 ≈0.04,1D 退化为 $\equiv1$);
+> **(ii)** 闭式反常判据 $\kappa$ 比 $=\rho_{\max}/\rho_{\min}$,onset 阈值 $\rho_{\max}\approx2^{d-1}$
+> (解释 1D 不发病、2D 弱、3D 强且单调);**(iii)** 充要性对照——**统一(尺寸无关)不精确度
+> 再大也不反常,反常必须 $\omega(\delta)\uparrow$**,把命题 ⑤ 的假设精确化。配套自包含 numpy
+> 复现 `asm_bug_demo/theory_overlap.py`(无需 PETSc/MFEM)逐位重测了 Fig 8 的关键量。
+> **仍开放**:把 ICC 下 $\rho_{\min}^{\rm IC}(\delta)$ 写成闭式下界(需重叠带上 ICC 谱误差的局部化估计)。
+
 ### 7.5 我们实验在其中的位置
 
 我们没有给出新定理,而是把上述**已证因子**落到 **椭圆 + ICC + CG + cardioid**
