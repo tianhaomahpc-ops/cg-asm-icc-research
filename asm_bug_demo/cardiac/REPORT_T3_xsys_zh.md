@@ -1,5 +1,21 @@
 # Task 3:用前面的系统给后面的系统做预条件(Sys 1 → Sys 2)
 
+> **【升级:跨系统预条件搬到真几何 conforming FEM 算子上】**
+> 原 Task 3 在 **20×7×3 mm 规则盒子**上用**结构化 FD 刚度阵**,且驱动是**合成 sigmoid
+> 前沿**(`xsys_precond.c`,保留为基线)。现已升级:
+> - **算子**:Sys2 的 $K_{\sigma_i+\sigma_e}$、$K_{\sigma_i}$ 改为**心脏 submesh 上的 P1-FEM
+>   `DiffusionIntegrator`**(各向异性,σ 值 S/m 数值不变,因 1 S/m = 1 mS/mm),在
+>   `heart_torso.py` 的 conforming 网格上装配(`forward_ecg.cpp`)。奇异性处理沿用
+>   asm_demo 的均值去除 + `MatSetNullSpace`。
+> - **驱动**:不再是合成前沿,而是**真实 Sys1 单域解 $V_m(t)$**(在同一心脏网格上跑出来的
+>   序列),$b(t)=-K_{\sigma_i}V_m(t)$ 去均值。
+> - **已实现策略**(`forward_ecg.cpp -xsys`,跑在 FEM 算子上):baseline(ICC)/
+>   warm-start(上一解作初值)/ POD 历史投影。输出 `fwd_xsys.txt`。
+> - **待补**:Nicolaides **shared-coarse / 两层**(原 strategies 4–5)在非结构 FEM 上需要
+>   一个**心脏 submesh 分区粗空间**(不再是结构化 4×2×1 盒子);这是文档化的下一步。
+> - **状态**:管道与三策略代码已交付;下方五策略迭代数表需在 Mac 上重跑 FEM 算子后回填。
+>   `xsys_precond.c` 的结构化-FD + 合成前沿数字保留为对照基线。
+
 ## 0. 问题定义(先写清楚,具体是哪个例子)
 
 在心脏管道里,**单域 Sys 1**(monodomain $V_m$)在**每个时间步**驱动一个椭圆"恢复细胞外电位"求解:

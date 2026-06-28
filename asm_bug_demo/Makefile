@@ -33,7 +33,36 @@ PURE_LOAD_SRC := pure_petsc_load.c
 PURE_INC    := -I$(PETSC_DIR_DERIVED)/include
 PURE_LIB    := -Wl,-rpath,$(PETSC_DIR_DERIVED)/lib -L$(PETSC_DIR_DERIVED)/lib -lpetsc
 
-all: $(TARGET) $(REC_TGT) $(PURE_TARGET) $(PURE_FEM_TGT) $(PURE_LOAD_TGT)
+# ---- cardiac: conforming unstructured-tet FEM forward-ECG -----------------
+# forward_ecg uses MFEM (tet P1 FEM + ParSubMesh) + PETSc, same toolchain as
+# asm_demo.  monodomain/xsys are the legacy structured-FD baselines (PETSc only).
+CARD        := cardiac
+FWD_TGT     := $(CARD)/forward_ecg
+FWD_SRC     := $(CARD)/forward_ecg.cpp
+MONO_TGT    := $(CARD)/monodomain
+MONO_SRC    := $(CARD)/monodomain.c
+XSYS_TGT    := $(CARD)/xsys_precond
+XSYS_SRC    := $(CARD)/xsys_precond.c
+
+all: $(TARGET) $(REC_TGT) $(PURE_TARGET) $(PURE_FEM_TGT) $(PURE_LOAD_TGT) $(FWD_TGT)
+
+# Generate the conforming heart-in-torso mesh (MSH 2.2 for MFEM).
+# Prefers the gmsh python module; falls back to the gmsh binary as a script.
+mesh: $(CARD)/heart_torso.msh
+$(CARD)/heart_torso.msh: $(CARD)/heart_torso.py
+	cd $(CARD) && (python3 heart_torso.py || gmsh - heart_torso.py)
+
+# Coupled forward-ECG driver (MFEM + PETSc).  Headers live in cardiac/.
+$(FWD_TGT): $(FWD_SRC) $(CARD)/tt06.h $(CARD)/mfem_petsc_util.hpp $(CARD)/sigma_tensor.hpp
+	$(CXX) $(CXXFLAGS) -I$(CARD) $(FWD_SRC) -o $@ $(LDFLAGS)
+
+# Legacy structured-FD baselines (kept as reference; PETSc only).
+$(MONO_TGT): $(MONO_SRC) $(CARD)/tt06.h
+	$(MPICC) -O3 -std=c11 $(PURE_INC) $(MONO_SRC) -o $@ $(PURE_LIB) -lm
+$(XSYS_TGT): $(XSYS_SRC)
+	$(MPICC) -O3 -std=c11 $(PURE_INC) $(XSYS_SRC) -o $@ $(PURE_LIB) -lm
+
+cardiac: $(FWD_TGT) $(MONO_TGT) $(XSYS_TGT)
 
 $(TARGET): $(SRC)
 	$(CXX) $(CXXFLAGS) $(SRC) -o $@ $(LDFLAGS)
@@ -52,5 +81,6 @@ $(PURE_LOAD_TGT): $(PURE_LOAD_SRC)
 
 clean:
 	$(RM) $(TARGET) $(REC_TGT) $(PURE_TARGET) $(PURE_FEM_TGT) $(PURE_LOAD_TGT) *.o
+	$(RM) $(FWD_TGT) $(MONO_TGT) $(XSYS_TGT) $(CARD)/*.o
 
-.PHONY: all clean
+.PHONY: all clean mesh cardiac

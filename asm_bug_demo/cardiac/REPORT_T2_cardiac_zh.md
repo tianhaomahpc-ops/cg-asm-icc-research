@@ -1,5 +1,27 @@
 # Task 2:Niederer benchmark 心脏电生理 + ECG(PETSc,本机)
 
+> **【升级:非结构四面体 P1-FEM + conforming 躯干 + 完整耦合前向 ECG】**
+> 原 Task 2 在 **20×7×3 mm 规则盒子**上用**结构化 7 点 FD lumped-mass** 模板,
+> ECG 用 lead-field pseudo-ECG(`monodomain.c`,保留为基线)。现已升级为:
+> - **网格**:`heart_torso.py`(Gmsh OpenCASCADE)生成**真非结构 Delaunay 四面体**:
+>   20×7×3 mm 心脏 slab **居中嵌入 50³ mm 躯干方盒**,`BooleanFragments` 保证
+>   心脏-躯干交界面 **conforming**(共享同一组节点/面)。physical volume→MFEM
+>   domain attr(1=heart,2=torso),physical surface→bdr attr(1=body,2=interface);
+>   导出 **MSH 2.2 ASCII**(MFEM 4.9 唯一可读格式)。
+> - **离散**:**MFEM 4.9 P1 四面体 FEM**(`DiffusionIntegrator`/`MassIntegrator`,
+>   各向异性 σ 用 `MatrixCoefficient`,纤维沿 x → diag(σ_L,σ_T,σ_T));时间仍 IMEX
+>   Crank–Nicolson,Sys1 = (1/dt)M + (1/2)Kdiff;TP06 反应(`tt06.h` 原样复用)。
+> - **前向 ECG**:不再用 lead-field 伪 ECG,而是**真实体表前向**:Sys2 在心脏上恢复
+>   $u_e$(奇异 pure-Neumann),经 conforming 交界面耦合到 Sys3 躯干 Laplace,读体表
+>   电位差为 ECG。两种耦合:默认 decoupled(保住奇异 Sys2),`-monolithic` 为全域
+>   变分一致解。
+> - **代码**:`forward_ecg.cpp`(+ `mfem_petsc_util.hpp`、`sigma_tensor.hpp`);
+>   `make mesh && make forward_ecg`,在用户 Mac 的 MFEM/PETSc/Gmsh 工具链上构建运行。
+>   程序首先做 **conforming 自检**(心脏∩躯干共享顶点数>0 才继续)。
+> - **状态**:管道代码已交付;下方 Niederer 定量表(P8 激活、纵向 CV、ECG 形态)
+>   需在 Mac 上重跑新网格后回填(`fwd_ecg.txt` + 激活输出)。`monodomain.c` 的结构化-FD
+>   数字保留为对照基线。
+
 ## 0. 问题定义(先写清楚,具体是哪个例子)
 
 **心脏(Niederer 2011 benchmark)**:**$20\times7\times3$ mm 长方体板**,纤维沿长轴 $x$。

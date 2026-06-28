@@ -5,6 +5,18 @@ asm_bug_demo/pure_petsc_demo
 asm_bug_demo/pure_petsc_fem
 asm_bug_demo/pure_petsc_load
 
+# cardiac (conforming-FEM forward-ECG) binaries + run artefacts
+asm_bug_demo/cardiac/forward_ecg
+asm_bug_demo/cardiac/monodomain
+asm_bug_demo/cardiac/xsys_precond
+asm_bug_demo/cardiac/*.msh
+asm_bug_demo/cardiac/*.petscbin
+asm_bug_demo/cardiac/*.petscbin.info
+asm_bug_demo/cardiac/fwd_ecg.txt
+asm_bug_demo/cardiac/fwd_xsys.txt
+asm_bug_demo/cardiac/mono_*.txt
+asm_bug_demo/cardiac/xsys_*.txt
+
 # Run artefacts (matrix / RHS / partition dumps, sweep CSVs, logs)
 asm_bug_demo/*.petscbin
 asm_bug_demo/*.petscbin.info
@@ -38,3 +50,7 @@ slides/tex/*.jpg
 # infoprop data dumps (regenerable via ./infoprop)
 asm_bug_demo/infoprop_out/*.txt
 asm_bug_demo/infoprop
+
+# python bytecode
+__pycache__/
+*.pyc
