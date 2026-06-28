@@ -18,9 +18,13 @@
 > - **代码**:`forward_ecg.cpp`(+ `mfem_petsc_util.hpp`、`sigma_tensor.hpp`);
 >   `make mesh && make forward_ecg`,在用户 Mac 的 MFEM/PETSc/Gmsh 工具链上构建运行。
 >   程序首先做 **conforming 自检**(心脏∩躯干共享顶点数>0 才继续)。
-> - **状态**:管道代码已交付;下方 Niederer 定量表(P8 激活、纵向 CV、ECG 形态)
->   需在 Mac 上重跑新网格后回填(`fwd_ecg.txt` + 激活输出)。`monodomain.c` 的结构化-FD
->   数字保留为对照基线。
+> - **状态(已在容器内验证)**:`forward_ecg.cpp` 用 **MFEM 4.9(源码构建)+ PETSc 3.19 + OpenMPI
+>   + Gmsh 4.15** 实测 **编译通过 + 端到端跑通**:`heart_torso.py` 生成 17k 四面体网格,
+>   **conforming 自检 = 580 个共享交界面顶点**;心脏 710 dof / 躯干 3018 dof;8 个 Niederer
+>   基准点全部激活、波各向异性传播(P1→P8 ≈ 51 ms),体表 ECG 随去极化偏转;decoupled 与
+>   `-monolithic` 两条耦合路径、`-xsys` 研究均跑通、干净退出。粗网格(h=1 mm)CV≈0.42 m/s,
+>   程序打印诚实对比(细化 + 调 σ → 趋近 0.6–0.7 / P8→43 ms,同原 `monodomain.c` 的收敛趋势)。
+>   下方 Niederer 定量表用**用户 Mac 上的细网格**重跑回填即可。`monodomain.c` 结构化-FD 保留为基线。
 
 ## 0. 问题定义(先写清楚,具体是哪个例子)
 

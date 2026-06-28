@@ -13,7 +13,9 @@
 >   warm-start(上一解作初值)/ POD 历史投影。输出 `fwd_xsys.txt`。
 > - **待补**:Nicolaides **shared-coarse / 两层**(原 strategies 4–5)在非结构 FEM 上需要
 >   一个**心脏 submesh 分区粗空间**(不再是结构化 4×2×1 盒子);这是文档化的下一步。
-> - **状态**:管道与三策略代码已交付;下方五策略迭代数表需在 Mac 上重跑 FEM 算子后回填。
+> - **状态(已在容器内验证)**:`forward_ecg.cpp -xsys` 用 MFEM 4.9 + PETSc 3.19 实测跑通 FEM Sys2:
+>   单细胞 → 真实 Vm(t) 序列驱动 → baseline/warm/POD 三策略迭代数正常输出(`fwd_xsys.txt`)。
+>   短跑(NT=5)warm-start 最优(增益随序列变长放大)。下方五策略表用 Mac 上的细网格/长序列重跑回填。
 >   `xsys_precond.c` 的结构化-FD + 合成前沿数字保留为对照基线。
 
 ## 0. 问题定义(先写清楚,具体是哪个例子)

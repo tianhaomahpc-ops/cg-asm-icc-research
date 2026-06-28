@@ -91,6 +91,11 @@ int main(int argc, char *argv[])
         PetscOptionsSetValue(NULL, k.c_str(), "icc");
     }
 
+    // Scope block: every MFEM/PETSc object (ParMesh, ParSubMesh, PetscParMatrix,
+    // solvers, HypreParMatrix) must be destroyed BEFORE MFEMFinalizePetsc() and
+    // MPI_Finalize, or their ~Destroy lands on a freed communicator.  (Same
+    // pattern as asm_demo.cpp.)
+    {
     // ---- physical parameters (mm, ms, mS/mm) ------------------------------
     const double chi = 140.0, Cm = 0.01, chiCm = chi*Cm;     // 1.4
     const double sLm = 0.1334, sTm = 0.0176;                 // monodomain mS/mm
@@ -474,9 +479,10 @@ int main(int argc, char *argv[])
         }
     }
 
-    // ---- cleanup (before MFEMFinalizePetsc) -------------------------------
+    // ---- cleanup (still inside the scope, before MFEMFinalizePetsc) --------
     delete M; delete Kd; delete A1h; delete Bh; delete Ki; delete Kie;
     if (rank==0) cout << "FWD_ECG_DONE\n";
+    }   // <- all stack MFEM/PETSc objects destruct here, while MPI/PETSc alive
     MFEMFinalizePetsc();
     return 0;
 }
