@@ -35,6 +35,7 @@
 #include "tt06.h"
 #include "mfem_petsc_util.hpp"
 #include "sigma_tensor.hpp"
+#include "precond_asm.hpp"
 
 #include <iostream>
 #include <iomanip>
@@ -68,7 +69,7 @@ int main(int argc, char *argv[])
     const char *mesh_file = "heart_torso.msh";
     double dt = 0.02, Tend = 80.0;
     int    ref_levels = 0;
-    bool   monolithic = false, do_xsys = false;
+    bool   monolithic = false, do_xsys = false, do_precond = false;
     OptionsParser opts(argc, argv);
     opts.AddOption(&mesh_file, "-m", "--mesh", "Gmsh MSH 2.2 conforming mesh.");
     opts.AddOption(&dt, "-dt", "--dt", "Time step (ms).");
@@ -78,6 +79,8 @@ int main(int argc, char *argv[])
                    "-decoupled", "--decoupled", "Whole-domain vs decoupled coupling.");
     opts.AddOption(&do_xsys, "-xsys", "--xsys", "-noxsys", "--no-xsys",
                    "Run the cross-system preconditioning study on FEM Sys2.");
+    opts.AddOption(&do_precond, "-precond", "--precond", "-noprecond", "--no-precond",
+                   "ASM vs sASM iteration-count study on the 3 systems (skips EP).");
     opts.Parse();
     if (!opts.Good()) { if (rank==0) opts.PrintUsage(cout); return 1; }
     if (rank==0) opts.PrintOptions(cout);
@@ -133,23 +136,34 @@ int main(int argc, char *argv[])
              << "  parent dofs=" << fes_p.GlobalTrueVSize() << "\n";
 
     // ---- conforming-interface sanity check (do this FIRST) ----------------
-    // The shared interface vertices reported by each submesh's parent-vertex
-    // map must coincide.  If they differ, the Gmsh mesh is non-conforming.
+    // Partition-independent metric: count interface boundary faces (bdr attr
+    // IFACE_BDR).  Boundary elements are uniquely owned, so the global sum is
+    // correct on any rank count.  The heart/torso submeshes share exactly this
+    // tagged interface (single Gmsh mesh + BooleanFragments => conforming).
     {
-        const Array<int> &hv = heart.GetParentVertexIDMap();
-        const Array<int> &tv = torso.GetParentVertexIDMap();
-        std::vector<int> hset(hv.begin(), hv.end()), tset(tv.begin(), tv.end());
-        std::sort(hset.begin(),hset.end()); std::sort(tset.begin(),tset.end());
-        std::vector<int> shared;
-        std::set_intersection(hset.begin(),hset.end(),tset.begin(),tset.end(),
-                              std::back_inserter(shared));
-        long loc = (long)shared.size(), glob = 0;
-        MPI_Reduce(&loc,&glob,1,MPI_LONG,MPI_SUM,0,MPI_COMM_WORLD);
+        long nfloc = 0;
+        for (int be=0; be<pmesh.GetNBE(); ++be)
+            if (pmesh.GetBdrAttribute(be)==IFACE_BDR) ++nfloc;
+        long nf = 0; MPI_Reduce(&nfloc,&nf,1,MPI_LONG,MPI_SUM,0,MPI_COMM_WORLD);
+        long nfg = 0; MPI_Allreduce(&nfloc,&nfg,1,MPI_LONG,MPI_SUM,MPI_COMM_WORLD);
         if (rank==0)
-            cout << "[CONFORM] shared parent vertices heart^torso = " << glob
-                 << " (must equal the interface node count; >0 => conforming)\n";
-        MFEM_VERIFY(glob > 0, "heart and torso share no interface vertices -- "
-                              "mesh is NOT conforming; fix heart_torso.py");
+            cout << "[CONFORM] interface boundary faces (bdr attr "<<IFACE_BDR<<") = "
+                 << nf << " (>0 => conforming heart-torso interface present)\n";
+        MFEM_VERIFY(nfg > 0, "no interface boundary faces -- mesh missing the "
+                             "heart-torso interface; fix heart_torso.py / tags");
+        // exact serial cross-check: shared parent vertices must coincide.
+        if (Mpi::WorldSize()==1) {
+            const Array<int> &hv = heart.GetParentVertexIDMap();
+            const Array<int> &tv = torso.GetParentVertexIDMap();
+            std::vector<int> hs(hv.begin(),hv.end()), ts(tv.begin(),tv.end());
+            std::sort(hs.begin(),hs.end()); std::sort(ts.begin(),ts.end());
+            std::vector<int> sh;
+            std::set_intersection(hs.begin(),hs.end(),ts.begin(),ts.end(),
+                                  std::back_inserter(sh));
+            cout << "[CONFORM] (serial) shared parent vertices heart^torso = "
+                 << sh.size() << "\n";
+            MFEM_VERIFY(sh.size() > 0, "heart/torso share no vertices -- NOT conforming");
+        }
     }
 
     // ====================================================================
@@ -279,16 +293,63 @@ int main(int argc, char *argv[])
     const double eL_d2 = torso_probe(-25, 0, 0, eL);   // left body surface
     const double eR_d2 = torso_probe( 25, 0, 0, eR);   // right body surface
 
+    // ====================================================================
+    //  -precond : ASM vs sASM iteration counts on the three FEM systems.
+    //  Subdomains = MPI ranks, so run with mpirun -n>=2 to see the overlap
+    //  effect (on 1 rank there is a single subdomain and sASM==ASM).
+    // ====================================================================
+    if (do_precond)
+    {
+        // Sys3 stiffness on the torso (interface Dirichlet, non-singular)
+        HypreParMatrix Kt3; ktf.FormSystemMatrix(ess_tdofs_t, Kt3);
+        PetscParMatrix Kt3p; HypreToPetscAIJ(Kt3, Kt3p, "Sys3_Kt", rank, 1, true);
+
+        struct Sysp { const char *name; Mat A; bool singular; };
+        Sysp S3[3] = {
+            {"Sys1 monodomain (heart, SPD, mass-dom)", (Mat)A1p,  false},
+            {"Sys2 u_e recover (heart, singular)",     (Mat)Kiep, true },
+            {"Sys3 torso Laplace (torso, SPD)",        (Mat)Kt3p, false},
+        };
+        const PetscInt NSUB = 8;   // ASM subdomains (contiguous blocks of the matrix)
+        if (rank==0){
+            cout << "\n[PRECOND] CG iterations to rtol=1e-8, sub_pc=ICC(0), "
+                 << NSUB << " ASM subdomains (x" << Mpi::WorldSize() << " ranks)\n";
+            cout << "  system                                    O   ASM(BASIC)  sASM\n";
+        }
+        for (int q=0;q<3;++q){
+            Mat A = S3[q].A;
+            Vec xstar, b, x; MatCreateVecs(A, &xstar, &b); VecDuplicate(xstar, &x);
+            PetscInt rs, re; MatGetOwnershipRange(A, &rs, &re);
+            PetscInt N; MatGetSize(A, &N, NULL);
+            { PetscScalar *a; VecGetArray(xstar, &a);
+              for (PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
+              VecRestoreArray(xstar, &a); }
+            if (S3[q].singular){ PetscScalar s; VecSum(xstar,&s); VecShift(xstar,-s/N); }
+            MatMult(A, xstar, b);
+            if (S3[q].singular){ PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
+            for (PetscInt O=0;O<=2;++O){
+                int ia = CountIters(A, b, x, false, O, 0, 1e-8, NSUB);
+                int is = CountIters(A, b, x, true,  O, 0, 1e-8, NSUB);
+                if (rank==0)
+                    cout << "  " << std::left << std::setw(40) << (O==0?S3[q].name:"")
+                         << " " << O << "   " << std::right << std::setw(8) << ia
+                         << "   " << std::setw(6) << is << "\n";
+            }
+            VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
+        }
+        if (rank==0) cout << "[PRECOND] (negative = DIVERGED)\n";
+    }
+
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
 
-    FILE *fe = (rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
+    FILE *fe = (!do_precond && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
     if (fe) fprintf(fe,"# t(ms)  ECG(mV, phi_L-phi_R)  Vm@center(mV)\n");
 
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
-    const int nsteps = (int)(Tend/dt);
+    const int nsteps = do_precond ? 0 : (int)(Tend/dt);   // -precond skips the EP loop
     const int sample = std::max(1, (int)(1.0/dt));    // ~ every 1 ms
     for (int s=0;s<nsteps;++s)
     {
@@ -387,6 +448,7 @@ int main(int argc, char *argv[])
     if (fe) fclose(fe);
 
     // ---- benchmark activation times + conduction velocity -----------------
+    if (!do_precond) {
     if (rank==0) cout << "\nActivation times (V crosses 0 mV):\n";
     double tP1=-1, tP8=-1;
     for (int q=0;q<8;++q){
@@ -404,6 +466,7 @@ int main(int argc, char *argv[])
              <<" mm => CV~"<<diag/(tP8-tP1)/1000.0*1000.0<<" m/s "
              <<"(Niederer ~0.6-0.7; P8 -> ~43 ms under refinement)\n";
     }
+    }   // end if(!do_precond) benchmark block
 
     // ====================================================================
     //  -xsys : cross-system preconditioning study on the FEM Sys2

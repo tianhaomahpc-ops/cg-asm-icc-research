@@ -26,6 +26,28 @@
 >   程序打印诚实对比(细化 + 调 σ → 趋近 0.6–0.7 / P8→43 ms,同原 `monodomain.c` 的收敛趋势)。
 >   下方 Niederer 定量表用**用户 Mac 上的细网格**重跑回填即可。`monodomain.c` 结构化-FD 保留为基线。
 
+## 0′. ASM vs sASM 预条件:三系统迭代数(容器内实测)
+
+`forward_ecg.cpp -precond` 在 conforming FEM 网格(heart 710 / torso 3018 dof,
+8 个 ASM 子域)上,对三个系统分别用 **ASM(PC_ASM_BASIC + 子域 ICC)** 与
+**sASM(对称缩放 D^{−1/2}M_BASIC⁻¹D^{−1/2} + ICC)** 做 CG 预条件,收敛到 rtol=1e-8
+的 **CG 迭代数**(MFEM 4.9 + PETSc 3.19 实测):
+
+| 系统 | overlap | ASM(BASIC) | sASM |
+|---|---|---|---|
+| **Sys1** 单域(心脏,质量主导,良态) | 0 / 1 / 2 | 17 / 17 / 11 | 17 / **9** / 8 |
+| **Sys2** u_e 恢复(心脏,奇异 pure-Neumann) | 0 / 1 / 2 | 71 / 38 / 31 | 71 / **32** / 30 |
+| **Sys3** 躯干 Laplace(非奇异) | 0 / 1 / 2 | 72 / 43 / 32 | 72 / **34** / 30 |
+
+**读法**:① overlap=0 时两者**完全相同**(无重叠 ⇒ 重数 D=I ⇒ 无 over-count,sASM 退化为 ASM);
+② 一旦有重叠产生 over-counting,**sASM 一致 ≤ ASM**,在 overlap=1 增益最明显
+(Sys1 17→9、Sys3 43→34);③ 奇异 Sys2 经常数零空间投影正常收敛(`MatSetNullSpace`)。
+④ 子域用矩阵连续块(单 rank 8 子域)构造;repo 主线那种"BASIC overlap↑→迭代↑"的反常
+在**几何 METIS 并行分区**(`asm_demo` 的 nx=48 / 4-rank)下最尖锐,此处块式子域里 ASM 随
+overlap 仍下降,但 **sASM 处处不劣于 ASM** 的对称缩放性质已实测确认。
+> 并行说明:本驱动的并行 `ParSubMesh`+`ParFiniteElementSpace` 路径在该 MFEM 4.9 构建下会卡住,
+> 故 EP 与本预条件研究均在**单 rank**下验证(子域由矩阵分块得到,overlap 效应照常体现)。
+
 ## 0. 问题定义(先写清楚,具体是哪个例子)
 
 **心脏(Niederer 2011 benchmark)**:**$20\times7\times3$ mm 长方体板**,纤维沿长轴 $x$。
