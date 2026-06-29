@@ -111,14 +111,30 @@ gmsh.model.mesh.generate(3)
 gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
 gmsh.option.setNumber("Mesh.Binary", 0)
 gmsh.option.setNumber("Mesh.SaveAll", 0)       # keep only physical-group elements
-gmsh.write(OUT)
+gmsh.write(OUT)                                # full combined mesh (for -monolithic)
+
+# 7b) ALSO write two SEPARATE meshes that share the SAME interface surface
+#     mesh (because the single BooleanFragments mesh is reused): heart.msh and
+#     torso.msh.  Interface nodes have IDENTICAL coordinates in both files, so
+#     forward_ecg can couple them by coordinate match WITHOUT ParSubMesh.
+#     Each file is self-contained: domain attr 1 = its volume; bdr attr 2 =
+#     interface; bdr attr 1 = body (torso only).
+ntet = len(gmsh.model.mesh.getElementsByType(4)[0])
+gmsh.model.removePhysicalGroups()
+gmsh.model.addPhysicalGroup(3, [heart_tag],  tag=1, name="heart")
+gmsh.model.addPhysicalGroup(2, iface_faces,  tag=2, name="interface")
+gmsh.write("heart.msh")
+gmsh.model.removePhysicalGroups()
+gmsh.model.addPhysicalGroup(3, [torso_tag],  tag=1, name="torso")
+gmsh.model.addPhysicalGroup(2, body_faces,   tag=1, name="body")
+gmsh.model.addPhysicalGroup(2, iface_faces,  tag=2, name="interface")
+gmsh.write("torso.msh")
 
 # small report
-ntet = len(gmsh.model.mesh.getElementsByType(4)[0])
 print(f"[heart_torso] heart vol tag={heart_tag} torso vol tag={torso_tag}")
 print(f"[heart_torso] interface faces={len(iface_faces)} body faces={len(body_faces)}")
-print(f"[heart_torso] tets={ntet}  wrote {OUT} (MSH 2.2 ASCII)")
-print(f"[heart_torso] domain attrs: 1=heart 2=torso ; bdr attrs: 1=body 2=interface")
+print(f"[heart_torso] tets={ntet}  wrote {OUT} + heart.msh + torso.msh (MSH 2.2 ASCII)")
+print(f"[heart_torso] combined: domain attrs 1=heart 2=torso; split files: domain attr 1, bdr 1=body 2=interface")
 if "-nopopup" not in sys.argv and os.environ.get("GMSH_GUI"):
     gmsh.fltk.run()
 gmsh.finalize()

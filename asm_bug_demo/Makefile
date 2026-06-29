@@ -53,7 +53,7 @@ $(CARD)/heart_torso.msh: $(CARD)/heart_torso.py
 	cd $(CARD) && (python3 heart_torso.py || gmsh - heart_torso.py)
 
 # Coupled forward-ECG driver (MFEM + PETSc).  Headers live in cardiac/.
-$(FWD_TGT): $(FWD_SRC) $(CARD)/tt06.h $(CARD)/mfem_petsc_util.hpp $(CARD)/sigma_tensor.hpp $(CARD)/precond_asm.hpp
+$(FWD_TGT): $(FWD_SRC) $(CARD)/tt06.h $(CARD)/mfem_petsc_util.hpp $(CARD)/interface_transfer.hpp $(CARD)/precond_asm.hpp
 	$(CXX) $(CXXFLAGS) -I$(CARD) $(FWD_SRC) -o $@ $(LDFLAGS)
 
 # Legacy structured-FD baselines (kept as reference; PETSc only).

@@ -48,14 +48,18 @@ METIS 几何分区**(`mpirun -n 4`,1 子域/rank)。加密网格(heart 10,085 / 
 > 单 rank 等价于纯 ICC);(b) `fes_p.GlobalTrueVSize()`(集合通信)被错放进 `if(rank==0)`
 > → 死锁,改为所有 rank 调用。现 EP / `-precond` 在 `mpirun -n 2/4` 下均跑通。
 >
-> **并行加速与一致性**:`-T 60` 全程仿真 **串行 44 s → 4 进程 19 s(~2.3×)**;
-> **EP 传播完全一致**(P8=39.58 ms、CV=0.550 m/s 与串行逐位相同)。**注意**:默认
-> *decoupled* 路径里 heart→torso 的 `ParTransferMap`(SubMesh→SubMesh 界面 Dirichlet
-> 传递)在该 MFEM 4.9 构建下**随分区不同**(并行的体表 ECG 幅值与串行差 ~20%);
-> `-monolithic`(并网格,无界面传递)则**逐位并行一致**。⟹ **decoupled 的前向 ECG /
-> 出图请用单 rank**(界面传递精确),并行用于 EP 加速与 `-precond`。字段 dump 已改为
-> **逐 rank**(`..._r<rank>.txt`,`plot_results.py` 自动拼接),所以并行 dump 的 Vm/激活
-> 场仍是完整且一致的。
+> **并行加速与一致性(已用两套独立网格 + 显式界面传递重做)**:不再用 `ParSubMesh`。
+> `heart_torso.py` 现在**额外导出 `heart.msh` 与 `torso.msh`**(由同一 BooleanFragments
+> 网格写出,界面节点坐标逐位相同);`forward_ecg.cpp` **各自独立读入并 METIS 分区**,
+> 心脏 Sys1/Sys2、躯干 Sys3 完全解耦,**只在界面上做一次按坐标匹配的显式传递**
+> (`interface_transfer.hpp`,`MPI_Allgatherv` + 坐标查表,**与分区无关**)。
+> - 加速:`-T 60` **串行 43 s → 4 进程 15 s(~2.9×)**;EP(P8=39.58 ms、CV=0.550 m/s)逐位一致。
+> - 前向 ECG 一致性:界面匹配 **4757/4757 精确**;体表 ECG 峰值串/并 **−5.21 vs −5.11**
+>   (差 ~2%,**相关系数 0.9994**)——比旧 `ParTransferMap` 的 26% 偏差大幅改善。残余 ~2%
+>   来自**奇异 Sys2 解本身的分区相关性**(纯 Neumann + 块预条件,非收敛容差问题,收紧
+>   rtol 无效),与界面传递无关。
+> - 字段 dump 改为**逐 rank**(`..._r<rank>.txt`,`plot_results.py` 自动拼接),并行 dump
+>   的 Vm/u_e/φ 场完整。⟹ **decoupled 前向 ECG 现在可并行**(~2% 一致);追求逐位一致仍用单 rank。
 
 ## 0. 问题定义(先写清楚,具体是哪个例子)
 

@@ -4,37 +4,34 @@
 // real, variationally-consistent FEM coupling of the three cardiac systems on
 // the conforming heart-in-torso mesh produced by heart_torso.py:
 //
-//   Sys1  monodomain Vm on the HEART submesh    (TP06 reaction + IMEX C-N)
+//   Sys1  monodomain Vm on the HEART mesh       (TP06 reaction + IMEX C-N)
 //          A1 = (1/dt) M + (1/2) Kdiff,  Kdiff = DiffusionIntegrator(sigma_mono)
 //   Sys2  u_e recovery on the HEART (singular, pure Neumann)
 //          K_{si+se} u_e = -K_{si} Vm           (ker = span{1})
-//   Sys3  torso Laplace on the TORSO region, coupled across the conforming
-//          interface; body surface insulated; -> real body-surface ECG.
+//   Sys3  torso Laplace on the TORSO mesh; body surface insulated;
+//          interface = Dirichlet from u_e  -> real body-surface ECG.
 //
-// Two coupling modes:
-//   (default) decoupled : solve singular Sys2 on heart, transfer the heart-
-//             surface u_e across the conforming interface as a Dirichlet BC
-//             into the non-singular torso Sys3.  Keeps the singular Sys2 that
-//             the cross-system-preconditioning study (-xsys) targets.
-//   -monolithic : one whole-domain elliptic solve on heart u torso with
-//             piecewise conductivity (heart si+se, torso so) and source
-//             div(si grad Vm) in the heart; potential/flux continuity is
-//             natural in P1 on the conforming mesh.  Physically standard
-//             forward problem; no interface-transfer error.
+// TWO INDEPENDENT MESHES (no ParSubMesh): heart.msh and torso.msh are written
+// from the same Gmsh BooleanFragments mesh, so their interface boundary nodes
+// have IDENTICAL coordinates.  Each is read + METIS-partitioned independently;
+// the ONLY coupling is an explicit, parallel-safe coordinate-matched interface
+// transfer of u_e (InterfaceTransfer) -- partition-independent, unlike the MFEM
+// ParSubMesh<->SubMesh ParTransferMap it replaces (which was partition-dependent
+// and drove a ~20% body-surface-ECG discrepancy in parallel).
 //
 // Units: mm, ms, mV, mS/mm  (1 S/m == 1 mS/mm, so xsys's S/m values carry over
 // numerically unchanged).  chi=140/mm, Cm=0.01 uF/mm^2 => chiCm=1.4.
 //
-// Build:  make forward_ecg     Run (after `make mesh`):
-//   mpirun -n 4 ./forward_ecg -m heart_torso.msh -T 80 -dt 0.02
-//   ./forward_ecg -m heart_torso.msh -monolithic          # monolithic forward
-//   mpirun -n 4 ./forward_ecg -m heart_torso.msh -xsys     # cross-system study
+// Build:  make forward_ecg ; make mesh (-> heart_torso.msh + heart.msh + torso.msh)
+//   mpirun -n 4 ./forward_ecg -m heart_torso.msh -T 80 -dt 0.02   # EP + forward ECG
+//   mpirun -n 4 ./forward_ecg -m heart_torso.msh -xsys            # cross-system study
+//   mpirun -n 4 ./forward_ecg -m heart_torso.msh -precond         # ASM vs sASM
 //
 #include "mfem.hpp"
 #include <petsc.h>
 #include "tt06.h"
 #include "mfem_petsc_util.hpp"
-#include "sigma_tensor.hpp"
+#include "interface_transfer.hpp"
 #include "precond_asm.hpp"
 
 #include <iostream>
@@ -69,14 +66,13 @@ int main(int argc, char *argv[])
     const char *mesh_file = "heart_torso.msh";
     double dt = 0.02, Tend = 80.0;
     int    ref_levels = 0;
-    bool   monolithic = false, do_xsys = false, do_precond = false, do_dump = false;
+    bool   do_xsys = false, do_precond = false, do_dump = false;
     OptionsParser opts(argc, argv);
-    opts.AddOption(&mesh_file, "-m", "--mesh", "Gmsh MSH 2.2 conforming mesh.");
+    opts.AddOption(&mesh_file, "-m", "--mesh", "combined mesh (heart.msh/torso.msh"
+                   " are read from the same directory).");
     opts.AddOption(&dt, "-dt", "--dt", "Time step (ms).");
     opts.AddOption(&Tend, "-T", "--t-final", "End time (ms).");
     opts.AddOption(&ref_levels, "-refine", "--refine", "Uniform refinements.");
-    opts.AddOption(&monolithic, "-monolithic", "--monolithic",
-                   "-decoupled", "--decoupled", "Whole-domain vs decoupled coupling.");
     opts.AddOption(&do_xsys, "-xsys", "--xsys", "-noxsys", "--no-xsys",
                    "Run the cross-system preconditioning study on FEM Sys2.");
     opts.AddOption(&do_precond, "-precond", "--precond", "-noprecond", "--no-precond",
@@ -118,65 +114,38 @@ int main(int argc, char *argv[])
     const double Istim = -80.0, tstim = 2.0;                 // mV/ms, ms
     const double stim_box = 1.5;                             // mm cube at slab corner
 
-    // ---- mesh + conforming heart/torso submeshes --------------------------
-    Mesh serial_mesh(mesh_file, 1, 1);
-    MFEM_VERIFY(serial_mesh.Dimension()==3, "expected a 3D mesh");
-    for (int l=0;l<ref_levels;++l) serial_mesh.UniformRefinement();
-    ParMesh pmesh(MPI_COMM_WORLD, serial_mesh);
-    serial_mesh.Clear();
-    if (rank==0)
-        cout << "[MESH] domain attrs max=" << pmesh.attributes.Max()
-             << " bdr attrs max=" << pmesh.bdr_attributes.Max() << "\n";
-    MFEM_VERIFY(pmesh.attributes.Max() >= 2,
-                "mesh must carry heart(1)/torso(2) domain attributes");
-
-    Array<int> hdom(1); hdom[0] = HEART_ATTR;
-    Array<int> tdom(1); tdom[0] = TORSO_ATTR;
-    ParSubMesh heart = ParSubMesh::CreateFromDomain(pmesh, hdom);
-    ParSubMesh torso = ParSubMesh::CreateFromDomain(pmesh, tdom);
+    // ---- TWO INDEPENDENT meshes (no ParSubMesh) ---------------------------
+    // heart.msh and torso.msh are written from the same Gmsh BooleanFragments
+    // mesh, so their interface (bdr attr IFACE_BDR) nodes have identical
+    // coordinates.  Each is read + METIS-partitioned independently; the only
+    // coupling is an explicit coordinate-matched interface transfer (below).
+    std::string mf(mesh_file);
+    std::string heart_file = "heart.msh", torso_file = "torso.msh";
+    { // allow -m <combined>.msh by deriving the split filenames from its dir
+      size_t s = mf.find_last_of('/');
+      if (s != std::string::npos)
+      { heart_file = mf.substr(0,s+1)+"heart.msh"; torso_file = mf.substr(0,s+1)+"torso.msh"; }
+    }
+    Mesh hser(heart_file.c_str(),1,1), tser(torso_file.c_str(),1,1);
+    for (int l=0;l<ref_levels;++l){ hser.UniformRefinement(); tser.UniformRefinement(); }
+    ParMesh heart(MPI_COMM_WORLD, hser);  hser.Clear();
+    ParMesh torso(MPI_COMM_WORLD, tser);  tser.Clear();
 
     H1_FECollection fec(1, 3);
     ParFiniteElementSpace fes_h(&heart, &fec);   // heart  (Sys1, Sys2)
     ParFiniteElementSpace fes_t(&torso, &fec);   // torso  (Sys3)
-    ParFiniteElementSpace fes_p(&pmesh, &fec);   // parent (monolithic)
-    // GlobalTrueVSize() is COLLECTIVE (MPI_Allreduce) -> must be called on ALL
-    // ranks, never only inside if(rank==0) (that deadlocks).
-    const HYPRE_BigInt ndof_h = fes_h.GlobalTrueVSize();
+    const HYPRE_BigInt ndof_h = fes_h.GlobalTrueVSize();  // collective: ALL ranks
     const HYPRE_BigInt ndof_t = fes_t.GlobalTrueVSize();
-    const HYPRE_BigInt ndof_p = fes_p.GlobalTrueVSize();
     if (rank==0)
-        cout << "[FES] heart dofs=" << ndof_h << "  torso dofs=" << ndof_t
-             << "  parent dofs=" << ndof_p << "\n";
-    // ---- conforming-interface sanity check (do this FIRST) ----------------
-    // Partition-independent metric: count interface boundary faces (bdr attr
-    // IFACE_BDR).  Boundary elements are uniquely owned, so the global sum is
-    // correct on any rank count.  The heart/torso submeshes share exactly this
-    // tagged interface (single Gmsh mesh + BooleanFragments => conforming).
-    {
-        long nfloc = 0;
-        for (int be=0; be<pmesh.GetNBE(); ++be)
-            if (pmesh.GetBdrAttribute(be)==IFACE_BDR) ++nfloc;
-        long nf = 0; MPI_Reduce(&nfloc,&nf,1,MPI_LONG,MPI_SUM,0,MPI_COMM_WORLD);
-        long nfg = 0; MPI_Allreduce(&nfloc,&nfg,1,MPI_LONG,MPI_SUM,MPI_COMM_WORLD);
-        if (rank==0)
-            cout << "[CONFORM] interface boundary faces (bdr attr "<<IFACE_BDR<<") = "
-                 << nf << " (>0 => conforming heart-torso interface present)\n";
-        MFEM_VERIFY(nfg > 0, "no interface boundary faces -- mesh missing the "
-                             "heart-torso interface; fix heart_torso.py / tags");
-        // exact serial cross-check: shared parent vertices must coincide.
-        if (Mpi::WorldSize()==1) {
-            const Array<int> &hv = heart.GetParentVertexIDMap();
-            const Array<int> &tv = torso.GetParentVertexIDMap();
-            std::vector<int> hs(hv.begin(),hv.end()), ts(tv.begin(),tv.end());
-            std::sort(hs.begin(),hs.end()); std::sort(ts.begin(),ts.end());
-            std::vector<int> sh;
-            std::set_intersection(hs.begin(),hs.end(),ts.begin(),ts.end(),
-                                  std::back_inserter(sh));
-            cout << "[CONFORM] (serial) shared parent vertices heart^torso = "
-                 << sh.size() << "\n";
-            MFEM_VERIFY(sh.size() > 0, "heart/torso share no vertices -- NOT conforming");
-        }
-    }
+        cout << "[FES] heart dofs=" << ndof_h << "  torso dofs=" << ndof_t << "\n";
+
+    // explicit, parallel-safe heart<->torso interface coupling (coord match)
+    InterfaceTransfer iface(fes_h, IFACE_BDR, fes_t, IFACE_BDR);
+    if (rank==0)
+        cout << "[CONFORM] interface transfer matched " << iface.Matched()
+             << " / " << iface.DstTotal() << " torso interface dofs to heart\n";
+    MFEM_VERIFY(iface.Matched()==iface.DstTotal() && iface.DstTotal()>0,
+                "interface nodes do not coincide -- heart.msh/torso.msh not conforming");
 
     // ====================================================================
     //  Sys1 -- monodomain on the heart (constant-in-time operators)
@@ -260,11 +229,9 @@ int main(int argc, char *argv[])
     cg2.SetRelTol(1e-8); cg2.SetMaxIter(2000); cg2.iterative_mode = false;
     { PC pc; KSPGetPC((KSP)cg2, &pc); PCSetType(pc, PCBJACOBI); }
 
-    // grid functions + transfer maps for the coupling (built once)
+    // grid functions for the coupling (interface transfer `iface` built above)
     ParGridFunction ue_h(&fes_h);   ue_h = 0.0;   // heart u_e
-    ParGridFunction ue_t(&fes_t);   ue_t = 0.0;   // u_e sampled on torso (interface)
     ParGridFunction phi_t(&fes_t);  phi_t = 0.0;  // torso potential (Sys3 sol)
-    ParTransferMap heart_to_torso(ue_h, ue_t);    // SubMesh<->SubMesh (shared root)
 
     // Sys3 torso operator (constant): isotropic Laplace, Dirichlet on interface
     ConstantCoefficient sig_o(so);
@@ -411,66 +378,31 @@ int main(int argc, char *argv[])
             Vm_seq.push_back(Vm);                     // for -xsys
 
             // ---- forward solve -> body-surface ECG --------------------
+            // Sys2: Kie u_e = -Ki Vm on the heart (singular pure-Neumann); then
+            // transfer u_e across the conforming interface to the torso as a
+            // Dirichlet BC, and solve Sys3 torso Laplace.  The interface
+            // transfer is an explicit coordinate match (InterfaceTransfer) ->
+            // PARTITION-INDEPENDENT (bit-identical serial vs parallel).
             double ecg = 0.0;
-            if (!monolithic)
             {
-                // Sys2: Kie u_e = -Ki Vm  (singular)
                 Vector b2(nloc); Ki->Mult(Vm, b2); b2.Neg();
                 RemoveGlobalMean(b2, MPI_COMM_WORLD);
                 cg2.Mult(b2, ue_h);                   // u_e on heart
-                // transfer heart u_e -> torso (fills shared interface dofs)
-                // PARALLEL-CONSISTENCY NOTE: this SubMesh->SubMesh transfer of
-                // the interface Dirichlet data is PARTITION-DEPENDENT on >1 rank
-                // in this MFEM 4.9 build (the torso phi / body-surface ECG
-                // amplitude varies with #ranks; verified vs the bit-identical
-                // serial run).  The EP propagation (Vm, activation, CV) and the
-                // -monolithic forward solve ARE parallel-consistent.  => run the
-                // DECOUPLED forward-ECG (these figures / the ECG trace) on 1
-                // rank; use parallel for EP speedup and -precond.
-                ue_t = 0.0; heart_to_torso.Transfer(ue_h, ue_t);
+                // heart u_e (true dofs) -> torso interface Dirichlet values
+                Vector ue_h_tv;  ue_h.GetTrueDofs(ue_h_tv);
+                Vector phi_tv(fes_t.GetTrueVSize()); phi_tv = 0.0;
+                iface.Transfer(ue_h_tv, phi_tv);       // sets torso interface entries
+                phi_t.SetFromTrueDofs(phi_tv);         // lift carries interface BC
                 // Sys3: torso Laplace with phi = u_e on interface, Neumann body
-                phi_t = ue_t;                          // lift carries interface BC
                 HypreParMatrix Kt; Vector Xt, Bt;
                 ParLinearForm zero_lf(&fes_t); zero_lf=0.0; zero_lf.Assemble();
                 ktf.FormLinearSystem(ess_tdofs_t, phi_t, zero_lf, Kt, Xt, Bt);
                 PetscParMatrix Ktp; HypreToPetscAIJ(Kt, Ktp, "Sys3_Kt", rank, 1, true);
                 PetscPCGSolver cg3(Ktp, "sys3_");
-                cg3.SetRelTol(1e-8); cg3.SetMaxIter(1000); cg3.iterative_mode=false;
+                cg3.SetRelTol(1e-8); cg3.SetMaxIter(3000); cg3.iterative_mode=false;
                 { PC pc; KSPGetPC((KSP)cg3,&pc); PCSetType(pc,PCBJACOBI); }
                 cg3.Mult(Bt, Xt);
                 ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
-            }
-            else
-            {
-                // monolithic whole-domain extracellular solve on the parent
-                ParGridFunction Vm_par(&fes_p); Vm_par = 0.0;
-                ParTransferMap h2p(Vm_gf, Vm_par); h2p.Transfer(Vm_gf, Vm_par);
-                SigmaTensor sig_all(HEART_ATTR, TORSO_ATTR, siL+seL, siT+seT, so);
-                ParBilinearForm kall(&fes_p);
-                kall.AddDomainIntegrator(new DiffusionIntegrator(sig_all));
-                kall.Assemble();
-                // source: + integral_heart (si grad Vm) . grad v
-                MatrixConstantCoefficient si_c(Dsi);
-                GradientGridFunctionCoefficient gV(&Vm_par);
-                MatrixVectorProductCoefficient q(si_c, gV);
-                Array<int> hmark(pmesh.attributes.Max()); hmark=0; hmark[HEART_ATTR-1]=1;
-                ParLinearForm src(&fes_p);
-                src.AddDomainIntegrator(new DomainLFGradIntegrator(q), hmark);
-                src.Assemble();
-                // pin ONE global ground dof (remove constant nullspace); only
-                // rank 0 contributes a local dof so exactly one point is pinned.
-                Array<int> ess_g; if (rank==0) ess_g.Append(0);
-                ParGridFunction phi_p(&fes_p); phi_p=0.0;
-                HypreParMatrix Ka; Vector Xa, Ba;
-                kall.FormLinearSystem(ess_g, phi_p, src, Ka, Xa, Ba);
-                PetscParMatrix Kap; HypreToPetscAIJ(Ka, Kap, "Mono_K", rank, 1, true);
-                PetscPCGSolver cg0(Kap, "mono_");
-                cg0.SetRelTol(1e-8); cg0.SetMaxIter(2000); cg0.iterative_mode=false;
-                { PC pc; KSPGetPC((KSP)cg0,&pc); PCSetType(pc,PCBJACOBI); }
-                cg0.Mult(Ba, Xa);
-                kall.RecoverFEMSolution(Xa, src, phi_p);
-                // transfer parent phi -> torso for the electrode read
-                ParTransferMap p2t(phi_p, phi_t); p2t.Transfer(phi_p, phi_t);
             }
             // ECG = phi(left) - phi(right) at the globally-nearest body dof
             Vector phit_td; phi_t.GetTrueDofs(phit_td);
@@ -479,7 +411,7 @@ int main(int argc, char *argv[])
                 int ms = (int)(t+dt+0.5);
                 if (ms>0 && ms%12==0){
                     dump_vec("heart_vm", ms, Vm);
-                    if(!monolithic){ Vector ueh; ue_h.GetTrueDofs(ueh); dump_vec("heart_ue", ms, ueh); }
+                    { Vector ueh; ue_h.GetTrueDofs(ueh); dump_vec("heart_ue", ms, ueh); }
                     dump_vec("torso_phi", ms, phit_td);
                     if (rank==0) cout << "[DUMP] snapshot t="<<ms<<" ms\n";
                 }
