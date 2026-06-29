@@ -27,8 +27,10 @@ import os
 import sys
 import gmsh
 
-H_HEART = float(os.environ.get("H_HEART", "0.5"))   # target edge length in heart
-H_TORSO = float(os.environ.get("H_TORSO", "3.0"))   # target edge length in torso
+# H_HEART=0.35 keeps the realized heart element scale within 0.5 mm
+# (mean/median edge ~0.45 mm, characteristic h~vol^(1/3) <0.5 mm).
+H_HEART = float(os.environ.get("H_HEART", "0.35"))  # target edge length in heart (mm)
+H_TORSO = float(os.environ.get("H_TORSO", "4.0"))   # target edge length in torso (mm)
 OUT     = os.environ.get("OUT", "heart_torso.msh")
 
 # torso box (centered): [-25,25]^3 ;  heart slab (centered): x[-10,10] y[-3.5,3.5] z[-1.5,1.5]
