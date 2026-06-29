@@ -51,3 +51,17 @@ for cfg in "2 30" "4 38" "8 48" "16 60"; do
   g=$(mpirun --oversubscribe --allow-run-as-root -n $np ./asm_demo -nx $nx -scheme 0 -ksp_type cg -pc_type gamg 2>&1 | geti)
   printf "%s %s %s %s %s\n" "$np" "$nx" "$dof" "${s:-X}" "${g:-X}"
 done
+
+echo "== E. sASM optimization space: local-solve accuracy & boundary transfer (Sys2) =="
+B2="-nx 48 -pure_neumann -ksp_type cg -ksp_norm_type preconditioned -ksp_rtol 1e-6 -ksp_atol 1e-12 -ksp_max_it 1500 -pc_type asm -pc_asm_type basic -sub_ksp_type preonly -sub_pc_type icc"
+echo "method                     O=0 O=1 O=2 O=3   (Sys2 pure-Neumann, 4 METIS)"
+row(){ printf "%-26s" "$1"; shift; for ov in 0 1 2 3; do
+  mpirun --allow-run-as-root -n 4 ./asm_demo $B2 -pc_asm_overlap $ov "$@" 2>&1 | { printf "%4s" "$(geti)"; }; done; echo; }
+row "BASIC ASM"               -scheme 0 -sub_pc_factor_levels 0
+row "sASM ICC0 (overlap caps)" -scheme 3 -sub_pc_factor_levels 0
+row "sASM ICC2"               -scheme 3 -sub_pc_factor_levels 2
+row "sASM+Cheby4 (accurate)"  -scheme 4 -sub_pc_factor_levels 0 -localcheby 4
+row "SMRAS (sym. RAS)"        -scheme 8 -sub_pc_factor_levels 0
+row "eps-PU graded (dead end)" -scheme 7 -sub_pc_factor_levels 0
+printf "%-26s" "GAMG two-level (ceiling)"; for ov in 0 1 2 3; do
+  mpirun --allow-run-as-root -n 4 ./asm_demo -nx 48 -pure_neumann -scheme 0 -ksp_type cg -pc_type gamg 2>&1 | { printf "%4s" "$(geti)"; }; done; echo
