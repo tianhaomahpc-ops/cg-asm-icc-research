@@ -403,6 +403,9 @@ int main(int argc, char *argv[])
                 { PC pc; KSPGetPC((KSP)cg3,&pc); PCSetType(pc,PCBJACOBI); }
                 cg3.Mult(Bt, Xt);
                 ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
+                if (rank==0) cout << "[ITERS] t="<<(int)(t+dt+0.5)<<"ms  Sys1(CG+bj-ICC)="
+                    <<cg1.GetNumIterations()<<"  Sys2(singular)="<<cg2.GetNumIterations()
+                    <<"  Sys3(torso)="<<cg3.GetNumIterations()<<"\n";
             }
             // ECG = phi(left) - phi(right) at the globally-nearest body dof
             Vector phit_td; phi_t.GetTrueDofs(phit_td);
