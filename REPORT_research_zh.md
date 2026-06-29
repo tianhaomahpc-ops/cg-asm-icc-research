@@ -10,7 +10,7 @@
 
 1. **sASM 不是最优,也不是唯一好办法。** 反常的本质是**两个独立机制的乘积:overlap 的"重复计数"(over-counting)× 子域解的"不精确"(inexactness)**。sASM 只对称地修掉 over-counting 这一半;另一半(不精确)要靠更精确的子域解。**实验证明:子域用精确 LU 时反常完全消失**(overlap 恢复"越大越好")。而且即便只在一层方法里比,**sASM 也不是最好的**——对称化 RAS(SMRAS)、sASM+Chebyshev 子域解都更优;Robin/优化传输条件(OSM/SORAS/RASHO)进一步改善"边界信息传递不精确"。但**根本上,所有一层方法都不强可扩展**。
 
-2. **可以,而且收益明确。** 三个系统在**同一网格**上、互为**谱等价**的加权刚度/质量算子,因此可以:① 一次构造**共享粗空间**(Nicolaides/GenEO)或 IC/AMG 分解,三系统共用;② 用**解历史 warm-start**(Fischer 投影);③ 跨时间步 **deflation/recycle** 最小特征向量。常数向量同时充当 Sys2 奇异核的 deflation。
+2. **可以,但要分清网格。** 三个系统**不是同一张网格**:Sys1(Vm)与 Sys2(u_e)在**心脏 submesh**,Sys3(躯干 φ)在**另一张躯干 submesh**,两者仅在 conforming 交界面共享界面节点。所以——**(A) Sys1↔Sys2 同心脏网格**:可共享心脏网格上的 **Nicolaides/GenEO 粗空间**(常数向量同时是 Sys2 奇异核的 deflation)+ Sys2 时间序列的 **warm-start / deflation**(这才是 `-xsys` 研究的对象)。**(B) heart↔torso 跨网格**:没有"同网格预条件子复用",只能共享**预条件策略**;真正的跨网格加速是**界面子结构化(BDDC/FETI-DP / Neumann–Robin)**或 `-monolithic` 并网格粗空间。注意 Sys1 质量主导、Sys2 纯刚度,二者**并不强谱等价**,可迁移的是与网格绑定的粗空间而非预条件矩阵。
 
 3. **一层方法(含 sASM)不强可扩展;两层(粗空间)才行。** 实测**弱扩展**下一层 sASM 迭代数随子域数单调上升(68→132),两层 GAMG 恒定(9→10)。这与理论一致:一层 κ∼1+1/(Hδ) 含 1/H 随子域数增长,两层 κ∼1+H/δ 与子域数无关。
 
@@ -105,18 +105,29 @@ BASIC 随 overlap **上升**(71→100),sASM **下降**(71→58)。反常 + 修�
 
 ## 3. Q2:前面的系统给后面的系统做加速(预处理)
 
-三系统 Sys1(质量+刚度)、Sys2(奇异刚度 K_{σi+σe})、Sys3(躯干 Laplace)在**同一心脏网格**上由同一套 FE 装配得到,仅差**电导加权 + 质量项**,故**互为谱等价**:存在 0<c≤C 使 c·xᵀA₁x ≤ xᵀA₂x ≤ C·xᵀA₂x,于是 κ(M⁻¹A₂) ≤ (C/c)·κ(M⁻¹A₁)——**为 A₁ 造的预条件子直接能用于 A₂**,迭代数只乘 √(C/c)(Axelsson–Karátson;Mardal–Winther 算子预处理,h 无关)。三条可叠加的复用轴:
+**先把网格关系写清楚(关键)**:三个系统**不是同一张网格**。在 `forward_ecg.cpp` 里——
+- **Sys1(Vm,单域)与 Sys2(u_e 恢复)在同一张「心脏」submesh 上**(`fes_h`,同一组自由度);
+- **Sys3(躯干 φ)在另一张「躯干」submesh 上**(`fes_t`,不同自由度);
+- 两张网格**只在 conforming 交界面共享同一组界面节点**,域内自由度互不相同。
 
-### 3.1 共享粗空间 / 预条件(结构/几何迁移,收益最大)
-一次在网格上建 **Nicolaides/GenEO 粗空间**或 **IC/AMG 分解**,三系统共用,每个算子只重建小的 Galerkin 粗矩阵 ZᵀAZ(廉价)。常数向量同时 deflate 掉 Sys2 的奇异核(否则 CG 在零特征上停滞)。这正是 Task 3 里"把 Sys1 网格的 Nicolaides 粗空间迁移给 Sys2"的理论依据。心脏文献:Pavarino–Scacchi 的粗空间是**网格定义**的,可跨 formulation 复用。
+因此跨系统加速要**分两种情形**,机理完全不同:
 
-### 3.2 解历史 warm-start(Fischer 投影,最便宜)
+**(A) Sys1 → Sys2:同一张心脏网格。** 这才是 Task 3 / `-xsys` 真正研究的对象。两者同网格、同 fespace,只差算子内容:Sys1 = M/Δt + ½K_{σmono}(**质量主导、良态**),Sys2 = K_{σi+σe}(**纯刚度、奇异、病态**——真正的瓶颈)。**注意它们并不强谱等价**(Sys1 被质量项主导,Sys2 是纯刚度),所以"为 Sys1 造的预条件子直接拿给 Sys2"收益有限;真正能迁移的是**与网格绑定**的东西:在心脏网格上建一次的 **Nicolaides/GenEO 粗空间**(常数向量正好是 Sys2 奇异核),Sys1 与 Sys2 共用,每个算子只重建小的 ZᵀAZ。再叠加 Sys2 自身时间序列的 warm-start / deflation(§3.2–3.3)。
+
+**(B) heart(Sys1/Sys2)→ torso(Sys3):两张不同网格,经 conforming 交界面耦合。** 这里**没有"同网格预条件子复用"可言**(自由度空间都不同)。Sys2 与 Sys3 只是**同类椭圆刚度算子**(都是加权 Laplacian),所以共享的是**预条件「策略」**(两层/AMG 都适用),不是预条件「矩阵」。真正把"前面的解"喂给"后面的系统"的途径是**界面耦合 / 子结构化**:
+- 解出的心脏面 u_e 作为躯干 Sys3 的**交界面 Dirichlet/通量数据**(就是前向 ECG 的物理耦合,`forward_ecg` 默认 decoupled 路径);
+- 要在求解器层面让两网格互相加速,标准做法是**子结构化(BDDC/FETI-DP)或 Neumann–Robin 区域分解**:把心脏-躯干界面的 Schur 补 / 粗空间作为两网格**共享的那一层**(Boulakia 等 2010 的 Neumann–Robin heart-torso 耦合;Gerardo-Giorda 等 2009;Pavarino–Scacchi 的 BDDC deluxe);
+- 或 `-monolithic`:在 heart∪torso 的**并网格(parent)**上一次解,这时粗空间可横跨两域——这才是"同一张网格"的情形,但代价是放弃了奇异 Sys2 的独立性。
+
+下面 §3.1–3.2 的解历史/谱复用对**情形 (A)** 与 Sys3 各自的时间序列都适用;上面的共享粗空间**仅在各自网格内**成立(心脏一份、躯干一份),跨网格那一份要靠界面子结构化。
+
+### 3.1 解历史 warm-start(Fischer 投影,最便宜)
 RHS 随去极化波**光滑漂移** ⟹ 把新 RHS 在 A-内积下投影到最近 m 个历史解张成的子空间,作 CG 初值;只需解残余的正交分量。Fischer 1998 报告 ~2× 省时;SPD 用 A-正交(能量范数)投影正好匹配 CG。对 Sys2 需投影到 range(去常数)。
 
-### 3.3 谱 deflation / Krylov recycling(跨时间步)
+### 3.2 谱 deflation / Krylov recycling(跨时间步)
 把一次求解中提取的**最小特征(Ritz)向量** recycle 到后续系统:deflated CG(Saad 等 2000)、GCRO-DR(Parks–de Sturler 2006)、对称的 RMINRES。有效条件数从 λ_n/λ_1 变 λ_n/λ_{k+1},迭代 ∝√κ_eff 显著下降;文献报 20–70% 省迭代。eigCG 在 QCD 类问题最多 ~8×。
 
-### 3.4 实测(forward_ecg `-xsys`,真实 Sys1 Vm(t) 序列驱动 Sys2 FEM 算子)
+### 3.3 实测(forward_ecg `-xsys`,真实 Sys1 Vm(t) 序列驱动 Sys2 FEM 算子,**同一心脏网格**)
 | 策略 | 总 CG 迭代(NT=5) |
 |---|---|
 | baseline(ICC,零初值) | 147 |
@@ -124,12 +135,17 @@ RHS 随去极化波**光滑漂移** ⟹ 把新 RHS 在 A-内积下投影到最�
 | POD 历史投影 | 143 |
 短跑(5 个 RHS)增益小(~3%),与文献一致:warm/POD 的收益随序列变长、RHS 漂移越慢而放大(真实 Δt=0.02ms 时前沿每步仅动 ~0.012mm)。
 
-### 3.5 Q2 排序(对 CG-SPD 的预期收益)
-1. **共享粗空间**(结构迁移,一次建多次用,且解 Sys2 奇异核)。
-2. **谱 deflation/recycle**(攻低频/病态,Sys2/Sys3 收益最大)。
-3. **warm-start 历史投影**(近零成本,三系统通用)。
-4. **复用 IC/AMG 分解**(谱等价,省 setup,注意各向异性下 C/c)。
-> 三者正交可乘:warm-start(免费初值)+ within-system deflation + 共享粗空间,叠在一个很少重建的细网格预条件子上。
+### 3.4 Q2 排序(对 CG-SPD 的预期收益)
+**(A) 同心脏网格内(Sys1↔Sys2)**:
+1. **共享心脏网格粗空间**(Nicolaides/GenEO,一次建多次用,且 deflate Sys2 奇异核)。
+2. **谱 deflation/recycle**(攻 Sys2 低频/病态,跨时间步 recycle 最小 Ritz 向量)。
+3. **warm-start 历史投影**(近零成本,Sys1/Sys2 各自的时间序列都用)。
+
+**(B) 跨网格(heart↔torso,Sys3)**:不能复用预条件矩阵,只能——
+4. **界面子结构化**(BDDC/FETI-DP / Neumann–Robin):把心脏-躯干界面 Schur 补/粗空间作为两网格共享的那一层(Boulakia 2010;Pavarino–Scacchi BDDC deluxe)。
+5. **或 `-monolithic` 并网格**:在 heart∪torso 上建横跨两域的粗空间(代价:失去奇异 Sys2 的独立性)。
+
+> 正交可乘:warm-start(免费初值)+ within-system deflation + 各自网格的粗空间;跨网格那一层靠界面子结构化,不是预条件子搬运。
 
 ---
 
@@ -140,9 +156,10 @@ RHS 随去极化波**光滑漂移** ⟹ 把新 RHS 在 A-内积下投影到最�
 | 修 overlap 反常 | 单纯 sASM(只修 over-count 一半,ICC0 下封顶) | **两层粗空间** + 更精确子域解(Chebyshev-ICC),或 SMRAS/SORAS |
 | 边界信息传递 | Dirichlet 人工边界 | **Robin/优化传输(SORAS)** |
 | 大规模可扩展 | 任何一层方法(含 sASM,迭代随子域数涨) | **两层(Nicolaides/GenEO/AMG)**,子域数无关 |
-| 跨系统(Sys1→Sys2/3) | 每系统从零 | **共享粗空间 + warm-start + deflation** |
+| 跨系统(同心脏网格 Sys1↔Sys2) | 每系统从零 | **共享心脏网格粗空间 + warm-start + deflation** |
+| 跨网格(heart↔torso, Sys3) | 复用预条件矩阵(不可能,自由度不同) | **界面子结构化(BDDC/FETI-DP/Neumann–Robin)或并网格粗空间** |
 
-**最终建议**:`CG +(sASM/RASHO 一层平滑器 + Nicolaides(异质则 GenEO)粗空间)`,子域解用 Chebyshev-ICC;跨时间步/跨系统叠加 Fischer warm-start 与 Ritz deflation,粗空间在三系统间共享。这与 openCARP/Chaste/lifex/Pavarino–Scacchi 的工程实践一致,且每一项都有本仓库可复现的实测支撑(`research/run_experiments.sh`)。
+**最终建议**:每张网格上用 `CG +(sASM/RASHO 一层平滑器 + Nicolaides(异质则 GenEO)粗空间)`,子域解用 Chebyshev-ICC;**心脏网格内** Sys1↔Sys2 共享粗空间并叠加 Fischer warm-start 与 Ritz deflation;**心脏↔躯干跨网格**则用界面子结构化(BDDC/FETI-DP / Neumann–Robin)或 `-monolithic` 并网格粗空间耦合,而非搬运预条件矩阵。这与 openCARP/Chaste/lifex/Pavarino–Scacchi 的工程实践一致,且每一项都有本仓库可复现的实测支撑(`research/run_experiments.sh`)。
 
 > **诚实边界**:① 实测在 PETSc 3.19 + 源码 MFEM 4.9、cube 模型(Sys2/Sys3 形态)与心脏 FEM 上完成,未在用户 Mac 的 3.24/Spack 上复跑;② 两层用 GAMG 作"含粗空间的可扩展方法"代表,未手写 GenEO(GenEO 的可证界引文献);③ 文献条目经 WebSearch 交叉核对,个别精确常数/页码建议查原文 PDF(代理对部分出版商 403)。
 
