@@ -69,7 +69,7 @@ int main(int argc, char *argv[])
     const char *mesh_file = "heart_torso.msh";
     double dt = 0.02, Tend = 80.0;
     int    ref_levels = 0;
-    bool   monolithic = false, do_xsys = false, do_precond = false;
+    bool   monolithic = false, do_xsys = false, do_precond = false, do_dump = false;
     OptionsParser opts(argc, argv);
     opts.AddOption(&mesh_file, "-m", "--mesh", "Gmsh MSH 2.2 conforming mesh.");
     opts.AddOption(&dt, "-dt", "--dt", "Time step (ms).");
@@ -81,6 +81,8 @@ int main(int argc, char *argv[])
                    "Run the cross-system preconditioning study on FEM Sys2.");
     opts.AddOption(&do_precond, "-precond", "--precond", "-noprecond", "--no-precond",
                    "ASM vs sASM iteration-count study on the 3 systems (skips EP).");
+    opts.AddOption(&do_dump, "-dump_fields", "--dump-fields", "-nodump", "--no-dump",
+                   "Dump node coords + Vm/u_e/torso-phi snapshots for plotting.");
     opts.Parse();
     if (!opts.Good()) { if (rank==0) opts.PrintUsage(cout); return 1; }
     if (rank==0) opts.PrintOptions(cout);
@@ -293,6 +295,19 @@ int main(int argc, char *argv[])
     const double eL_d2 = torso_probe(-25, 0, 0, eL);   // left body surface
     const double eR_d2 = torso_probe( 25, 0, 0, eR);   // right body surface
 
+    // node coordinates for plotting (dumped once; serial run)
+    auto dump_vec = [&](const char*fn, const Vector &v){
+        FILE*f=fopen(fn,"w"); for(int p=0;p<v.Size();++p) fprintf(f,"%g\n",v(p)); fclose(f); };
+    if (do_dump && rank==0){
+        FILE*fh=fopen("heart_xyz.txt","w");
+        for(int p=0;p<nloc;++p) fprintf(fh,"%g %g %g\n",tdof_x(p),tdof_y(p),tdof_z(p));
+        fclose(fh);
+        FILE*ft=fopen("torso_xyz.txt","w");
+        for(int p=0;p<txv.Size();++p) fprintf(ft,"%g %g %g\n",txv(p),tyv(p),tzv(p));
+        fclose(ft);
+        cout << "[DUMP] heart_xyz.txt ("<<nloc<<")  torso_xyz.txt ("<<txv.Size()<<")\n";
+    }
+
     // ====================================================================
     //  -precond : ASM vs sASM iteration counts on the three FEM systems.
     //  Subdomains = MPI ranks, so run with mpirun -n>=2 to see the overlap
@@ -434,6 +449,18 @@ int main(int argc, char *argv[])
             }
             // ECG = phi(left) - phi(right) at the globally-nearest body dof
             Vector phit_td; phi_t.GetTrueDofs(phit_td);
+            // field snapshots for plotting (~every 12 ms)
+            if (do_dump && rank==0){
+                int ms = (int)(t+dt+0.5);
+                if (ms>0 && ms%12==0){
+                    char fn[64];
+                    snprintf(fn,sizeof fn,"heart_vm_%03d.txt",ms);  dump_vec(fn, Vm);
+                    if(!monolithic){ Vector ueh; ue_h.GetTrueDofs(ueh);
+                        snprintf(fn,sizeof fn,"heart_ue_%03d.txt",ms); dump_vec(fn, ueh); }
+                    snprintf(fn,sizeof fn,"torso_phi_%03d.txt",ms);  dump_vec(fn, phit_td);
+                    cout << "[DUMP] snapshot t="<<ms<<" ms\n";
+                }
+            }
             double pl = global_at(eL_d2, (eL>=0)?phit_td(eL):0.0);
             double pr = global_at(eR_d2, (eR>=0)?phit_td(eR):0.0);
             ecg = pl - pr;

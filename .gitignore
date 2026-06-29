@@ -54,3 +54,9 @@ asm_bug_demo/infoprop
 # python bytecode
 __pycache__/
 *.pyc
+# cardiac field-dump data (regenerable via forward_ecg -dump_fields)
+asm_bug_demo/cardiac/heart_xyz.txt
+asm_bug_demo/cardiac/torso_xyz.txt
+asm_bug_demo/cardiac/heart_vm_*.txt
+asm_bug_demo/cardiac/heart_ue_*.txt
+asm_bug_demo/cardiac/torso_phi_*.txt
