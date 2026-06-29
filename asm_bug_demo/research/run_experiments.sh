@@ -65,3 +65,16 @@ row "SMRAS (sym. RAS)"        -scheme 8 -sub_pc_factor_levels 0
 row "eps-PU graded (dead end)" -scheme 7 -sub_pc_factor_levels 0
 printf "%-26s" "GAMG two-level (ceiling)"; for ov in 0 1 2 3; do
   mpirun --allow-run-as-root -n 4 ./asm_demo -nx 48 -pure_neumann -scheme 0 -ksp_type cg -pc_type gamg 2>&1 | { printf "%4s" "$(geti)"; }; done; echo
+
+echo "== F. large-scale cost: communication (VecScatter halo) & flops per method =="
+BC2="-nx 48 -pure_neumann -ksp_type cg -ksp_norm_type preconditioned -ksp_rtol 1e-6 -ksp_atol 1e-12 -ksp_max_it 1500 -pc_type asm -pc_asm_type basic -pc_asm_overlap 1 -sub_ksp_type preonly -sub_pc_type icc -sub_pc_factor_levels 0"
+costrow(){ local lbl="$1"; shift
+  mpirun --allow-run-as-root -n 4 ./asm_demo $BC2 "$@" -log_view 2>&1 > /tmp/lv.txt
+  it=$(grep -oE "iters=[0-9]+" /tmp/lv.txt|head -1|cut -d= -f2)
+  vs=$(grep -E "^VecScatterBegin " /tmp/lv.txt|head -1|awk '{print $2}')
+  tm=$(grep -oE "time=[0-9.]+" /tmp/lv.txt|head -1|cut -d= -f2)
+  printf "%-14s iters=%-4s halo=%-6s halo/it=%-5s time=%s\n" "$lbl" "$it" "$vs" "$(awk "BEGIN{printf \"%.1f\",${vs:-0}/${it:-1}}")" "$tm"; }
+costrow "BASIC"       -scheme 0
+costrow "sASM"        -scheme 3
+costrow "sASM+Cheby4" -scheme 4 -localcheby 4
+costrow "SMRAS"       -scheme 8
