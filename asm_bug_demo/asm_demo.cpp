@@ -875,7 +875,35 @@ int main(int argc, char *argv[])
     // Use MFEM's default METIS partitioning of the element graph.  We will
     // dump this partition to a file so the PETSc demo can apply the
     // identical METIS-derived element-to-rank mapping.
-    int *metis_part = serial_mesh.GeneratePartitioning(num_ranks, 1);
+    //   -part_method N : MFEM/METIS routine (0/3=recursive bisection,
+    //                    1/4=k-way edge-cut [default], 2/5=k-way comm-volume).
+    //   -cartesian a b c : bypass METIS, structured axis-aligned boxes
+    //                    (a*b*c must equal num_ranks; {P,1,1}=slabs).
+    int part_method = 1;
+    bool cart = false; int cnx = num_ranks, cny = 1, cnz = 1;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "-part_method" && i + 1 < argc) { part_method = std::atoi(argv[++i]); }
+        else if (a == "-cartesian") {
+            cart = true;
+            if (i + 3 < argc && argv[i+1][0] != '-') {
+                cnx = std::atoi(argv[i+1]); cny = std::atoi(argv[i+2]);
+                cnz = std::atoi(argv[i+3]); i += 3;
+            }
+        }
+    }
+    int *metis_part;
+    if (cart) {
+        int nxyz[3] = { cnx, cny, cnz };
+        metis_part = serial_mesh.CartesianPartitioning(nxyz);
+        if (my_rank == 0)
+            std::cout << "[PART] Cartesian " << cnx << "x" << cny << "x" << cnz
+                      << " (structured boxes, low multiplicity)\n";
+    } else {
+        metis_part = serial_mesh.GeneratePartitioning(num_ranks, part_method);
+        if (my_rank == 0)
+            std::cout << "[PART] METIS part_method=" << part_method << "\n";
+    }
     Array<int> elem_part(metis_part, serial_mesh.GetNE());
     if (my_rank == 0) {
         std::string fn = std::string("metis_part_nx") + std::to_string(nx)
