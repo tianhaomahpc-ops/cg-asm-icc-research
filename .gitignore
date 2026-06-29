@@ -60,3 +60,8 @@ asm_bug_demo/cardiac/torso_xyz.txt
 asm_bug_demo/cardiac/heart_vm_*.txt
 asm_bug_demo/cardiac/heart_ue_*.txt
 asm_bug_demo/cardiac/torso_phi_*.txt
+asm_bug_demo/cardiac/heart_xyz_r*.txt
+asm_bug_demo/cardiac/torso_xyz_r*.txt
+asm_bug_demo/cardiac/heart_vm_*_r*.txt
+asm_bug_demo/cardiac/heart_ue_*_r*.txt
+asm_bug_demo/cardiac/torso_phi_*_r*.txt

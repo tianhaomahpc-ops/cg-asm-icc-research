@@ -89,11 +89,14 @@ int main(int argc, char *argv[])
 
     MFEMInitializePetsc(&argc, &argv, NULL, NULL);
     PetscOptionsSetValue(NULL, "-options_left", "no");
-    // Inner solver PC: block-Jacobi with ICC on each (per-process, sequential)
-    // block.  PARALLEL-SAFE: PETSc's PCICC/PCILU are single-process only, so a
-    // bare PCICC on an MPIAIJ matrix deadlocks on >1 rank; bjacobi gives one
-    // SeqAIJ block per process and ICC works on it.  On 1 rank bjacobi has a
-    // single block => identical to plain ICC (counts unchanged).
+    // Inner solver PC: block-Jacobi with ICC on each per-process block.
+    // PARALLEL-SAFE: PETSc's PCICC/PCILU are single-process only, so a bare
+    // PCICC on an MPIAIJ matrix deadlocks on >1 rank; bjacobi gives one SeqAIJ
+    // block per process and ICC works on it.  On 1 rank bjacobi has a single
+    // block => identical to plain ICC (counts unchanged).  (GAMG was tried for
+    // the elliptic torso but added AMG-setup cost without changing the result,
+    // because the parallel inconsistency is in the heart->torso transfer, not
+    // the solve -- see the parallel-consistency note below.)
     for (const char *pfx : {"sys1_","sys2_","sys3_","mono_","xsys_"})
     {
         std::string p = std::string("-") + pfx;
@@ -302,16 +305,23 @@ int main(int argc, char *argv[])
     const double eR_d2 = torso_probe( 25, 0, 0, eR);   // right body surface
 
     // node coordinates for plotting (dumped once; serial run)
-    auto dump_vec = [&](const char*fn, const Vector &v){
+    // Field dump is PER-RANK: each rank writes its own local true-dofs to a
+    // rank-suffixed file (..._r<rank>.txt).  The union over ranks is the full
+    // field (each true dof is owned by exactly one rank), and plot_results.py
+    // concatenates the rank files.  GetTrueDofs is local, so this is safe and
+    // gives the COMPLETE field on any rank count (1 rank => just *_r0.txt).
+    auto dump_vec = [&](const char*base, int ms, const Vector &v){
+        char fn[80]; snprintf(fn,sizeof fn,"%s_%03d_r%d.txt",base,ms,rank);
         FILE*f=fopen(fn,"w"); for(int p=0;p<v.Size();++p) fprintf(f,"%g\n",v(p)); fclose(f); };
-    if (do_dump && rank==0){
-        FILE*fh=fopen("heart_xyz.txt","w");
-        for(int p=0;p<nloc;++p) fprintf(fh,"%g %g %g\n",tdof_x(p),tdof_y(p),tdof_z(p));
-        fclose(fh);
-        FILE*ft=fopen("torso_xyz.txt","w");
-        for(int p=0;p<txv.Size();++p) fprintf(ft,"%g %g %g\n",txv(p),tyv(p),tzv(p));
-        fclose(ft);
-        cout << "[DUMP] heart_xyz.txt ("<<nloc<<")  torso_xyz.txt ("<<txv.Size()<<")\n";
+    if (do_dump){
+        char fn[80];
+        snprintf(fn,sizeof fn,"heart_xyz_r%d.txt",rank);
+        { FILE*fh=fopen(fn,"w"); for(int p=0;p<nloc;++p)
+            fprintf(fh,"%g %g %g\n",tdof_x(p),tdof_y(p),tdof_z(p)); fclose(fh); }
+        snprintf(fn,sizeof fn,"torso_xyz_r%d.txt",rank);
+        { FILE*ft=fopen(fn,"w"); for(int p=0;p<txv.Size();++p)
+            fprintf(ft,"%g %g %g\n",txv(p),tyv(p),tzv(p)); fclose(ft); }
+        if (rank==0) cout << "[DUMP] per-rank node coords written (heart/torso)\n";
     }
 
     // ====================================================================
@@ -409,6 +419,14 @@ int main(int argc, char *argv[])
                 RemoveGlobalMean(b2, MPI_COMM_WORLD);
                 cg2.Mult(b2, ue_h);                   // u_e on heart
                 // transfer heart u_e -> torso (fills shared interface dofs)
+                // PARALLEL-CONSISTENCY NOTE: this SubMesh->SubMesh transfer of
+                // the interface Dirichlet data is PARTITION-DEPENDENT on >1 rank
+                // in this MFEM 4.9 build (the torso phi / body-surface ECG
+                // amplitude varies with #ranks; verified vs the bit-identical
+                // serial run).  The EP propagation (Vm, activation, CV) and the
+                // -monolithic forward solve ARE parallel-consistent.  => run the
+                // DECOUPLED forward-ECG (these figures / the ECG trace) on 1
+                // rank; use parallel for EP speedup and -precond.
                 ue_t = 0.0; heart_to_torso.Transfer(ue_h, ue_t);
                 // Sys3: torso Laplace with phi = u_e on interface, Neumann body
                 phi_t = ue_t;                          // lift carries interface BC
@@ -456,16 +474,14 @@ int main(int argc, char *argv[])
             }
             // ECG = phi(left) - phi(right) at the globally-nearest body dof
             Vector phit_td; phi_t.GetTrueDofs(phit_td);
-            // field snapshots for plotting (~every 12 ms)
-            if (do_dump && rank==0){
+            // field snapshots for plotting (~every 12 ms), per-rank
+            if (do_dump){
                 int ms = (int)(t+dt+0.5);
                 if (ms>0 && ms%12==0){
-                    char fn[64];
-                    snprintf(fn,sizeof fn,"heart_vm_%03d.txt",ms);  dump_vec(fn, Vm);
-                    if(!monolithic){ Vector ueh; ue_h.GetTrueDofs(ueh);
-                        snprintf(fn,sizeof fn,"heart_ue_%03d.txt",ms); dump_vec(fn, ueh); }
-                    snprintf(fn,sizeof fn,"torso_phi_%03d.txt",ms);  dump_vec(fn, phit_td);
-                    cout << "[DUMP] snapshot t="<<ms<<" ms\n";
+                    dump_vec("heart_vm", ms, Vm);
+                    if(!monolithic){ Vector ueh; ue_h.GetTrueDofs(ueh); dump_vec("heart_ue", ms, ueh); }
+                    dump_vec("torso_phi", ms, phit_td);
+                    if (rank==0) cout << "[DUMP] snapshot t="<<ms<<" ms\n";
                 }
             }
             double pl = global_at(eL_d2, (eL>=0)?phit_td(eL):0.0);

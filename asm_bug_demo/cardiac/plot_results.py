@@ -5,17 +5,24 @@ forward-ECG fields (Vm, u_e, torso phi, ECG) dumped by
 Produces fig_mesh.png, fig_vm.png, fig_ue.png, fig_torso.png, fig_ecg.png.
 Units: mm, ms, mV.
 """
-import numpy as np, matplotlib
+import numpy as np, matplotlib, glob
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 
-def load_xyz(fn):
-    a = np.loadtxt(fn); return a[:,0], a[:,1], a[:,2]
-def load_v(fn):  return np.loadtxt(fn)
+# Fields are dumped PER-RANK (..._r<rank>.txt); concatenate across ranks to get
+# the full field (works for any rank count; falls back to a single file).
+def _files(base):
+    fs = sorted(glob.glob(f"{base}_r*.txt"))
+    return fs if fs else [f"{base}.txt"]
+def load_xyz(base):
+    a = np.concatenate([np.loadtxt(f).reshape(-1,3) for f in _files(base)])
+    return a[:,0], a[:,1], a[:,2]
+def load_v(base):
+    return np.concatenate([np.loadtxt(f).reshape(-1) for f in _files(base)])
 
-hx,hy,hz = load_xyz("heart_xyz.txt")
-tx,ty,tz = load_xyz("torso_xyz.txt")
+hx,hy,hz = load_xyz("heart_xyz")
+tx,ty,tz = load_xyz("torso_xyz")
 TIMES = [12,24,36,48]
 
 def slice_tricontour(ax, X, Y, Z, V, zsel, tol, levels, cmap, title, sym=False):
@@ -51,7 +58,7 @@ fig.tight_layout(); fig.savefig("fig_mesh.png", dpi=130); plt.close(fig)
 # ---------- Fig 2: Vm depolarization wave (heart top view) ---------------
 fig, axes = plt.subplots(1,4, figsize=(18,3.6))
 for ax,tm in zip(axes, TIMES):
-    V = load_v(f"heart_vm_{tm:03d}.txt")
+    V = load_v(f"heart_vm_{tm:03d}")
     cf = slice_tricontour(ax, hx,hy,hz, V, 0.0, 0.6, np.linspace(-90,30,25),
                           "RdBu_r", f"Vm  t={tm} ms")
     ax.set_xlabel("x (mm)"); ax.set_ylabel("y (mm)")
@@ -62,7 +69,7 @@ fig.savefig("fig_vm.png", dpi=130, bbox_inches="tight"); plt.close(fig)
 # ---------- Fig 3: u_e extracellular potential on the heart --------------
 fig, axes = plt.subplots(1,4, figsize=(18,3.6))
 for ax,tm in zip(axes, TIMES):
-    U = load_v(f"heart_ue_{tm:03d}.txt")
+    U = load_v(f"heart_ue_{tm:03d}")
     cf = slice_tricontour(ax, hx,hy,hz, U, 0.0, 0.6, 25, "seismic",
                           f"u_e  t={tm} ms", sym=True)
     ax.set_xlabel("x (mm)"); ax.set_ylabel("y (mm)")
@@ -73,7 +80,7 @@ fig.savefig("fig_ue.png", dpi=130, bbox_inches="tight"); plt.close(fig)
 # ---------- Fig 4: torso potential u_T (slice through the body) ----------
 fig, axes = plt.subplots(1,4, figsize=(18,4.2))
 for ax,tm in zip(axes, TIMES):
-    P = load_v(f"torso_phi_{tm:03d}.txt")
+    P = load_v(f"torso_phi_{tm:03d}")
     cf = slice_tricontour(ax, tx,ty,tz, P, 0.0, 2.0, 25, "seismic",
                           f"phi_torso  t={tm} ms", sym=True)
     ax.add_patch(plt.Rectangle((-10,-3.5),20,7, fill=False, ec="k", lw=1.2))  # heart footprint

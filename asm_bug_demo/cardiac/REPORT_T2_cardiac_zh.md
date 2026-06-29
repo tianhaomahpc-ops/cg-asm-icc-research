@@ -47,6 +47,15 @@ METIS 几何分区**(`mpirun -n 4`,1 子域/rank)。加密网格(heart 10,085 / 
 > **bare `PCICC`**(单进程算法,MPIAIJ 上死锁)→ 改为 **bjacobi + 子块 ICC**(并行安全,
 > 单 rank 等价于纯 ICC);(b) `fes_p.GlobalTrueVSize()`(集合通信)被错放进 `if(rank==0)`
 > → 死锁,改为所有 rank 调用。现 EP / `-precond` 在 `mpirun -n 2/4` 下均跑通。
+>
+> **并行加速与一致性**:`-T 60` 全程仿真 **串行 44 s → 4 进程 19 s(~2.3×)**;
+> **EP 传播完全一致**(P8=39.58 ms、CV=0.550 m/s 与串行逐位相同)。**注意**:默认
+> *decoupled* 路径里 heart→torso 的 `ParTransferMap`(SubMesh→SubMesh 界面 Dirichlet
+> 传递)在该 MFEM 4.9 构建下**随分区不同**(并行的体表 ECG 幅值与串行差 ~20%);
+> `-monolithic`(并网格,无界面传递)则**逐位并行一致**。⟹ **decoupled 的前向 ECG /
+> 出图请用单 rank**(界面传递精确),并行用于 EP 加速与 `-precond`。字段 dump 已改为
+> **逐 rank**(`..._r<rank>.txt`,`plot_results.py` 自动拼接),所以并行 dump 的 Vm/激活
+> 场仍是完整且一致的。
 
 ## 0. 问题定义(先写清楚,具体是哪个例子)
 
