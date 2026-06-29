@@ -89,11 +89,16 @@ int main(int argc, char *argv[])
 
     MFEMInitializePetsc(&argc, &argv, NULL, NULL);
     PetscOptionsSetValue(NULL, "-options_left", "no");
-    // pin each inner solver's PC to ICC via its prefix (survives Customize).
+    // Inner solver PC: block-Jacobi with ICC on each (per-process, sequential)
+    // block.  PARALLEL-SAFE: PETSc's PCICC/PCILU are single-process only, so a
+    // bare PCICC on an MPIAIJ matrix deadlocks on >1 rank; bjacobi gives one
+    // SeqAIJ block per process and ICC works on it.  On 1 rank bjacobi has a
+    // single block => identical to plain ICC (counts unchanged).
     for (const char *pfx : {"sys1_","sys2_","sys3_","mono_","xsys_"})
     {
-        std::string k = std::string("-") + pfx + "pc_type";
-        PetscOptionsSetValue(NULL, k.c_str(), "icc");
+        std::string p = std::string("-") + pfx;
+        PetscOptionsSetValue(NULL, (p+"pc_type").c_str(),     "bjacobi");
+        PetscOptionsSetValue(NULL, (p+"sub_pc_type").c_str(), "icc");
     }
 
     // Scope block: every MFEM/PETSc object (ParMesh, ParSubMesh, PetscParMatrix,
@@ -131,12 +136,14 @@ int main(int argc, char *argv[])
     ParFiniteElementSpace fes_h(&heart, &fec);   // heart  (Sys1, Sys2)
     ParFiniteElementSpace fes_t(&torso, &fec);   // torso  (Sys3)
     ParFiniteElementSpace fes_p(&pmesh, &fec);   // parent (monolithic)
+    // GlobalTrueVSize() is COLLECTIVE (MPI_Allreduce) -> must be called on ALL
+    // ranks, never only inside if(rank==0) (that deadlocks).
     const HYPRE_BigInt ndof_h = fes_h.GlobalTrueVSize();
     const HYPRE_BigInt ndof_t = fes_t.GlobalTrueVSize();
+    const HYPRE_BigInt ndof_p = fes_p.GlobalTrueVSize();
     if (rank==0)
         cout << "[FES] heart dofs=" << ndof_h << "  torso dofs=" << ndof_t
-             << "  parent dofs=" << fes_p.GlobalTrueVSize() << "\n";
-
+             << "  parent dofs=" << ndof_p << "\n";
     // ---- conforming-interface sanity check (do this FIRST) ----------------
     // Partition-independent metric: count interface boundary faces (bdr attr
     // IFACE_BDR).  Boundary elements are uniquely owned, so the global sum is
@@ -190,10 +197,9 @@ int main(int argc, char *argv[])
 
     PetscParMatrix A1p;
     HypreToPetscAIJ(*A1h, A1p, "Sys1_A1", rank, 1, true);
-    PetscPCGSolver cg1(A1p, "sys1_");
+        PetscPCGSolver cg1(A1p, "sys1_");
     cg1.SetRelTol(1e-10); cg1.SetMaxIter(500); cg1.iterative_mode = false;
-    { PC pc; KSPGetPC((KSP)cg1, &pc); PCSetType(pc, PCICC); }
-
+    { PC pc; KSPGetPC((KSP)cg1, &pc); PCSetType(pc, PCBJACOBI); }
     // per-DOF TP06 cells (one per LOCAL true dof on the heart)
     const int nloc = fes_h.GetTrueVSize();
     std::vector<TT06> cell(nloc);
@@ -247,9 +253,9 @@ int main(int argc, char *argv[])
     PetscParMatrix Kiep;
     HypreToPetscAIJ(*Kie, Kiep, "Sys2_Kie", rank, 1, true);
     AttachConstNullSpace((Mat)Kiep, MPI_COMM_WORLD);          // singular: ker=const
-    PetscPCGSolver cg2(Kiep, "sys2_");
+        PetscPCGSolver cg2(Kiep, "sys2_");
     cg2.SetRelTol(1e-8); cg2.SetMaxIter(2000); cg2.iterative_mode = false;
-    { PC pc; KSPGetPC((KSP)cg2, &pc); PCSetType(pc, PCICC); }
+    { PC pc; KSPGetPC((KSP)cg2, &pc); PCSetType(pc, PCBJACOBI); }
 
     // grid functions + transfer maps for the coupling (built once)
     ParGridFunction ue_h(&fes_h);   ue_h = 0.0;   // heart u_e
@@ -325,10 +331,12 @@ int main(int argc, char *argv[])
             {"Sys2 u_e recover (heart, singular)",     (Mat)Kiep, true },
             {"Sys3 torso Laplace (torso, SPD)",        (Mat)Kt3p, false},
         };
-        const PetscInt NSUB = 8;   // ASM subdomains (contiguous blocks of the matrix)
+        const PetscInt NSUB = 8;   // serial: contiguous matrix blocks; parallel: 1/rank (METIS)
+        const int nsub_eff = (Mpi::WorldSize()==1) ? (int)NSUB : Mpi::WorldSize();
         if (rank==0){
-            cout << "\n[PRECOND] CG iterations to rtol=1e-8, sub_pc=ICC(0), "
-                 << NSUB << " ASM subdomains (x" << Mpi::WorldSize() << " ranks)\n";
+            cout << "\n[PRECOND] CG iters to rtol=1e-8, sub_pc=ICC(0), " << nsub_eff
+                 << (Mpi::WorldSize()==1 ? " contiguous-block subdomains (serial)\n"
+                                         : " METIS geometric subdomains (1/rank)\n");
             cout << "  system                                    O   ASM(BASIC)  sASM\n";
         }
         for (int q=0;q<3;++q){
@@ -357,7 +365,6 @@ int main(int argc, char *argv[])
 
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
-
     FILE *fe = (!do_precond && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
     if (fe) fprintf(fe,"# t(ms)  ECG(mV, phi_L-phi_R)  Vm@center(mV)\n");
 
@@ -411,7 +418,7 @@ int main(int argc, char *argv[])
                 PetscParMatrix Ktp; HypreToPetscAIJ(Kt, Ktp, "Sys3_Kt", rank, 1, true);
                 PetscPCGSolver cg3(Ktp, "sys3_");
                 cg3.SetRelTol(1e-8); cg3.SetMaxIter(1000); cg3.iterative_mode=false;
-                { PC pc; KSPGetPC((KSP)cg3,&pc); PCSetType(pc,PCICC); }
+                { PC pc; KSPGetPC((KSP)cg3,&pc); PCSetType(pc,PCBJACOBI); }
                 cg3.Mult(Bt, Xt);
                 ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
             }
@@ -441,7 +448,7 @@ int main(int argc, char *argv[])
                 PetscParMatrix Kap; HypreToPetscAIJ(Ka, Kap, "Mono_K", rank, 1, true);
                 PetscPCGSolver cg0(Kap, "mono_");
                 cg0.SetRelTol(1e-8); cg0.SetMaxIter(2000); cg0.iterative_mode=false;
-                { PC pc; KSPGetPC((KSP)cg0,&pc); PCSetType(pc,PCICC); }
+                { PC pc; KSPGetPC((KSP)cg0,&pc); PCSetType(pc,PCBJACOBI); }
                 cg0.Mult(Ba, Xa);
                 kall.RecoverFEMSolution(Xa, src, phi_p);
                 // transfer parent phi -> torso for the electrode read
@@ -516,7 +523,7 @@ int main(int argc, char *argv[])
             PetscPCGSolver cg(Kiep, "xsys_", /*iter_mode=*/strat>=1); // warm/POD reuse guess
             cg.SetRelTol(1e-8); cg.SetMaxIter(2000);
             cg.iterative_mode = (strat>=1);
-            { PC pc; KSPGetPC((KSP)cg,&pc); PCSetType(pc,PCICC); }
+            { PC pc; KSPGetPC((KSP)cg,&pc); PCSetType(pc,PCBJACOBI); }
             Vector u(nloc), uprev(nloc), b(nloc); uprev=0.0;
             std::vector<Vector> Phi; int Kpod=8;
             long tot=0;

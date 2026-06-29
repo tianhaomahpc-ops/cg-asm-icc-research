@@ -28,25 +28,25 @@
 
 ## 0′. ASM vs sASM 预条件:三系统迭代数(容器内实测)
 
-`forward_ecg.cpp -precond` 在 conforming FEM 网格(heart 710 / torso 3018 dof,
-8 个 ASM 子域)上,对三个系统分别用 **ASM(PC_ASM_BASIC + 子域 ICC)** 与
+`forward_ecg.cpp -precond` 对三个系统分别用 **ASM(PC_ASM_BASIC + 子域 ICC)** 与
 **sASM(对称缩放 D^{−1/2}M_BASIC⁻¹D^{−1/2} + ICC)** 做 CG 预条件,收敛到 rtol=1e-8
-的 **CG 迭代数**(MFEM 4.9 + PETSc 3.19 实测):
+的 **CG 迭代数**(MFEM 4.9 + PETSc 3.19 实测)。**并行已修好**(见下),所以可用**真
+METIS 几何分区**(`mpirun -n 4`,1 子域/rank)。加密网格(heart 10,085 / torso 36,229 dof):
 
 | 系统 | overlap | ASM(BASIC) | sASM |
 |---|---|---|---|
-| **Sys1** 单域(心脏,质量主导,良态) | 0 / 1 / 2 | 17 / 17 / 11 | 17 / **9** / 8 |
-| **Sys2** u_e 恢复(心脏,奇异 pure-Neumann) | 0 / 1 / 2 | 71 / 38 / 31 | 71 / **32** / 30 |
-| **Sys3** 躯干 Laplace(非奇异) | 0 / 1 / 2 | 72 / 43 / 32 | 72 / **34** / 30 |
+| **Sys1** 单域(心脏,质量主导,良态) | 0 / 1 / 2 | 12 / 13 / 13 | 12 / **8** / 8 |
+| **Sys2** u_e 恢复(心脏,奇异 pure-Neumann) | 0 / 1 / 2 | 72 / **89 / 90** | 72 / 71 / 71 |
+| **Sys3** 躯干 Laplace(非奇异) | 0 / 1 / 2 | 59 / **83 / 87** | 59 / 50 / 52 |
 
-**读法**:① overlap=0 时两者**完全相同**(无重叠 ⇒ 重数 D=I ⇒ 无 over-count,sASM 退化为 ASM);
-② 一旦有重叠产生 over-counting,**sASM 一致 ≤ ASM**,在 overlap=1 增益最明显
-(Sys1 17→9、Sys3 43→34);③ 奇异 Sys2 经常数零空间投影正常收敛(`MatSetNullSpace`)。
-④ 子域用矩阵连续块(单 rank 8 子域)构造;repo 主线那种"BASIC overlap↑→迭代↑"的反常
-在**几何 METIS 并行分区**(`asm_demo` 的 nx=48 / 4-rank)下最尖锐,此处块式子域里 ASM 随
-overlap 仍下降,但 **sASM 处处不劣于 ASM** 的对称缩放性质已实测确认。
-> 并行说明:本驱动的并行 `ParSubMesh`+`ParFiniteElementSpace` 路径在该 MFEM 4.9 构建下会卡住,
-> 故 EP 与本预条件研究均在**单 rank**下验证(子域由矩阵分块得到,overlap 效应照常体现)。
+**读法**:① overlap=0 时两者**完全相同**(无重叠 ⇒ 重数 D=I ⇒ 无 over-count);
+② **几何 METIS 分区下,BASIC ASM(ICC0) 在 Sys2/Sys3 上随 overlap 上升——这就是 repo 主线
+的"overlap↑→迭代↑"反常**(Sys2 72→89→90、Sys3 59→83→87);**sASM 把它压平/修复**
+(Sys2 72→71→71、Sys3 59→50→52);③ 奇异 Sys2 经常数零空间投影正常收敛(`MatSetNullSpace`)。
+> 并行修复说明:此前并行会卡死,定位到两个 bug 并修好——(a) 内层 PC 用了 PETSc 的
+> **bare `PCICC`**(单进程算法,MPIAIJ 上死锁)→ 改为 **bjacobi + 子块 ICC**(并行安全,
+> 单 rank 等价于纯 ICC);(b) `fes_p.GlobalTrueVSize()`(集合通信)被错放进 `if(rank==0)`
+> → 死锁,改为所有 rank 调用。现 EP / `-precond` 在 `mpirun -n 2/4` 下均跑通。
 
 ## 0. 问题定义(先写清楚,具体是哪个例子)
 

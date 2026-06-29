@@ -69,6 +69,17 @@ static inline void SetBlocks(PC asm_pc, Mat A, PetscInt nsub, PetscInt overlap)
     for (PetscInt b = 0; b < nsub; ++b) ISDestroy(&is[b]); // PCASM keeps a ref
 }
 
+// Choose the subdomain decomposition: in PARALLEL use the natural 1-subdomain-
+// per-rank decomposition (= the ParMesh METIS geometric partition, the genuine
+// ASM); in SERIAL split the matrix into `nsub` contiguous blocks so the
+// overlap/over-counting study still has multiple subdomains on one rank.
+static inline void SetSubdomains(PC asm_pc, Mat A, PetscInt nsub, PetscInt overlap)
+{
+    int csize; MPI_Comm_size(PetscObjectComm((PetscObject)A), &csize);
+    if (csize == 1) { SetBlocks(asm_pc, A, nsub, overlap); }
+    else            { PCASMSetOverlap(asm_pc, overlap); }   // geometric rank subdomains
+}
+
 // ---- plain ASM (BASIC) + ICC on the outer KSP's PC -------------------------
 static inline void SetupASM(KSP ksp, Mat A, PetscInt overlap, PetscInt icc_levels,
                             PetscInt nsub)
@@ -77,7 +88,7 @@ static inline void SetupASM(KSP ksp, Mat A, PetscInt overlap, PetscInt icc_level
     PCSetType(pc, PCASM);
     PCASMSetType(pc, PC_ASM_BASIC);
     PCSetOperators(pc, A, A);
-    SetBlocks(pc, A, nsub, overlap);
+    SetSubdomains(pc, A, nsub, overlap);
     PCSetUp(pc);
     SetSubICC(pc, icc_levels);
 }
@@ -92,7 +103,7 @@ static inline void InstallScaledASM(KSP ksp, Mat A, PetscInt overlap, PetscInt i
     PCSetType(inner, PCASM);
     PCASMSetType(inner, PC_ASM_BASIC);
     PCSetOperators(inner, A, A);
-    SetBlocks(inner, A, nsub, overlap);
+    SetSubdomains(inner, A, nsub, overlap);
     PCSetUp(inner);
     SetSubICC(inner, icc_levels);
 
