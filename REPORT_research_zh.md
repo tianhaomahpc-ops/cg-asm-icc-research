@@ -142,7 +142,18 @@ Sys2(纯 Neumann = 心脏 u_e)、nx=48、4 个 METIS 几何子域、ICC0 上实�
 | 1 | 79 | 78 | 95 |
 | 2 | 79 | 78 | 86 |
 
-**几乎无改善、大 α 反而更差**。原因(已定位,非 bug):**PCASM 给的 $A_i=R_iAR_i^T$ 已经是 Dirichlet 块**(切断的外部耦合 = 外部取 0),再加正对角只是把它**往"过度钉死"推**,不是 Robin 传输。**正确的 Robin 需要未装配的 Neumann 局部矩阵**(子域内单元矩阵,界面处自然边界)再加 $\alpha M_\Gamma$——这**无法从已装配的全局 $A$ 还原**(HPDDM 等正是从单元/Neumann 矩阵做 SORAS 的)。⟹ **诚实结论:在"只有装配后 $A$"的代数框架里,Robin/SORAS 拿不到理论收益;要么改用单元级 Neumann 矩阵(需改装配),要么直接上 GenEO 粗空间(Robin 正是 GenEO 局部特征问题的天然边界条件,二者配套——Haferssas–Jolivet–Nataf)。** 已实现的、真正有效的同通信杠杆仍是 **θ 过松弛 + Cheby2**(79→24)。
+**几乎无改善、大 α 反而更差**。原因(已定位,非 bug):**PCASM 给的 $A_i=R_iAR_i^T$ 已经是 Dirichlet 块**(切断的外部耦合 = 外部取 0),再加正对角只是把它**往"过度钉死"推**,不是 Robin 传输。**正确的 Robin 需要未装配的 Neumann 局部矩阵**(子域内单元矩阵,界面处自然边界)再加真正的边界质量 $\alpha M_\Gamma$。
+
+**SORAS 在装配层做出来了(`cardiac/soras_demo.cpp`)。** 既然纯代数版拿不到收益,我在装配层重做:用 **MFEM `SubMesh` 按单元分区取每个子域**,在子网格上**只用本子域单元装配** Neumann 块 $K_i$(界面处自然边界),并在 SubMesh 自动标记的人工界面(边界属性 = 父网格 `bdr.Max()+1`)上**装配真正的边界质量矩阵 $M_\Gamma$**,本地块 = $K_i+\alpha M_\Gamma$;再以 PU 对称组合 $M^{-1}=\sum_i R_i^T D_i (K_i+\alpha M_\Gamma)^{-1} D_i R_i$,外层 CG。**实测(纯 Neumann Laplace,非重叠一层,同通信)Robin 全程优于 Dirichlet 块,在 $\alpha\!\approx\!2$ 取最优,稳定省 ~20%**:
+
+| 配置 | Dirichlet 块 ASM | Neumann+Robin(最优 α) |
+|---|---|---|
+| nx16 nsub8 | 49 | **39**(−20%) |
+| nx24 nsub8 | 64 | **50**(−22%) |
+| nx16 nsub16 | 57 | **46**(−19%) |
+| nx20 nsub12 | 63 | **48**(−24%) |
+
+**关键对比**:同样是"加 $\alpha$ 到界面",**纯代数版(对 Dirichlet 块加对角)无效、装配版(对 Neumann 块加真 $M_\Gamma$)有效**——差别在于(a)起点是 **Neumann 块**(欠约束、浮动奇异)而非 Dirichlet 块,(b)$M_\Gamma$ 是**带界面-界面非对角耦合的真边界质量**而非集中对角。$\alpha$ 有经典优化 Schwarz 的最优点(太小→Neumann 浮动、太大→过钉)。图:`cardiac/figs/fig_soras.png`。⟹ **结论更新:SORAS 的收益是真的、可实现的,但必须回到单元/装配层(拿 Neumann 矩阵 + 真 $M_\Gamma$),装配后 $A$ 的纯代数后处理拿不到。** 再放宽到一次小全局归约,叠 GenEO 粗空间即终极组合(Robin 是 GenEO 局部特征问题的天然边界条件——Haferssas–Jolivet–Nataf)。已实现的同通信杠杆现包含:**θ 过松弛 + Cheby2(79→24)** 与 **SORAS(装配层,−20%)**。
 
 > **一句话(同通信改进)**:SMRAS 修了 over-count;同通信下再压 = **免费的 θ 过松弛(≤1.6)+ 本地精度(Cheby2,低内存)**,实测 79→24;但 SMRAS 的 SPD 余量有限、杠杆不能全叠;**最大的剩余杠杆是 SORAS(Robin 传输,零额外通信,攻 $\lambda_{\min}$)**。代码:`asm_demo -scheme 8 -smtheta T -localcheby D`。
 
