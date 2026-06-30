@@ -881,6 +881,9 @@ int main(int argc, char *argv[])
     //                    (a*b*c must equal num_ranks; {P,1,1}=slabs).
     int part_method = 1;
     bool cart = false; int cnx = num_ranks, cny = 1, cnz = 1;
+    bool pointsource = false;             // -pointsource: RHS = unit impulse at -src
+    double src_pt[3] = { 0.5, 0.5, 0.5 }; // source location (domain is [0,1]^3)
+    std::string dump_sol;                 // -dump_sol PREFIX: per-rank (x y z val) dump
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "-part_method" && i + 1 < argc) { part_method = std::atoi(argv[++i]); }
@@ -891,6 +894,12 @@ int main(int argc, char *argv[])
                 cnz = std::atoi(argv[i+3]); i += 3;
             }
         }
+        else if (a == "-pointsource") { pointsource = true; }
+        else if (a == "-src" && i + 3 < argc) {
+            src_pt[0] = std::atof(argv[i+1]); src_pt[1] = std::atof(argv[i+2]);
+            src_pt[2] = std::atof(argv[i+3]); i += 3;
+        }
+        else if (a == "-dump_sol" && i + 1 < argc) { dump_sol = argv[++i]; }
     }
     int *metis_part;
     if (cart) {
@@ -1017,6 +1026,34 @@ int main(int argc, char *argv[])
     HypreParMatrix A_hypre;
     Vector X, B;
     a.FormLinearSystem(ess_tdof_list, u_gf, b, A_hypre, X, B);
+
+    // -pointsource: replace RHS with a unit impulse at the vertex nearest
+    // src_pt, so X solves A X = e_j (the discrete Green's function).  With
+    // -ksp_max_it k and X0=0, the k-th iterate's support visualizes how far
+    // information has propagated in k iterations (one subdomain-hop/iter for
+    // one-level; whole domain in ~1 step for a coarse/two-level PC).
+    if (pointsource)
+    {
+        int ibest = -1; double dbest = 1e300;
+        for (int i = 0; i < fes.GetVSize(); ++i) {
+            const real_t *c = pmesh.GetVertex(i);
+            double d = 0; for (int k = 0; k < 3; ++k) { double t = c[k]-src_pt[k]; d += t*t; }
+            if (d < dbest) { dbest = d; ibest = i; }
+        }
+        struct { double d; int r; } in{dbest, my_rank}, out;
+        MPI_Allreduce(&in, &out, 1, MPI_DOUBLE_INT, MPI_MINLOC, MPI_COMM_WORLD);
+        ParGridFunction src_gf(&fes); src_gf = 0.0;
+        if (my_rank == out.r) src_gf(ibest) = 1.0;
+        src_gf.GetTrueDofs(B);
+        double sc[3] = {0,0,0};
+        if (my_rank == out.r) { const real_t *c = pmesh.GetVertex(ibest);
+            sc[0]=c[0]; sc[1]=c[1]; sc[2]=c[2]; }
+        MPI_Bcast(sc, 3, MPI_DOUBLE, out.r, MPI_COMM_WORLD);
+        src_pt[0]=sc[0]; src_pt[1]=sc[1]; src_pt[2]=sc[2];
+        if (my_rank == 0)
+            std::cout << "[POINTSOURCE] impulse at (" << sc[0] << "," << sc[1]
+                      << "," << sc[2] << ")\n";
+    }
 
     // pure_neumann (Sys2): A is singular with ker = span{1}.  Make the RHS
     // compatible (orthogonal to the constant null space) by subtracting its
@@ -1369,6 +1406,37 @@ int main(int argc, char *argv[])
     }
 
     a.RecoverFEMSolution(X, b, u_gf);
+
+    // -dump_sol PREFIX: per-rank (x y z value) dump of the (possibly
+    // iteration-capped) solution, plus the support radius = farthest point
+    // from the source with |u| > 1e-3*max|u|.  Drives the propagation plot.
+    if (!dump_sol.empty())
+    {
+        std::string fn = dump_sol + "_r" + std::to_string(my_rank) + ".txt";
+        std::ofstream ofs(fn);
+        ofs << std::setprecision(6);
+        double umax = 0.0;
+        for (int i = 0; i < fes.GetVSize(); ++i)
+            umax = std::max(umax, std::fabs((double)u_gf(i)));
+        double gumax = 0.0;
+        MPI_Allreduce(&umax, &gumax, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+        const double tol = 1e-3 * (gumax > 0 ? gumax : 1.0);
+        double rad = 0.0;
+        for (int i = 0; i < fes.GetVSize(); ++i) {
+            const real_t *c = pmesh.GetVertex(i);
+            ofs << c[0] << " " << c[1] << " " << c[2] << " " << (double)u_gf(i) << "\n";
+            if (std::fabs((double)u_gf(i)) > tol) {
+                double d = 0; for (int k = 0; k < 3; ++k) { double t = c[k]-src_pt[k]; d += t*t; }
+                rad = std::max(rad, std::sqrt(d));
+            }
+        }
+        ofs.close();
+        double grad = 0.0;
+        MPI_Allreduce(&rad, &grad, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+        if (my_rank == 0)
+            std::cout << "[PROBE] support_radius=" << std::fixed << std::setprecision(4)
+                      << grad << "  umax=" << std::scientific << gumax << "\n";
+    }
 
     // Probe the solution along three orthogonal lines.  Each rank only
     // owns part of the mesh after METIS partitioning, so the probe must
