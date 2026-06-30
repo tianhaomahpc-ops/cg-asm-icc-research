@@ -86,6 +86,12 @@ int main(int argc, char *argv[])
                    "Cap CG iterations for the propagation probe (the k-th iterate).");
     opts.AddOption(&prop_prefix, "-prop_prefix", "--prop-prefix",
                    "Output filename prefix for the propagation dumps.");
+    bool warmstart = false, no_meanremove = false;
+    opts.AddOption(&warmstart, "-warmstart", "--warmstart", "-cold", "--cold",
+                   "Warm-start Sys2 from the previous time-step u_e (initial guess).");
+    opts.AddOption(&no_meanremove, "-no_meanremove", "--no-meanremove",
+                   "-meanremove", "--meanremove",
+                   "Skip the zero-mean projection on the Sys2 RHS (demo: breaks the anchor).");
     opts.Parse();
     if (!opts.Good()) { if (rank==0) opts.PrintUsage(cout); return 1; }
     if (rank==0) opts.PrintOptions(cout);
@@ -231,9 +237,13 @@ int main(int argc, char *argv[])
 
     PetscParMatrix Kiep;
     HypreToPetscAIJ(*Kie, Kiep, "Sys2_Kie", rank, 1, true);
-    AttachConstNullSpace((Mat)Kiep, MPI_COMM_WORLD);          // singular: ker=const
+    if (!no_meanremove)  // (-no_meanremove also skips the nullspace = the TRUE anchor)
+        AttachConstNullSpace((Mat)Kiep, MPI_COMM_WORLD);      // singular: ker=const
         PetscPCGSolver cg2(Kiep, "sys2_");
-    cg2.SetRelTol(1e-8); cg2.SetMaxIter(2000); cg2.iterative_mode = false;
+    cg2.SetRelTol(1e-8); cg2.SetMaxIter(2000);
+    // iterative_mode=true => Sys2 uses the previous step's u_e as the initial
+    // guess (warm start).  Default cold (x0=0): each solve is independent.
+    cg2.iterative_mode = warmstart;
     { PC pc; KSPGetPC((KSP)cg2, &pc); PCSetType(pc, PCBJACOBI); }
 
     // grid functions for the coupling (interface transfer `iface` built above)
@@ -456,8 +466,11 @@ int main(int argc, char *argv[])
             double ecg = 0.0;
             {
                 Vector b2(nloc); Ki->Mult(Vm, b2); b2.Neg();
-                RemoveGlobalMean(b2, MPI_COMM_WORLD);
+                if (!no_meanremove) RemoveGlobalMean(b2, MPI_COMM_WORLD);  // zero-mean anchor
                 cg2.Mult(b2, ue_h);                   // u_e on heart
+                double ue_mean = ue_h.Sum();
+                { double g; MPI_Allreduce(&ue_mean,&g,1,MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+                  ue_mean = g / ndof_h; }             // report the solution's mean
                 // heart u_e (true dofs) -> torso interface Dirichlet values
                 Vector ue_h_tv;  ue_h.GetTrueDofs(ue_h_tv);
                 Vector phi_tv(fes_t.GetTrueVSize()); phi_tv = 0.0;
@@ -475,7 +488,9 @@ int main(int argc, char *argv[])
                 ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
                 if (rank==0) cout << "[ITERS] t="<<(int)(t+dt+0.5)<<"ms  Sys1(CG+bj-ICC)="
                     <<cg1.GetNumIterations()<<"  Sys2(singular)="<<cg2.GetNumIterations()
-                    <<"  Sys3(torso)="<<cg3.GetNumIterations()<<"\n";
+                    <<"  Sys3(torso)="<<cg3.GetNumIterations()
+                    <<"  ue_mean="<<std::scientific<<std::setprecision(2)<<ue_mean
+                    <<std::defaultfloat<<"\n";
             }
             // ECG = phi(left) - phi(right) at the globally-nearest body dof
             Vector phit_td; phi_t.GetTrueDofs(phit_td);
