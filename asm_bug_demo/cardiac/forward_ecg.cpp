@@ -79,6 +79,13 @@ int main(int argc, char *argv[])
                    "ASM vs sASM iteration-count study on the 3 systems (skips EP).");
     opts.AddOption(&do_dump, "-dump_fields", "--dump-fields", "-nodump", "--no-dump",
                    "Dump node coords + Vm/u_e/torso-phi snapshots for plotting.");
+    bool do_prop = false; int prop_maxit = 4; const char *prop_prefix = "prop";
+    opts.AddOption(&do_prop, "-propagation", "--propagation", "-noprop", "--no-prop",
+                   "Point-source information-propagation probe on the 3 systems (skips EP).");
+    opts.AddOption(&prop_maxit, "-prop_maxit", "--prop-maxit",
+                   "Cap CG iterations for the propagation probe (the k-th iterate).");
+    opts.AddOption(&prop_prefix, "-prop_prefix", "--prop-prefix",
+                   "Output filename prefix for the propagation dumps.");
     opts.Parse();
     if (!opts.Good()) { if (rank==0) opts.PrintUsage(cout); return 1; }
     if (rank==0) opts.PrintOptions(cout);
@@ -340,15 +347,78 @@ int main(int argc, char *argv[])
         if (rank==0) cout << "[PRECOND] (negative = DIVERGED)\n";
     }
 
+    // ====================================================================
+    //  -propagation : point-source information-propagation probe.
+    //  Put a unit impulse at one node and solve each system capped at
+    //  prop_maxit CG iterations; the support of the k-th iterate is how far
+    //  information has spread in k iterations.  Sys1/Sys2 source at the heart
+    //  centre (0,0,0); Sys3 source in the torso interior (15,0,0).  Dumps
+    //  per-rank (x y z value) for plot_propagation.py, on the REAL geometry
+    //  and REAL Niederer parameters (dt from -dt).
+    // ====================================================================
+    if (do_prop)
+    {
+        auto radius=[&](const Vector&v,const Vector&X,const Vector&Y,const Vector&Z,
+                        double sx,double sy,double sz)->double{
+            double um=0; for(int p=0;p<v.Size();++p) um=std::max(um,std::fabs(v(p)));
+            double gum; MPI_Allreduce(&um,&gum,1,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD);
+            double tol=1e-3*(gum>0?gum:1.0), rad=0;
+            for(int p=0;p<v.Size();++p) if(std::fabs(v(p))>tol){
+                double d=sqrt(pow(X(p)-sx,2)+pow(Y(p)-sy,2)+pow(Z(p)-sz,2));
+                rad=std::max(rad,d);}
+            double g; MPI_Allreduce(&rad,&g,1,MPI_DOUBLE,MPI_MAX,MPI_COMM_WORLD); return g;
+        };
+        auto dump=[&](const char*sys,const Vector&v,const Vector&X,const Vector&Y,const Vector&Z){
+            char fn[160]; snprintf(fn,sizeof fn,"%s_%s_r%d.txt",prop_prefix,sys,rank);
+            FILE*f=fopen(fn,"w"); for(int p=0;p<v.Size();++p)
+                fprintf(f,"%g %g %g %g\n",X(p),Y(p),Z(p),v(p)); fclose(f);
+        };
+        auto pick=[&](const Vector&X,const Vector&Y,const Vector&Z,
+                      double sx,double sy,double sz,int&owner)->int{
+            double best=1e300;int bi=-1;
+            for(int p=0;p<X.Size();++p){double d=pow(X(p)-sx,2)+pow(Y(p)-sy,2)+pow(Z(p)-sz,2);
+                if(d<best){best=d;bi=p;}}
+            struct{double d;int r;}in{best,rank},out;
+            MPI_Allreduce(&in,&out,1,MPI_DOUBLE_INT,MPI_MINLOC,MPI_COMM_WORLD);
+            owner=out.r; return bi;
+        };
+        // Sys1 (heart, (1/dt)M + 1/2 K -- mass-dominated): impulse at centre
+        cg1.SetRelTol(1e-30); cg1.SetAbsTol(1e-30); cg1.SetMaxIter(prop_maxit);
+        cg1.iterative_mode=false;
+        int ow; int j=pick(tdof_x,tdof_y,tdof_z,0,0,0,ow);
+        Vector bs(nloc); bs=0.0; if(rank==ow) bs(j)=1.0;
+        Vector x1(nloc); x1=0.0; cg1.Mult(bs,x1);
+        double r1=radius(x1,tdof_x,tdof_y,tdof_z,0,0,0); dump("sys1",x1,tdof_x,tdof_y,tdof_z);
+        // Sys2 (heart, pure-Neumann singular): same impulse, mean-removed
+        cg2.SetRelTol(1e-30); cg2.SetAbsTol(1e-30); cg2.SetMaxIter(prop_maxit);
+        cg2.iterative_mode=false;
+        Vector b2(bs); RemoveGlobalMean(b2,MPI_COMM_WORLD);
+        Vector x2(nloc); x2=0.0; cg2.Mult(b2,x2);
+        double r2=radius(x2,tdof_x,tdof_y,tdof_z,0,0,0); dump("sys2",x2,tdof_x,tdof_y,tdof_z);
+        // Sys3 (torso Laplace, interface grounded): impulse in torso interior
+        HypreParMatrix Kt3; ktf.FormSystemMatrix(ess_tdofs_t,Kt3);
+        PetscParMatrix Kt3p; HypreToPetscAIJ(Kt3,Kt3p,"Sys3_Kt",rank,1,true);
+        PetscPCGSolver cg3(Kt3p,"sys3_");
+        cg3.SetRelTol(1e-30); cg3.SetAbsTol(1e-30); cg3.SetMaxIter(prop_maxit);
+        cg3.iterative_mode=false;
+        { PC pc; KSPGetPC((KSP)cg3,&pc); PCSetType(pc,PCBJACOBI); }
+        int nt=txv.Size(); int ow3; int j3=pick(txv,tyv,tzv,15,0,0,ow3);
+        Vector b3(nt); b3=0.0; if(rank==ow3) b3(j3)=1.0;
+        Vector x3(nt); x3=0.0; cg3.Mult(b3,x3);
+        double r3=radius(x3,txv,tyv,tzv,15,0,0); dump("sys3",x3,txv,tyv,tzv);
+        if(rank==0) cout<<"[PROP] dt="<<dt<<" k="<<prop_maxit
+            <<"  Sys1 r="<<r1<<"  Sys2 r="<<r2<<"  Sys3 r="<<r3<<"\n";
+    }
+
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
-    FILE *fe = (!do_precond && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
+    FILE *fe = (!do_precond && !do_prop && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
     if (fe) fprintf(fe,"# t(ms)  ECG(mV, phi_L-phi_R)  Vm@center(mV)\n");
 
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
-    const int nsteps = do_precond ? 0 : (int)(Tend/dt);   // -precond skips the EP loop
+    const int nsteps = (do_precond||do_prop) ? 0 : (int)(Tend/dt);   // -precond/-propagation skip the EP loop
     const int sample = std::max(1, (int)(1.0/dt));    // ~ every 1 ms
     for (int s=0;s<nsteps;++s)
     {
