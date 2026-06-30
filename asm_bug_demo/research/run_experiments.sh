@@ -96,3 +96,13 @@ echo "  -- SPD margin (these should DIVERGE -- levers over-stacked):"
 grow "SMRAS Cheby4"         -scheme 8 -sub_pc_factor_levels 0 -localcheby 4
 grow "SMRAS Cheby2+theta1.3" -scheme 8 -sub_pc_factor_levels 0 -localcheby 2 -smtheta 1.3
 grow "SMRAS theta1.8"       -scheme 8 -sub_pc_factor_levels 0 -smtheta 1.8
+
+echo "== H. SORAS attempt: algebraic Robin on the assembled A (NEGATIVE result) =="
+echo "  (-robin alpha adds alpha*S_i on the artificial interface of the sASM local block;"
+echo "   A_i is already the Dirichlet block, so +diag over-pins -> no SORAS gain.  Proper"
+echo "   Robin needs the unassembled Neumann local matrix, not recoverable from assembled A.)"
+HP="-nx 48 -pure_neumann $CG -pc_type asm -pc_asm_type basic -sub_ksp_type preonly -sub_pc_type icc -sub_pc_factor_levels 0"
+for ov in 1 2; do printf "  overlap=%d  sASM=%s   robin: " $ov \
+   "$(mpirun --allow-run-as-root -n 4 ./asm_demo $HP -scheme 3 -pc_asm_overlap $ov 2>&1|geti)"
+  for a in 0.2 1.0 4.0; do printf "a%s=%s " $a \
+    "$(mpirun --allow-run-as-root -n 4 ./asm_demo $HP -scheme 3 -pc_asm_overlap $ov -robin $a 2>&1|geti)"; done; echo; done

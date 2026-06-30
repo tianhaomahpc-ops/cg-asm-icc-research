@@ -473,9 +473,20 @@ static void InstallScaledASM(KSP ksp, Mat A,
                              double pu_eps = 0.25,  // eps for weight_mode 3
                              double pu_alpha = 1.0, // normalizer exponent (outer-G probe):
                                                     //   d_i=[own?1:eps]/(1+(m-1)eps^2)^(alpha/2)
-                             double pu_grade = 0.0) // >0: geometric layer-graded weights
+                             double pu_grade = 0.0, // >0: geometric layer-graded weights
                                                     //   w=q^depth (BFS), exact global renorm;
                                                     //   overrides eps/alpha.  q=1 == sASM.
+                             double robin_alpha = 0.0) // >0: experimental algebraic-Robin probe.
+                                                    //   Replace each local A_i with A_i + alpha*S_i,
+                                                    //   S_i diagonal on the artificial interface.
+                                                    //   FINDING (measured): this does NOT realize a
+                                                    //   SORAS gain -- A_i from PCASM is already the
+                                                    //   DIRICHLET block, so a +diag only over-pins
+                                                    //   (neutral at small alpha, worse at large).
+                                                    //   Proper Robin needs the UNASSEMBLED Neumann
+                                                    //   local matrix (element matrices restricted to
+                                                    //   the subdomain) + alpha*M_Gamma, which is not
+                                                    //   recoverable from the assembled global A.
 {
     // cheby_deg == 0 : block solve = preonly + ICC(icc_levels)   [scheme 3]
     // cheby_deg >= 1 : block solve = cheby_deg steps of Chebyshev,
@@ -539,6 +550,33 @@ static void InstallScaledASM(KSP ksp, Mat A,
         for (PetscInt i = 0; i < n_local; ++i)
         {
             PC sub_pc = nullptr;
+            // SORAS: replace the local block A_i by the Robin-augmented matrix
+            // A_i + alpha*S_i.  S_i is diagonal and lives only on the ARTIFICIAL
+            // interface: a DOF that lost couplings to outside the subdomain has a
+            // POSITIVE local row-sum (the dropped Laplacian off-diagonals are
+            // negative), so S_i(k) = max(rowsum_i(k), 0) flags exactly those DOFs
+            // and weights them by the lost-coupling magnitude (~boundary measure).
+            // Adding a positive diagonal keeps A_i SPD.  This is the algebraic
+            // Robin/optimized-transmission term; alpha is the Robin parameter.
+            if (robin_alpha > 0.0)
+            {
+                Mat Ai = nullptr;
+                KSPGetOperators(sub_ksps[i], &Ai, NULL);
+                Vec ones = nullptr, rsum = nullptr;
+                MatCreateVecs(Ai, &ones, &rsum);
+                VecSet(ones, 1.0);
+                MatMult(Ai, ones, rsum);              // rsum = A_i * 1 (row sums)
+                PetscScalar *ra = nullptr;
+                PetscInt nrl = 0; VecGetLocalSize(rsum, &nrl);
+                VecGetArray(rsum, &ra);
+                for (PetscInt l = 0; l < nrl; ++l) {
+                    PetscReal v = PetscRealPart(ra[l]);
+                    ra[l] = robin_alpha * (v > 0.0 ? v : 0.0);  // interface-only, scaled
+                }
+                VecRestoreArray(rsum, &ra);
+                MatDiagonalSet(Ai, rsum, ADD_VALUES); // A_i <- A_i + alpha*S_i
+                VecDestroy(&ones); VecDestroy(&rsum);
+            }
             if (weight_mode == 3)
             {
                 // scheme 7: eps-PU sandwich around ICC inside this subdomain.
@@ -1304,8 +1342,12 @@ int main(int argc, char *argv[])
                     pu_grade = std::atof(argv[i+1]);
             }
         int weight_mode = (scheme == 5) ? 1 : (scheme == 6) ? 2 : (scheme == 7) ? 3 : 0;
+        double robin_alpha = 0.0;   // -robin A : SORAS-type Robin transmission (scheme 3/4)
+        for (int i = 1; i < argc; ++i)
+            if (std::string(argv[i]) == "-robin" && i + 1 < argc)
+                robin_alpha = std::atof(argv[i+1]);
         InstallScaledASM(ksp_raw, A_raw, overlap, icc_lev, my_rank, cheby_deg,
-                         weight_mode, pu_eps, pu_alpha, pu_grade);
+                         weight_mode, pu_eps, pu_alpha, pu_grade, robin_alpha);
     }
     else if (scheme == 8)
     {
