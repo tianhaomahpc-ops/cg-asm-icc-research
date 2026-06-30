@@ -118,6 +118,26 @@ Sys2(纯 Neumann = 心脏 u_e)、nx=48、4 个 METIS 几何子域、ICC0 上实�
 > 而真正的天花板是**两层粗空间**(把 sASM/SMRAS 当一层平滑器 + Nicolaides/GenEO 粗空间)。
 > 数据:`asm_bug_demo/research/run_experiments.sh`(已加本专题 sweep)。
 
+#### 1.5.1 在 SMRAS 基础上、**同等通信**下继续改进(实测阶梯 + SPD 余量)
+
+既然 SMRAS 好在"restricted PU 消 over-count → $\lambda_{\max}=1$",**同等通信**(不加 overlap、不加全局求解、halo 交换次数不变)下继续改进 = 拉它**没碰的轴**。三根杠杆,实测(Sys2,overlap=2,均 `CONVERGED_RTOL`,见 `cardiac/figs/fig_smras_ladder.png`):
+
+| 配置 | 迭代 | 这一步代价 | 拉的轴 |
+|---|---|---|---|
+| sASM(基线) | 79 | — | — |
+| SMRAS(theta=1, ICC0) | 45 | 同通信(2× halo) | over-count → $\lambda_{\max}=1$ |
+| **+ theta=1.6**(过松弛) | **36** | **免费**(1 个标量) | 收缩因子 |
+| **+ ICC(2)**(theta=1.5) | **24** | 同通信 + 本地 flops(fill ×2.9) | 局部精度 |
+| **+ Cheby(2)**(替代 ICC2) | **24** | 同通信 + 本地**并行** flops,**低内存** | 局部精度(大规模首选) |
+
+谱机制:SMRAS 不只 $\lambda_{\max}\to1$,还把 $\lambda_{\min}$ 从 sASM 的 3.75e-3 翻到 **7.66e-3**(κ 331→130);`iters/√κ` 从 4.34 掉到 **3.94**,说明 SMRAS 的谱**还更聚集**(PU 把谱往 1 堆),超出"光看 κ"的预测——即**谱分布**也在帮忙,不只极值。
+
+**关键警告——SPD 余量,杠杆不能全叠**:SMRAS 是对称化**乘性**算子,其正定性有有限余量,每根杠杆都消耗它。实测**越界即 CG 崩溃(`DIVERGED`,真残差 0.15~1.1)**:`theta≥1.7`、`Cheby(4)`、`Cheby(2)+theta>1` 都假收敛(`Cheby4` 显示 4 次"收敛"但真残差 0.55)。**安全用法:三根杠杆各自适度、不全叠**——`theta≤1.6` 或 `Cheby2` 或 `ICC2`,各自能到 24~36;**最佳同通信配置 = SMRAS+Cheby2**(24,低内存,大规模友好)。
+
+**最大的、尚未实现的同通信杠杆 = Robin 优化传输(SORAS)**:上面动的是 $\lambda_{\max}$、局部精度、收缩;**唯一没碰的是用更好的界面传输再抬 $\lambda_{\min}$**。把子域人工边界从 Dirichlet 换成 **Robin($\alpha u+\partial_n u$)** 即 **SORAS**——**只给局部子域矩阵的界面行加一个边界质量项,零额外通信**,却能显著抬高 $\lambda_{\min}$。这是同通信下收益最大的方向,代价是要写 Robin 装配(需界面自由度)。若再放宽到"多一次小的全局归约",则 **SORAS + GenEO 两级**是终极组合(Robin 正是 GenEO 局部特征问题的天然边界条件,二者配套——Haferssas–Jolivet–Nataf)。
+
+> **一句话(同通信改进)**:SMRAS 修了 over-count;同通信下再压 = **免费的 θ 过松弛(≤1.6)+ 本地精度(Cheby2,低内存)**,实测 79→24;但 SMRAS 的 SPD 余量有限、杠杆不能全叠;**最大的剩余杠杆是 SORAS(Robin 传输,零额外通信,攻 $\lambda_{\min}$)**。代码:`asm_demo -scheme 8 -smtheta T -localcheby D`。
+
 ### 1.6 大规模成本对比:迭代数不是全部,要算"迭代数 × 每步成本(尤其通信)"
 
 最好的几种方法(SMRAS、sASM+Cheby4)迭代数都低,但**每步成本不同**。用 PETSc `-log_view`

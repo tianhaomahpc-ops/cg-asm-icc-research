@@ -362,7 +362,7 @@ extern "C" PetscErrorCode SMRASDestroy(PC pc)
 
 static void InstallSMRAS(KSP ksp, Mat A,
                          PetscInt overlap, PetscInt icc_levels,
-                         int my_rank, double theta)
+                         int my_rank, double theta, int cheby_deg = 0)
 {
     PC ras = nullptr;
     PCCreate(PetscObjectComm((PetscObject)A), &ras);
@@ -378,10 +378,29 @@ static void InstallSMRAS(KSP ksp, Mat A,
         for (PetscInt i = 0; i < nl; ++i)
         {
             PC sp = nullptr;
-            KSPSetType(subs[i], KSPPREONLY);
-            KSPGetPC(subs[i], &sp);
-            PCSetType(sp, PCICC);
-            PCFactorSetLevels(sp, icc_levels);
+            if (cheby_deg > 0)
+            {
+                // local-accuracy axis: fixed-degree Chebyshev over ICC (frozen
+                // eigenvalue bounds + symmetric ICC smoother = a fixed SPD
+                // linear operator, and its transpose = itself, so SMRAS's
+                // PCApplyTranspose stays valid).  Communication-free (COMM_SELF).
+                KSPSetType(subs[i], KSPCHEBYSHEV);
+                KSPSetTolerances(subs[i], PETSC_DEFAULT, PETSC_DEFAULT,
+                                 PETSC_DEFAULT, cheby_deg);
+                KSPSetNormType(subs[i], KSP_NORM_NONE);
+                KSPSetInitialGuessNonzero(subs[i], PETSC_FALSE);
+                KSPChebyshevEstEigSet(subs[i], 0.0, 0.1, 0.0, 1.1);
+                KSPGetPC(subs[i], &sp);
+                PCSetType(sp, PCICC);
+                PCFactorSetLevels(sp, icc_levels);
+            }
+            else
+            {
+                KSPSetType(subs[i], KSPPREONLY);
+                KSPGetPC(subs[i], &sp);
+                PCSetType(sp, PCICC);
+                PCFactorSetLevels(sp, icc_levels);
+            }
         }
         PCSetUpOnBlocks(ras);
     }
@@ -1301,10 +1320,15 @@ int main(int argc, char *argv[])
         PetscOptionsGetInt(NULL, NULL, "-pc_asm_overlap",       &overlap, NULL);
         PetscOptionsGetInt(NULL, NULL, "-sub_pc_factor_levels", &icc_lev, NULL);
         double theta = 1.0;
+        int cheby_deg = 0;
         for (int i = 1; i < argc; ++i)
+        {
             if (std::string(argv[i]) == "-smtheta" && i + 1 < argc)
                 theta = std::atof(argv[i+1]);
-        InstallSMRAS(ksp_raw, A_raw, overlap, icc_lev, my_rank, theta);
+            if (std::string(argv[i]) == "-localcheby" && i + 1 < argc)
+                cheby_deg = std::atoi(argv[i+1]);
+        }
+        InstallSMRAS(ksp_raw, A_raw, overlap, icc_lev, my_rank, theta, cheby_deg);
     }
 
     if (warmup)

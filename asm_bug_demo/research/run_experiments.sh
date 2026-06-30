@@ -78,3 +78,21 @@ costrow "BASIC"       -scheme 0
 costrow "sASM"        -scheme 3
 costrow "sASM+Cheby4" -scheme 4 -localcheby 4
 costrow "SMRAS"       -scheme 8
+
+echo "== G. SMRAS same-communication improvement ladder (Sys2, overlap=2, ICC0) =="
+echo "  (over-count axis [PU] + free theta over-relaxation + local-accuracy axis;"
+echo "   check reason==CONVERGED -- SMRAS has a finite SPD margin, levers don't all stack)"
+GP="-nx 48 -pure_neumann $CG -pc_type asm -pc_asm_type basic -pc_asm_overlap 2 -sub_ksp_type preonly -sub_pc_type icc"
+grow(){ printf "  %-26s" "$1"; shift
+  o=$(mpirun --allow-run-as-root -n 4 ./asm_demo $GP "$@" 2>&1)
+  it=$(echo "$o"|geti); rs=$(echo "$o"|grep -oE "reason=[A-Z_]+"|head -1|cut -d= -f2)
+  printf "iters=%-4s %s\n" "${it:-X}" "$rs"; }
+grow "sASM ICC0"            -scheme 3 -sub_pc_factor_levels 0
+grow "SMRAS ICC0"           -scheme 8 -sub_pc_factor_levels 0
+grow "SMRAS +theta1.6"      -scheme 8 -sub_pc_factor_levels 0 -smtheta 1.6
+grow "SMRAS +ICC2 theta1.5" -scheme 8 -sub_pc_factor_levels 2 -smtheta 1.5
+grow "SMRAS +Cheby2 (best)" -scheme 8 -sub_pc_factor_levels 0 -localcheby 2
+echo "  -- SPD margin (these should DIVERGE -- levers over-stacked):"
+grow "SMRAS Cheby4"         -scheme 8 -sub_pc_factor_levels 0 -localcheby 4
+grow "SMRAS Cheby2+theta1.3" -scheme 8 -sub_pc_factor_levels 0 -localcheby 2 -smtheta 1.3
+grow "SMRAS theta1.8"       -scheme 8 -sub_pc_factor_levels 0 -smtheta 1.8
