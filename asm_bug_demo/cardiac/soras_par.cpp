@@ -70,14 +70,15 @@ int main(int argc, char *argv[])
     Mpi::Init(argc, argv); Hypre::Init();
     const int rank = Mpi::WorldRank(), nranks = Mpi::WorldSize();
     int nx = 16; double alpha = 0.2; const char *meshfile = nullptr;
-    bool aniso=false, bjacobi=false, localicc0=false;
+    bool aniso=false, bjacobi=false, localicc0=false, localLU=false;
     for (int i=1;i<argc;++i){ string a=argv[i];
         if (a=="-nx"&&i+1<argc) nx=atoi(argv[++i]);
         else if (a=="-alpha"&&i+1<argc) alpha=atof(argv[++i]);
         else if (a=="-mesh"&&i+1<argc) meshfile=argv[++i];
         else if (a=="-aniso") aniso=true;
         else if (a=="-bjacobi") bjacobi=true;      // baseline: block-Jacobi+ICC
-        else if (a=="-localicc0") localicc0=true; }// inexact local solve (ICC0 preonly)
+        else if (a=="-localicc0") localicc0=true;
+        else if (a=="-localLU") localLU=true; }
     PetscInitialize(&argc,&argv,NULL,NULL);
 
     Mesh smesh = meshfile ? Mesh(meshfile,1,1)
@@ -158,14 +159,18 @@ int main(int argc, char *argv[])
     Mat Kp = ToSeqAIJ(Krob);
     KSPCreate(PETSC_COMM_SELF,&prec.kloc);
     KSPSetOperators(prec.kloc,Kp,Kp);
-    if (localicc0) {   // inexact local solve: one ICC0 apply (preonly)
+    if (localicc0) {          // inexact local solve: one ICC0 apply (preonly)
         KSPSetType(prec.kloc,KSPPREONLY);
-    } else {           // near-exact local solve: CG+ICC to 1e-10
+        PC pc; KSPGetPC(prec.kloc,&pc); PCSetType(pc,PCICC);
+    } else if (localLU) {     // near-EXACT via direct factor: factor once, cheap apply
+        KSPSetType(prec.kloc,KSPPREONLY);
+        PC pc; KSPGetPC(prec.kloc,&pc); PCSetType(pc,PCLU);
+    } else {                  // near-exact via inner CG+ICC to 1e-10 (default)
         KSPSetType(prec.kloc,KSPCG);
         KSPSetTolerances(prec.kloc,1e-10,1e-14,PETSC_DEFAULT,500);
         KSPSetNormType(prec.kloc,KSP_NORM_UNPRECONDITIONED);
+        PC pc; KSPGetPC(prec.kloc,&pc); PCSetType(pc,PCICC);
     }
-    { PC pc; KSPGetPC(prec.kloc,&pc); PCSetType(pc,PCICC); }
     KSPSetErrorIfNotConverged(prec.kloc,PETSC_FALSE);
     MatCreateVecs(Kp,&prec.rloc,&prec.zloc);
 
