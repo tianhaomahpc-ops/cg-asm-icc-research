@@ -70,13 +70,14 @@ int main(int argc, char *argv[])
     Mpi::Init(argc, argv); Hypre::Init();
     const int rank = Mpi::WorldRank(), nranks = Mpi::WorldSize();
     int nx = 16; double alpha = 0.2; const char *meshfile = nullptr;
-    bool aniso=false, bjacobi=false;
+    bool aniso=false, bjacobi=false, localicc0=false;
     for (int i=1;i<argc;++i){ string a=argv[i];
         if (a=="-nx"&&i+1<argc) nx=atoi(argv[++i]);
         else if (a=="-alpha"&&i+1<argc) alpha=atof(argv[++i]);
         else if (a=="-mesh"&&i+1<argc) meshfile=argv[++i];
         else if (a=="-aniso") aniso=true;
-        else if (a=="-bjacobi") bjacobi=true; }   // baseline: block-Jacobi+ICC
+        else if (a=="-bjacobi") bjacobi=true;      // baseline: block-Jacobi+ICC
+        else if (a=="-localicc0") localicc0=true; }// inexact local solve (ICC0 preonly)
     PetscInitialize(&argc,&argv,NULL,NULL);
 
     Mesh smesh = meshfile ? Mesh(meshfile,1,1)
@@ -155,10 +156,15 @@ int main(int argc, char *argv[])
     SORASPrec prec(T);
     prec.P = P; prec.dL = dL; prec.rL.SetSize(L); prec.yL.SetSize(L);
     Mat Kp = ToSeqAIJ(Krob);
-    KSPCreate(PETSC_COMM_SELF,&prec.kloc); KSPSetType(prec.kloc,KSPCG);
+    KSPCreate(PETSC_COMM_SELF,&prec.kloc);
     KSPSetOperators(prec.kloc,Kp,Kp);
-    KSPSetTolerances(prec.kloc,1e-10,1e-14,PETSC_DEFAULT,500);
-    KSPSetNormType(prec.kloc,KSP_NORM_UNPRECONDITIONED);
+    if (localicc0) {   // inexact local solve: one ICC0 apply (preonly)
+        KSPSetType(prec.kloc,KSPPREONLY);
+    } else {           // near-exact local solve: CG+ICC to 1e-10
+        KSPSetType(prec.kloc,KSPCG);
+        KSPSetTolerances(prec.kloc,1e-10,1e-14,PETSC_DEFAULT,500);
+        KSPSetNormType(prec.kloc,KSP_NORM_UNPRECONDITIONED);
+    }
     { PC pc; KSPGetPC(prec.kloc,&pc); PCSetType(pc,PCICC); }
     KSPSetErrorIfNotConverged(prec.kloc,PETSC_FALSE);
     MatCreateVecs(Kp,&prec.rloc,&prec.zloc);
