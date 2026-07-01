@@ -153,6 +153,8 @@ Sys2(纯 Neumann = 心脏 u_e)、nx=48、4 个 METIS 几何子域、ICC0 上实�
 | nx16 nsub16 | 57 | **46**(−19%) |
 | nx20 nsub12 | 63 | **48**(−24%) |
 
+**在真实心脏 Sys2 上也成立**(`-mesh heart.msh -aniso`,真实 conforming 四面体网格 10085 dof,纯 Neumann 各向异性 $\sigma_i+\sigma_e=\mathrm{diag}(0.79,0.255,0.255)$,纤维沿 x):Dirichlet 块 59 → **Robin 最优 α≈0.15–0.2 = 47(−20%)**;nsub=16 时 76 → **61(−20%)**。最优 α 比立方体小(~0.2 vs ~2),因为真实电导 $\sigma\!\sim\!0.25\text{–}0.79$ 更小、$K$ 尺度更小,$M_\Gamma$ 需要的权重也更小。图:`cardiac/figs/fig_soras_heart.png`。
+
 **关键对比**:同样是"加 $\alpha$ 到界面",**纯代数版(对 Dirichlet 块加对角)无效、装配版(对 Neumann 块加真 $M_\Gamma$)有效**——差别在于(a)起点是 **Neumann 块**(欠约束、浮动奇异)而非 Dirichlet 块,(b)$M_\Gamma$ 是**带界面-界面非对角耦合的真边界质量**而非集中对角。$\alpha$ 有经典优化 Schwarz 的最优点(太小→Neumann 浮动、太大→过钉)。图:`cardiac/figs/fig_soras.png`。⟹ **结论更新:SORAS 的收益是真的、可实现的,但必须回到单元/装配层(拿 Neumann 矩阵 + 真 $M_\Gamma$),装配后 $A$ 的纯代数后处理拿不到。** 再放宽到一次小全局归约,叠 GenEO 粗空间即终极组合(Robin 是 GenEO 局部特征问题的天然边界条件——Haferssas–Jolivet–Nataf)。已实现的同通信杠杆现包含:**θ 过松弛 + Cheby2(79→24)** 与 **SORAS(装配层,−20%)**。
 
 > **一句话(同通信改进)**:SMRAS 修了 over-count;同通信下再压 = **免费的 θ 过松弛(≤1.6)+ 本地精度(Cheby2,低内存)**,实测 79→24;但 SMRAS 的 SPD 余量有限、杠杆不能全叠;**最大的剩余杠杆是 SORAS(Robin 传输,零额外通信,攻 $\lambda_{\min}$)**。代码:`asm_demo -scheme 8 -smtheta T -localcheby D`。

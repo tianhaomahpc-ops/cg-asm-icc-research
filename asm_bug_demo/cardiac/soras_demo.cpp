@@ -94,7 +94,7 @@ static PetscErrorCode ShellApply(PC pc, Vec r, Vec z)
 int main(int argc, char *argv[])
 {
     int nx = 24, nsub = 8; double alpha = 4.0; bool dirichlet = false;
-    bool pin = false;
+    bool pin = false, aniso = false; const char *meshfile = nullptr;
     for (int i = 1; i < argc; ++i) {
         string a = argv[i];
         if (a == "-nx" && i+1<argc) nx = atoi(argv[++i]);
@@ -102,16 +102,25 @@ int main(int argc, char *argv[])
         else if (a == "-alpha" && i+1<argc) alpha = atof(argv[++i]);
         else if (a == "-dirichlet") dirichlet = true;
         else if (a == "-pin") pin = true;   // pin one dof (non-singular) instead of nullspace
+        else if (a == "-mesh" && i+1<argc) meshfile = argv[++i];  // real heart.msh
+        else if (a == "-aniso") aniso = true;    // real Sys2 sigma_i+sigma_e (fibers // x)
     }
     PetscInitialize(&argc, &argv, NULL, NULL);
 
-    // ---- serial cube, H1 order 1, pure-Neumann diffusion (Sys2-like) -------
-    Mesh mesh = Mesh::MakeCartesian3D(nx, nx, nx, Element::TETRAHEDRON);
+    // ---- mesh (cube, or real heart.msh) + H1 order 1 -----------------------
+    Mesh mesh = meshfile ? Mesh(meshfile, 1, 1)
+                         : Mesh::MakeCartesian3D(nx, nx, nx, Element::TETRAHEDRON);
     H1_FECollection fec(1, 3);
     FiniteElementSpace fes(&mesh, &fec);
     const int N = fes.GetTrueVSize();
 
-    ConstantCoefficient one(1.0);
+    // Sys2 operator K_{sigma_i+sigma_e}: anisotropic diag(0.79,0.255,0.255)
+    // (fibers along x) for -aniso, else isotropic identity.
+    DenseMatrix Sig(3); Sig = 0.0;
+    Sig(0,0) = aniso ? 0.79  : 1.0;
+    Sig(1,1) = aniso ? 0.255 : 1.0;
+    Sig(2,2) = aniso ? 0.255 : 1.0;
+    MatrixConstantCoefficient one(Sig);   // name kept ("one") to reuse below
     BilinearForm a(&fes);
     a.AddDomainIntegrator(new DiffusionIntegrator(one));
     a.Assemble();
