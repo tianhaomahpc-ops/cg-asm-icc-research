@@ -195,28 +195,48 @@ int main(int argc, char *argv[])
     // by Sys1's Vm(t)).  Compare cold start (x0=0) vs warm start (x0 = previous
     // solution) -- the cheapest cross-time/cross-system acceleration.
     if (sequence>0) {
-        Vector xstar(T), b(T), Xcold(T), Xwarm(T);
+        auto ip=[&](const Vector&x,const Vector&y){ return InnerProduct(MPI_COMM_WORLD,x,y); };
+        Vector xstar(T), b(T), Xcold(T), Xwarm(T), Xf(T);
         xstar.Randomize(1); if (rank==0 && ess_tdof.Size()) xstar(0)=0.0;
         Xwarm = 0.0;
-        if (rank==0) printf("[SEQUENCE] slowly-varying RHS (5%%/step): cold vs warm-start\n");
-        int tc=0, tw=0;
+        std::vector<Vector> Pb, APb;   // A-orthonormal history + A*history (Fischer)
+        const int MAXB=12;
+        // representative trajectory: u_e(t) over a beat lives in a LOW-dim smooth
+        // manifold, not a random walk.  xstar(s) = sum_k sin(w_k s + k) v_k,
+        // v_k fixed modes -> a smooth NM-dim path.  (change scales the step via w.)
+        const int NM=4; std::vector<Vector> modes(NM);
+        for (int k=0;k<NM;++k){ modes[k].SetSize(T); modes[k].Randomize(7+k);
+            if (rank==0 && ess_tdof.Size()) modes[k](0)=0.0; }
+        if (rank==0) printf("[SEQUENCE] low-dim smooth trajectory (NM=%d): cold vs warm vs Fischer\n",NM);
+        int tc=0, tw=0, tf=0;
         for (int s=0; s<sequence; ++s) {
-            Vector d(T); d.Randomize(100+s); d *= change;   // small increment
-            xstar += d; if (rank==0 && ess_tdof.Size()) xstar(0)=0.0;
+            xstar = 0.0;
+            for (int k=0;k<NM;++k) xstar.Add(sin(change*10*(k+1)*s + k), modes[k]);
+            if (rank==0 && ess_tdof.Size()) xstar(0)=0.0;
             Ah->Mult(xstar, b);
-            // converge to a FIXED accuracy relative to ||b|| (not to r0), so a
-            // good initial guess actually saves iterations (physical criterion).
-            double bn2 = sqrt(InnerProduct(MPI_COMM_WORLD,b,b));
-            cg.SetRelTol(0.0); cg.SetAbsTol(1e-6*bn2);
+            double bn2 = sqrt(ip(b,b));
+            cg.SetRelTol(0.0); cg.SetAbsTol(1e-6*bn2);   // fixed accuracy vs ||b||
+            // cold
             Xcold = 0.0; cg.iterative_mode=false; cg.Mult(b, Xcold);
             int cold=cg.GetNumIterations();
-            cg.iterative_mode=true;  cg.Mult(b, Xwarm);   // Xwarm keeps prev solution
+            // warm-start (previous solution only)
+            cg.iterative_mode=true;  cg.Mult(b, Xwarm);
             int warm=cg.GetNumIterations();
-            tc+=cold; tw+=warm;
-            if (rank==0) printf("[SEQ] step=%2d  cold=%3d  warm=%3d\n", s, cold, warm);
+            // Fischer: x0 = sum_i <p_i,b> p_i  (A-orth. projection onto history)
+            Xf = 0.0;
+            for (size_t i=0;i<Pb.size();++i) Xf.Add(ip(Pb[i],b), Pb[i]);
+            cg.iterative_mode=true; cg.Mult(b, Xf);
+            int fisch=cg.GetNumIterations();
+            // add the new solution to the A-orthonormal history (Gram-Schmidt)
+            Vector w(Xf), Aw(T); Ah->Mult(w, Aw);
+            for (size_t i=0;i<Pb.size();++i){ double c=ip(APb[i],w); w.Add(-c,Pb[i]); Aw.Add(-c,APb[i]); }
+            double nrm=sqrt(ip(w,Aw));
+            if (nrm>1e-12 && (int)Pb.size()<MAXB){ w*=1.0/nrm; Aw*=1.0/nrm; Pb.push_back(w); APb.push_back(Aw); }
+            tc+=cold; tw+=warm; tf+=fisch;
+            if (rank==0) printf("[SEQ] step=%2d  cold=%3d  warm=%3d  Fischer=%3d\n", s, cold, warm, fisch);
         }
-        if (rank==0) printf("[SEQ] TOTAL cold=%d  warm=%d  (warm-start saves %.0f%%)\n",
-                            tc, tw, 100.0*(tc-tw)/tc);
+        if (rank==0) printf("[SEQ] TOTAL cold=%d  warm=%d (-%.0f%%)  Fischer=%d (-%.0f%%)\n",
+                            tc, tw, 100.0*(tc-tw)/tc, tf, 100.0*(tc-tf)/tc);
         PetscFinalize(); return 0;
     }
     cg.Mult(B, X);
