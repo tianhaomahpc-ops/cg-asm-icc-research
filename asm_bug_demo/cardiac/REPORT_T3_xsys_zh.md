@@ -116,7 +116,39 @@ $A_0=R_0^\top K_{ie}R_0$($n_c\times n_c$,奇异 $A_0\mathbf 1=0$,在去均值子
 的跨系统粗空间(np=16 时 1.34×,主力)是**两条正交轴**,层级与合成研究一致:历史复用 < 共享粗空间。
 (注:当前 $n_c=$np;若把每个 rank 再细分成多个粗聚合、令 $n_c\gg$np,粗空间会更强,是文档化的下一步。)
 
-**两个真实的工程坑(修好才量得到收益)**:
+### 2.3 一步到位:强 fine level(SORAS)+ 共享粗空间,把 Sys2 迭代真正打下来
+
+§2.1(跨时间,次力)和 §2.2(共享粗空间,主力但小)都是**在弱 fine level(bjacobi+ICC0,无重叠)上
+的增量**,所以绝对迭代数仍 ~84–96/解。真正大跳水来自**换强 fine level**:把 `soras_par` 的并行
+**SORAS**(重叠 + Robin 传输条件:本地 Neumann 块 $K_\text{loc}$ + 共享面质量 $\alpha M_\Gamma$,PU 对称组合)
+接进 `forward_ecg` 的 Sys2,再叠共享粗空间。实现为 `mfem::Solver` 经 `SetPreconditioner` 挂 PETSc `PCShell`,
+外层仍用稳健处理奇异的 PETSc CG;**落盘场仍是 baseline 解 ⟹ ECG 逐位不变**(已核对)。
+
+**弱扩展实测(heart.msh 10085 dof,dt=0.1,每解 Sys2 CG 迭代):**
+
+| np | baseline(bj+ICC0) | **SORAS** | SORAS+coarse |
+|---|---|---|---|
+| 2 | 84 | **20**(4.2×) | 20 |
+| 4 | 87 | 35 | 34 |
+| 8 | 91 | 41 | 41 |
+| 16 | 96 | 54 | 53 |
+
+**结论(诚实,分三点)**:
+1. **SORAS 是大杠杆**:84→20(np=2,**4.2×**)、96→54(np=16,1.8×)。强 fine level(重叠+优化 Robin 传输)
+   直接把绝对迭代数打下来——这才是把 ~90 变 ~20–54 的那一步,和 `soras_par` 独立实测(27–41)一致。
+2. **Nicolaides 粗空间在 SORAS 上几乎不再加分**(np=16:434→421,~3%)。对比 §2.2 它在**弱 baseline** 上加
+   25%(1.34×):差别在于**粗空间的价值取决于 fine level 已经提供了多少全局耦合**。bjacobi 没有全局耦合⟹
+   粗空间补上那个全局模⟹大增益;SORAS 的 Robin 传输**已经**提供了良好全局耦合⟹粗空间那一列基本冗余。
+3. **SORAS 一层仍随 np 增长**(每解 20→54):这是一层方法的固有极限。要让它**真正平坦**,需要**更富的粗空间
+   ——GenEO 谱粗空间**(每子域取若干本征模,$n_c=k\cdot$np,而非 Nicolaides 的每子域 1 个常数)。这是文档化
+   的下一步;当前 $n_c=$np 的最小 Nicolaides 空间足以去奇异、并在弱 baseline 上显著加分,但不足以修 SORAS 的
+   界面数增长。
+
+**最终层级(全部真机验证,每解迭代,np=16)**:baseline 96 → +Nicolaides 粗空间 72(1.34×,补全局模)→
+**SORAS 54(1.8×,强 fine)** → SORAS+coarse 53(粗空间此时冗余)。**大头是 SORAS**;跨时间历史(§2.1,−12%)
+与之正交可再叠。
+
+### 2.4 两个真实的工程坑(修好才量得到收益)
 1. **`iterative_mode` 不生效**:MFEM 的 `PetscPCGSolver` 只在**构造函数**里 `KSPSetInitialGuessNonzero`,
    之后改 `cg.iterative_mode=true` **不传播到 KSP**,初值被静默忽略 ⟹ warm≡cold(精确相等)。修法:每步
    显式 `KSPSetInitialGuessNonzero((KSP)cg2, PETSC_TRUE/FALSE)`。(独立微测:从**精确解**热启动,修前

@@ -99,6 +99,54 @@ public:
     }
 };
 
+// ---- SORAS fine level (strong optimized-Schwarz preconditioner for Sys2) -----
+// Ported from soras_par.cpp.  M^{-1} = P^T D (K_loc + alpha M_Gamma)^{-1} D P:
+//   * K_loc = kief.SpMat() -- rank-local element-assembled NEUMANN block (natural
+//     BC on the inter-rank artificial interface, FREE);
+//   * M_Gamma -- real interface mass on the SHARED faces (Robin transmission term,
+//     carries interface-interface coupling a lumped diagonal cannot);
+//   * D = 1/multiplicity (partition of unity);  P = heart prolongation (T<->L).
+// This is the STRONG fine level (overlap + optimized Robin transmission) that
+// drops Sys2 far below the block-Jacobi+ICC baseline; compose with the shared
+// Nicolaides coarse space (TwoLevelNicolaides) for a scalable two-level solver.
+static Mat ToSeqAIJ(SparseMatrix &S) {
+    S.Finalize();
+    const int n = S.Height(); const int *I = S.GetI(), *J = S.GetJ();
+    const double *A = S.GetData();
+    std::vector<PetscInt> nnz(n); for (int i=0;i<n;++i) nnz[i]=I[i+1]-I[i];
+    Mat M; MatCreateSeqAIJ(PETSC_COMM_SELF,n,n,0,nnz.data(),&M);
+    MatSetOption(M, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_FALSE);
+    std::vector<PetscInt> c; std::vector<PetscScalar> v;
+    for (int i=0;i<n;++i){ c.clear(); v.clear();
+        for (int k=I[i];k<I[i+1];++k){ c.push_back(J[k]); v.push_back(A[k]); }
+        PetscInt r=i,m=(PetscInt)c.size();
+        if (m) MatSetValues(M,1,&r,m,c.data(),v.data(),INSERT_VALUES); }
+    MatAssemblyBegin(M,MAT_FINAL_ASSEMBLY); MatAssemblyEnd(M,MAT_FINAL_ASSEMBLY);
+    return M;
+}
+struct SORASPrec : public Solver {
+    const Operator *P;        // T -> L prolongation
+    Vector dL;                // partition-of-unity weight per L-dof
+    mutable Vector rL, yL;    // work (L-space)
+    KSP kloc=nullptr; Vec rloc=nullptr, zloc=nullptr; // local Robin solve (COMM_SELF)
+    SORASPrec(int tsize):Solver(tsize){}
+    ~SORASPrec(){ if(kloc) KSPDestroy(&kloc); if(rloc) VecDestroy(&rloc); if(zloc) VecDestroy(&zloc); }
+    void SetOperator(const Operator&) override {}
+    void Mult(const Vector &r, Vector &z) const override {
+        P->Mult(r, rL);
+        for (int i=0;i<rL.Size();++i) rL(i) *= dL(i);
+        PetscScalar *ra; VecGetArray(rloc,&ra);
+        for (int i=0;i<rL.Size();++i) ra[i]=rL(i);
+        VecRestoreArray(rloc,&ra);
+        KSPSolve(kloc, rloc, zloc);
+        const PetscScalar *za; VecGetArrayRead(zloc,&za);
+        for (int i=0;i<yL.Size();++i) yL(i)=za[i];
+        VecRestoreArrayRead(zloc,&za);
+        for (int i=0;i<yL.Size();++i) yL(i) *= dL(i);
+        P->MultTranspose(yL, z);
+    }
+};
+
 // diag conductivity tensor as a MatrixConstantCoefficient (fibers || x)
 static DenseMatrix DiagSigma(double sL, double sT)
 {
@@ -144,11 +192,19 @@ int main(int argc, char *argv[])
                    "Cross-time accel for the Sys2 EP-loop solve: MFEM-CG (||b||-relative "
                    "tol) + Fischer A-orthonormal projection of the previous u_e history "
                    "as the initial guess.  Reports cold/warm/Fischer iteration counts.");
-    bool do_coarse = false;
+    bool do_coarse = false, do_soras = false;
+    double soras_alpha = 0.2;
     opts.AddOption(&do_coarse, "-coarse", "--coarse", "-nocoarse", "--no-coarse",
                    "Cross-SYSTEM accel: two-level CG with the shared Nicolaides coarse "
                    "space (one column per MPI subdomain; spans Sys2's singular nullspace "
                    "= slow global mode).  Reports baseline vs two-level Sys2 iterations.");
+    opts.AddOption(&do_soras, "-soras", "--soras", "-nosoras", "--no-soras",
+                   "Strong FINE level for Sys2: parallel SORAS (optimized Schwarz, "
+                   "local Neumann block + Robin transmission on shared faces).  Combine "
+                   "with -coarse for a two-level SORAS+coarse solver.  Reports baseline "
+                   "(bjacobi+ICC) vs SORAS(+coarse) Sys2 iterations.");
+    opts.AddOption(&soras_alpha, "-soras_alpha", "--soras-alpha",
+                   "Robin parameter alpha for the SORAS transmission term (optimal ~0.2).");
     opts.AddOption(&no_meanremove, "-no_meanremove", "--no-meanremove",
                    "-meanremove", "--meanremove",
                    "Skip the zero-mean projection on the Sys2 RHS (demo: breaks the anchor).");
@@ -327,26 +383,73 @@ int main(int argc, char *argv[])
     long fisch_cold=0, fisch_warm=0, fisch_fis=0;   // cumulative iteration tallies
     auto ip2 = [&](const Vector&x,const Vector&y){ return InnerProduct(MPI_COMM_WORLD,x,y); };
 
-    // ---- cross-system path: shared Nicolaides coarse space (-coarse) ---------
-    // Build a SECOND Sys2 solver whose PC is the two-level (bjacobi+ICC + shared
-    // coarse) operator; the baseline cg2 (bjacobi+ICC only) still produces the
-    // kept field, so the ECG is unchanged.  Both use the same ||b||-relative test.
-    PetscPreconditioner *finePC = nullptr;
+    // ---- accelerated Sys2 solver: strong fine level (SORAS) and/or shared -----
+    //      Nicolaides coarse space.  Build a SECOND Sys2 solver whose PC is
+    //      { bjacobi | SORAS } [ + coarse ]; the baseline cg2 (bjacobi+ICC) still
+    //      produces the KEPT field, so the ECG is unchanged.  Same ||b||-rel test.
+    PetscPreconditioner *finePC = nullptr;   // bjacobi fine (when no SORAS)
+    SORASPrec           *soras  = nullptr;   // SORAS fine
+    Mat                  KrobA  = nullptr;   // SORAS local Robin block (owns memory)
     TwoLevelNicolaides  *twolvl = nullptr;
+    Solver              *accPC  = nullptr;   // the composed preconditioner
     PetscPCGSolver      *cg2c   = nullptr;
     long coarse_base=0, coarse_two=0;
-    if (do_coarse) {
+    const bool do_acc = do_coarse || do_soras;
+    std::string acc_label;
+    if (do_acc) {
         KSPSetNormType((KSP)cg2, KSP_NORM_UNPRECONDITIONED);   // fair baseline test
-        finePC = new PetscPreconditioner(Kiep, "sys2fine_");
-        { PC pc=(PC)*finePC; PCSetType(pc, PCBJACOBI); }
-        twolvl = new TwoLevelNicolaides(*finePC, *Kie, MPI_COMM_WORLD,
-                                        Mpi::WorldSize(), rank, nloc);
+        Solver *fine = nullptr;
+        if (do_soras) {
+            // interface mass M_Gamma on the heart's SHARED faces (Robin term)
+            const int L = fes_h.GetVSize();
+            SparseMatrix MG(L, L); MassIntegrator mi; IsoparametricTransformation FTr;
+            const int nsf = heart.GetNSharedFaces();
+            for (int sf=0; sf<nsf; ++sf) {
+                int lf = heart.GetSharedFace(sf);
+                const FiniteElement *fe = fes_h.GetFaceElement(lf); if (!fe) continue;
+                heart.GetFaceTransformation(lf, &FTr);
+                DenseMatrix Me; mi.AssembleElementMatrix(*fe, FTr, Me);
+                Array<int> vd; fes_h.GetFaceVDofs(lf, vd);
+                if (vd.Size()==Me.Height()) MG.AddSubMatrix(vd, vd, Me);
+            }
+            MG.Finalize();
+            SparseMatrix Krob(kief.SpMat());  // local Neumann block (copy)
+            Krob.Add(soras_alpha, MG);        // + alpha M_Gamma  (Robin)
+            KrobA = ToSeqAIJ(Krob);
+            const Operator *Ph = fes_h.GetProlongationMatrix();
+            Vector onesL(L); onesL=1.0; Vector multT(nloc); Ph->MultTranspose(onesL,multT);
+            Vector multL(L); Ph->Mult(multT, multL);
+            soras = new SORASPrec(nloc);
+            soras->P = Ph; soras->dL.SetSize(L); for(int i=0;i<L;++i) soras->dL(i)=1.0/multL(i);
+            soras->rL.SetSize(L); soras->yL.SetSize(L);
+            KSPCreate(PETSC_COMM_SELF, &soras->kloc);
+            KSPSetOperators(soras->kloc, KrobA, KrobA);
+            KSPSetType(soras->kloc, KSPCG);                    // near-exact local solve
+            KSPSetTolerances(soras->kloc, 1e-10, 1e-14, PETSC_DEFAULT, 500);
+            KSPSetNormType(soras->kloc, KSP_NORM_UNPRECONDITIONED);
+            { PC pc; KSPGetPC(soras->kloc,&pc); PCSetType(pc,PCICC); }
+            KSPSetErrorIfNotConverged(soras->kloc, PETSC_FALSE);
+            MatCreateVecs(KrobA, &soras->rloc, &soras->zloc);
+            fine = soras;
+        } else {
+            finePC = new PetscPreconditioner(Kiep, "sys2fine_");
+            { PC pc=(PC)*finePC; PCSetType(pc, PCBJACOBI); }
+            fine = finePC;
+        }
+        if (do_coarse) {
+            twolvl = new TwoLevelNicolaides(*fine, *Kie, MPI_COMM_WORLD,
+                                            Mpi::WorldSize(), rank, nloc);
+            accPC = twolvl;
+        } else { accPC = fine; }
         cg2c = new PetscPCGSolver(Kiep, "sys2c_");
         cg2c->SetMaxIter(2000);
         KSPSetNormType((KSP)*cg2c, KSP_NORM_UNPRECONDITIONED);
-        cg2c->SetPreconditioner(*twolvl);      // wraps the mfem::Solver as a PCShell
-        if (rank==0) cout << "[COARSE] shared Nicolaides coarse space: nc="
-                          << Mpi::WorldSize() << " (one column per MPI subdomain)\n";
+        cg2c->SetPreconditioner(*accPC);       // wraps the mfem::Solver as a PCShell
+        acc_label = std::string(do_soras?"SORAS":"bjacobi")
+                  + (do_coarse?"+coarse":"");
+        if (rank==0) cout << "[ACC] Sys2 accelerated PC = " << acc_label
+                          << (do_soras?("  (alpha="+std::to_string(soras_alpha)+")"):"")
+                          << (do_coarse?("  nc="+std::to_string(Mpi::WorldSize())):"") << "\n";
     }
 
     // grid functions for the coupling (interface transfer `iface` built above)
@@ -572,13 +675,13 @@ int main(int argc, char *argv[])
                 if (!no_meanremove) RemoveGlobalMean(b2, MPI_COMM_WORLD);  // zero-mean anchor
                 int it2_cold=-1, it2_warm=-1, it2_fis=-1;
                 int it2_base=-1, it2_two=-1;
-                if (do_coarse) {
+                if (do_acc) {
                     // baseline (bjacobi+ICC) -- keep this solve as the field
                     double bn = std::sqrt(ip2(b2,b2));
                     cg2.SetRelTol(0.0); cg2.SetAbsTol(1e-8*bn);
                     KSPSetInitialGuessNonzero((KSP)cg2, PETSC_FALSE);
                     cg2.Mult(b2, ue_h); it2_base=cg2.GetNumIterations();
-                    // two-level (bjacobi+ICC + shared coarse) -- measure only
+                    // accelerated (SORAS and/or coarse) -- measure only
                     cg2c->SetRelTol(0.0); cg2c->SetAbsTol(1e-8*bn);
                     KSPSetInitialGuessNonzero((KSP)*cg2c, PETSC_FALSE);
                     Vector xtwo(nloc); xtwo=0.0; cg2c->Mult(b2, xtwo);
@@ -652,8 +755,8 @@ int main(int argc, char *argv[])
                 if (rank==0) {
                     cout << "[ITERS] t="<<(int)(t+dt+0.5)<<"ms  Sys1(CG+bj-ICC)="
                          <<cg1.GetNumIterations()<<"  Sys2(singular)=";
-                    if (do_coarse)
-                        cout << it2_two<<" (baseline="<<it2_base<<" two-level)";
+                    if (do_acc)
+                        cout << it2_two<<" (baseline="<<it2_base<<" "<<acc_label<<")";
                     else if (do_fischer)
                         cout << it2_fis<<" (cold="<<it2_cold<<" warm="<<it2_warm<<")";
                     else
@@ -688,15 +791,17 @@ int main(int argc, char *argv[])
     }
     if (fe) fclose(fe);
 
-    if (do_coarse && rank==0 && coarse_base>0) {
-        cout << "\n[COARSE] Sys2 EP-loop cross-system acceleration (total CG iters over the run):\n"
-             << "  baseline (bjacobi+ICC)      : " << coarse_base << "\n"
-             << "  two-level (+ shared coarse) : " << coarse_two
+    if (do_acc && rank==0 && coarse_base>0) {
+        cout << "\n[ACC] Sys2 EP-loop acceleration (total CG iters over the run):\n"
+             << "  baseline (bjacobi+ICC)   : " << coarse_base << "\n"
+             << "  " << acc_label << std::string(std::max(0,21-(int)acc_label.size()),' ')
+             << ": " << coarse_two
              << "  (-" << (int)(100.0*(coarse_base-coarse_two)/coarse_base) << "%, "
              << std::fixed << std::setprecision(2)
              << (double)coarse_base/coarse_two << "x)\n" << std::defaultfloat;
     }
-    delete cg2c; delete twolvl; delete finePC;
+    delete cg2c; delete twolvl; delete soras; delete finePC;
+    if (KrobA) MatDestroy(&KrobA);
 
     if (do_fischer && rank==0 && fisch_cold>0) {
         cout << "\n[FISCHER] Sys2 EP-loop cross-time acceleration (total CG iters over the run):\n"
