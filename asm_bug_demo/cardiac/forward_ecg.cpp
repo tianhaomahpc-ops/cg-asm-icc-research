@@ -629,7 +629,7 @@ int main(int argc, char *argv[])
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
     FILE *fe = (!do_precond && !do_prop && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
-    if (fe) fprintf(fe,"# t(ms)  ECG(mV, phi_L-phi_R)  Vm@center(mV)\n");
+    if (fe) fprintf(fe,"# t(ms)  ECG(phi_L-phi_R)  Vm@center  u_e@center  phi_torso@L\n");
 
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
@@ -781,12 +781,15 @@ int main(int argc, char *argv[])
             double pl = global_at(eL_d2, (eL>=0)?phit_td(eL):0.0);
             double pr = global_at(eR_d2, (eR>=0)?phit_td(eR):0.0);
             ecg = pl - pr;
-            // Vm at heart center (globally-nearest dof to origin)
+            // Vm and u_e at heart center (globally-nearest dof to origin)
             int ci=-1; double cbest=1e300;
             for(int p=0;p<nloc;++p){double d=tdof_x(p)*tdof_x(p)+tdof_y(p)*tdof_y(p)+tdof_z(p)*tdof_z(p);
                 if(d<cbest){cbest=d;ci=p;}}
-            double vc = global_at(cbest, (ci>=0)?Vm(ci):0.0);
-            if (fe) fprintf(fe,"%g %g %g\n", t+dt, ecg, vc);
+            double vc  = global_at(cbest, (ci>=0)?Vm(ci):0.0);
+            Vector ueh_c; ue_h.GetTrueDofs(ueh_c);
+            double uec = global_at(cbest, (ci>=0)?ueh_c(ci):0.0);   // u_e @ heart center
+            // t  ECG(phi_L-phi_R)  Vm@center  u_e@center  phi_torso@left-electrode
+            if (fe) fprintf(fe,"%g %g %g %g %g\n", t+dt, ecg, vc, uec, pl);
         }
     }
     if (fe) fclose(fe);
