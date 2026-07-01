@@ -70,7 +70,8 @@ int main(int argc, char *argv[])
     Mpi::Init(argc, argv); Hypre::Init();
     const int rank = Mpi::WorldRank(), nranks = Mpi::WorldSize();
     int nx = 16; double alpha = 0.2; const char *meshfile = nullptr;
-    bool aniso=false, bjacobi=false, localicc0=false, localLU=false; int localcheby=0;
+    bool aniso=false, bjacobi=false, localicc0=false, localLU=false;
+    int localcheby=0, sequence=0; double change=0.05;
     for (int i=1;i<argc;++i){ string a=argv[i];
         if (a=="-nx"&&i+1<argc) nx=atoi(argv[++i]);
         else if (a=="-alpha"&&i+1<argc) alpha=atof(argv[++i]);
@@ -79,7 +80,9 @@ int main(int argc, char *argv[])
         else if (a=="-bjacobi") bjacobi=true;      // baseline: block-Jacobi+ICC
         else if (a=="-localicc0") localicc0=true;
         else if (a=="-localLU") localLU=true;
-        else if (a=="-localcheby"&&i+1<argc) localcheby=atoi(argv[++i]); } // fixed-degree Cheby/ICC0
+        else if (a=="-localcheby"&&i+1<argc) localcheby=atoi(argv[++i]); // fixed-degree Cheby/ICC0
+        else if (a=="-sequence"&&i+1<argc) sequence=atoi(argv[++i]);
+        else if (a=="-change"&&i+1<argc) change=atof(argv[++i]); }
     PetscInitialize(&argc,&argv,NULL,NULL);
 
     Mesh smesh = meshfile ? Mesh(meshfile,1,1)
@@ -186,6 +189,36 @@ int main(int argc, char *argv[])
     cg.SetOperator(*Ah); cg.SetPreconditioner(prec);
     cg.SetRelTol(1e-6); cg.SetAbsTol(1e-12); cg.SetMaxIter(2000);
     cg.SetPrintLevel(0);
+
+    // ---- cross-time acceleration demo: slowly-varying RHS sequence ---------
+    // Sys2/Sys3 are re-solved every time step with a slowly-varying RHS (driven
+    // by Sys1's Vm(t)).  Compare cold start (x0=0) vs warm start (x0 = previous
+    // solution) -- the cheapest cross-time/cross-system acceleration.
+    if (sequence>0) {
+        Vector xstar(T), b(T), Xcold(T), Xwarm(T);
+        xstar.Randomize(1); if (rank==0 && ess_tdof.Size()) xstar(0)=0.0;
+        Xwarm = 0.0;
+        if (rank==0) printf("[SEQUENCE] slowly-varying RHS (5%%/step): cold vs warm-start\n");
+        int tc=0, tw=0;
+        for (int s=0; s<sequence; ++s) {
+            Vector d(T); d.Randomize(100+s); d *= change;   // small increment
+            xstar += d; if (rank==0 && ess_tdof.Size()) xstar(0)=0.0;
+            Ah->Mult(xstar, b);
+            // converge to a FIXED accuracy relative to ||b|| (not to r0), so a
+            // good initial guess actually saves iterations (physical criterion).
+            double bn2 = sqrt(InnerProduct(MPI_COMM_WORLD,b,b));
+            cg.SetRelTol(0.0); cg.SetAbsTol(1e-6*bn2);
+            Xcold = 0.0; cg.iterative_mode=false; cg.Mult(b, Xcold);
+            int cold=cg.GetNumIterations();
+            cg.iterative_mode=true;  cg.Mult(b, Xwarm);   // Xwarm keeps prev solution
+            int warm=cg.GetNumIterations();
+            tc+=cold; tw+=warm;
+            if (rank==0) printf("[SEQ] step=%2d  cold=%3d  warm=%3d\n", s, cold, warm);
+        }
+        if (rank==0) printf("[SEQ] TOTAL cold=%d  warm=%d  (warm-start saves %.0f%%)\n",
+                            tc, tw, 100.0*(tc-tw)/tc);
+        PetscFinalize(); return 0;
+    }
     cg.Mult(B, X);
     int its = cg.GetNumIterations(); int conv = cg.GetConverged();
     // true residual
