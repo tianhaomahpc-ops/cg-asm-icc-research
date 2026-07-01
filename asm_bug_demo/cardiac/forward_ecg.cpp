@@ -205,6 +205,10 @@ int main(int argc, char *argv[])
                    "(bjacobi+ICC) vs SORAS(+coarse) Sys2 iterations.");
     opts.AddOption(&soras_alpha, "-soras_alpha", "--soras-alpha",
                    "Robin parameter alpha for the SORAS transmission term (optimal ~0.2).");
+    int soras_local = -1;   // -1 = near-exact CG+ICC(1e-10); 0 = one ICC0 apply; K>0 = K Chebyshev
+    opts.AddOption(&soras_local, "-soras_local", "--soras-local",
+                   "SORAS local solve: -1 near-exact CG+ICC (strong, expensive/iter); "
+                   "0 one ICC0 apply (cheap); K>0 K-step Chebyshev over ICC0 (memory-flat).");
     opts.AddOption(&no_meanremove, "-no_meanremove", "--no-meanremove",
                    "-meanremove", "--meanremove",
                    "Skip the zero-mean projection on the Sys2 RHS (demo: breaks the anchor).");
@@ -424,10 +428,21 @@ int main(int argc, char *argv[])
             soras->rL.SetSize(L); soras->yL.SetSize(L);
             KSPCreate(PETSC_COMM_SELF, &soras->kloc);
             KSPSetOperators(soras->kloc, KrobA, KrobA);
-            KSPSetType(soras->kloc, KSPCG);                    // near-exact local solve
-            KSPSetTolerances(soras->kloc, 1e-10, 1e-14, PETSC_DEFAULT, 500);
-            KSPSetNormType(soras->kloc, KSP_NORM_UNPRECONDITIONED);
-            { PC pc; KSPGetPC(soras->kloc,&pc); PCSetType(pc,PCICC); }
+            if (soras_local < 0) {                             // near-exact (strong, dear)
+                KSPSetType(soras->kloc, KSPCG);
+                KSPSetTolerances(soras->kloc, 1e-10, 1e-14, PETSC_DEFAULT, 500);
+                KSPSetNormType(soras->kloc, KSP_NORM_UNPRECONDITIONED);
+                { PC pc; KSPGetPC(soras->kloc,&pc); PCSetType(pc,PCICC); }
+            } else if (soras_local == 0) {                     // one ICC0 apply (cheap)
+                KSPSetType(soras->kloc, KSPPREONLY);
+                { PC pc; KSPGetPC(soras->kloc,&pc); PCSetType(pc,PCICC); }
+            } else {                                           // K Chebyshev over ICC0
+                KSPSetType(soras->kloc, KSPCHEBYSHEV);
+                KSPSetTolerances(soras->kloc,PETSC_DEFAULT,PETSC_DEFAULT,PETSC_DEFAULT,soras_local);
+                KSPSetNormType(soras->kloc, KSP_NORM_NONE);
+                KSPChebyshevEstEigSet(soras->kloc, 0.0, 0.1, 0.0, 1.1);
+                { PC pc; KSPGetPC(soras->kloc,&pc); PCSetType(pc,PCICC); }
+            }
             KSPSetErrorIfNotConverged(soras->kloc, PETSC_FALSE);
             MatCreateVecs(KrobA, &soras->rloc, &soras->zloc);
             fine = soras;
@@ -626,6 +641,8 @@ int main(int argc, char *argv[])
             <<"  Sys1 r="<<r1<<"  Sys2 r="<<r2<<"  Sys3 r="<<r3<<"\n";
     }
 
+    // wall-clock accumulators for the Sys2 solve (baseline vs accelerated)
+    double t_base=0.0, t_acc=0.0;
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
     FILE *fe = (!do_precond && !do_prop && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
@@ -680,12 +697,16 @@ int main(int argc, char *argv[])
                     double bn = std::sqrt(ip2(b2,b2));
                     cg2.SetRelTol(0.0); cg2.SetAbsTol(1e-8*bn);
                     KSPSetInitialGuessNonzero((KSP)cg2, PETSC_FALSE);
+                    MPI_Barrier(MPI_COMM_WORLD); double w0=MPI_Wtime();
                     cg2.Mult(b2, ue_h); it2_base=cg2.GetNumIterations();
+                    MPI_Barrier(MPI_COMM_WORLD); t_base += MPI_Wtime()-w0;
                     // accelerated (SORAS and/or coarse) -- measure only
                     cg2c->SetRelTol(0.0); cg2c->SetAbsTol(1e-8*bn);
                     KSPSetInitialGuessNonzero((KSP)*cg2c, PETSC_FALSE);
-                    Vector xtwo(nloc); xtwo=0.0; cg2c->Mult(b2, xtwo);
-                    it2_two=cg2c->GetNumIterations();
+                    Vector xtwo(nloc); xtwo=0.0;
+                    MPI_Barrier(MPI_COMM_WORLD); double w1=MPI_Wtime();
+                    cg2c->Mult(b2, xtwo); it2_two=cg2c->GetNumIterations();
+                    MPI_Barrier(MPI_COMM_WORLD); t_acc += MPI_Wtime()-w1;
                     coarse_base+=it2_base; coarse_two+=it2_two;
                 } else if (do_fischer) {
                     // Fixed accuracy relative to ||b|| (so the guess quality shows in
@@ -795,13 +816,17 @@ int main(int argc, char *argv[])
     if (fe) fclose(fe);
 
     if (do_acc && rank==0 && coarse_base>0) {
-        cout << "\n[ACC] Sys2 EP-loop acceleration (total CG iters over the run):\n"
-             << "  baseline (bjacobi+ICC)   : " << coarse_base << "\n"
+        cout << "\n[ACC] Sys2 EP-loop acceleration (total over the run):\n"
+             << std::fixed << std::setprecision(3)
+             << "  baseline (bjacobi+ICC)   : iters=" << coarse_base
+             << "  time=" << t_base << "s  (" << 1e3*t_base/coarse_base << " ms/iter)\n"
              << "  " << acc_label << std::string(std::max(0,21-(int)acc_label.size()),' ')
-             << ": " << coarse_two
-             << "  (-" << (int)(100.0*(coarse_base-coarse_two)/coarse_base) << "%, "
-             << std::fixed << std::setprecision(2)
-             << (double)coarse_base/coarse_two << "x)\n" << std::defaultfloat;
+             << ": iters=" << coarse_two
+             << "  time=" << t_acc << "s  (" << 1e3*t_acc/coarse_two << " ms/iter)\n"
+             << std::setprecision(2)
+             << "  => iters " << (double)coarse_base/coarse_two << "x fewer,  wall-clock "
+             << t_base/t_acc << "x " << (t_acc<t_base?"faster":"SLOWER") << "\n"
+             << std::defaultfloat;
     }
     delete cg2c; delete twolvl; delete soras; delete finePC;
     if (KrobA) MatDestroy(&KrobA);
