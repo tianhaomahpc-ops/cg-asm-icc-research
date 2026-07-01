@@ -86,9 +86,13 @@ int main(int argc, char *argv[])
                    "Cap CG iterations for the propagation probe (the k-th iterate).");
     opts.AddOption(&prop_prefix, "-prop_prefix", "--prop-prefix",
                    "Output filename prefix for the propagation dumps.");
-    bool warmstart = false, no_meanremove = false;
+    bool warmstart = false, no_meanremove = false, do_fischer = false;
     opts.AddOption(&warmstart, "-warmstart", "--warmstart", "-cold", "--cold",
                    "Warm-start Sys2 from the previous time-step u_e (initial guess).");
+    opts.AddOption(&do_fischer, "-fischer", "--fischer", "-nofischer", "--no-fischer",
+                   "Cross-time accel for the Sys2 EP-loop solve: MFEM-CG (||b||-relative "
+                   "tol) + Fischer A-orthonormal projection of the previous u_e history "
+                   "as the initial guess.  Reports cold/warm/Fischer iteration counts.");
     opts.AddOption(&no_meanremove, "-no_meanremove", "--no-meanremove",
                    "-meanremove", "--meanremove",
                    "Skip the zero-mean projection on the Sys2 RHS (demo: breaks the anchor).");
@@ -245,6 +249,27 @@ int main(int argc, char *argv[])
     // guess (warm start).  Default cold (x0=0): each solve is independent.
     cg2.iterative_mode = warmstart;
     { PC pc; KSPGetPC((KSP)cg2, &pc); PCSetType(pc, PCBJACOBI); }
+
+    // ---- cross-time acceleration path for the Sys2 EP-loop solve (-fischer) --
+    // The EP loop re-solves Kie u_e = -Ki Vm(t) every sample step.  When u_e(t)
+    // varies smoothly the previous solutions are an excellent initial-guess basis.
+    // Two things must be right for the guess to actually pay off:
+    //   (1) the stopping test must measure the TRUE (unpreconditioned) residual
+    //       relative to ||b|| -- PETSc's default atol is on the *preconditioned*
+    //       residual, which masks how good the initial guess is;
+    //   (2) the initial guess must be enabled (KSPSetInitialGuessNonzero).
+    // cg2 is a PetscPCGSolver, which already handles the singular pure-Neumann
+    // operator robustly via MatSetNullSpace (the constant mode is projected out
+    // every iteration -- MFEM's CGSolver does not do this and diverges).  So we
+    // keep cg2 and just switch its norm type; Fischer generalises warm start from
+    // the last solution to an A-orthonormal span of the whole history.  (Scoped to
+    // -fischer so the default EP path keeps its original preconditioned-norm test.)
+    if (do_fischer) KSPSetNormType((KSP)cg2, KSP_NORM_UNPRECONDITIONED);
+    std::vector<Vector> fisch_P, fisch_AP;   // A-orthonormal history + A*history
+    Vector ue_prev(nloc); ue_prev = 0.0;     // previous cold u_e (warm-start seed)
+    const int FISCH_MAX = 16;
+    long fisch_cold=0, fisch_warm=0, fisch_fis=0;   // cumulative iteration tallies
+    auto ip2 = [&](const Vector&x,const Vector&y){ return InnerProduct(MPI_COMM_WORLD,x,y); };
 
     // grid functions for the coupling (interface transfer `iface` built above)
     ParGridFunction ue_h(&fes_h);   ue_h = 0.0;   // heart u_e
@@ -467,7 +492,54 @@ int main(int argc, char *argv[])
             {
                 Vector b2(nloc); Ki->Mult(Vm, b2); b2.Neg();
                 if (!no_meanremove) RemoveGlobalMean(b2, MPI_COMM_WORLD);  // zero-mean anchor
-                cg2.Mult(b2, ue_h);                   // u_e on heart
+                int it2_cold=-1, it2_warm=-1, it2_fis=-1;
+                if (do_fischer) {
+                    // Fixed accuracy relative to ||b|| (so the guess quality shows in
+                    // the iteration count).  The ACTUAL field used downstream is the
+                    // clean cold solve (x0=0), so the ECG is bit-identical to the
+                    // non-Fischer path; warm/Fischer are measured on throwaway vectors
+                    // -- an imperfect accelerated solve can never corrupt the physics
+                    // or poison the A-orthonormal history.
+                    double bn = std::sqrt(ip2(b2,b2));
+                    cg2.SetRelTol(0.0); cg2.SetAbsTol(1e-8*bn);
+                    // NOTE: cg2.iterative_mode does NOT propagate to the KSP after
+                    // construction (MFEM sets KSPSetInitialGuessNonzero only in the
+                    // ctor); we must toggle the initial-guess flag explicitly, else
+                    // the guess is silently ignored and warm==cold.
+                    // (a) cold (x0=0) -- THIS is the solution we keep
+                    KSPSetInitialGuessNonzero((KSP)cg2, PETSC_FALSE);
+                    cg2.Mult(b2, ue_h);
+                    it2_cold=cg2.GetNumIterations();
+                    // (b) warm start: previous cold u_e as the guess (measure only)
+                    KSPSetInitialGuessNonzero((KSP)cg2, PETSC_TRUE);
+                    Vector xwarm(ue_prev);
+                    cg2.Mult(b2, xwarm); it2_warm=cg2.GetNumIterations();
+                    // (c) Fischer: x0 = sum_i <p_i,b> p_i (A-orth projection; measure only)
+                    Vector xf(nloc); xf=0.0;
+                    for (size_t i=0;i<fisch_P.size();++i) xf.Add(ip2(fisch_P[i],b2), fisch_P[i]);
+                    cg2.Mult(b2, xf);
+                    it2_fis=cg2.GetNumIterations();
+                    KSPSetInitialGuessNonzero((KSP)cg2, PETSC_FALSE);
+                    // grow the history from the CLEAN cold solution (mean-zero copy)
+                    Vector w(ue_h); RemoveGlobalMean(w, MPI_COMM_WORLD);
+                    Vector Aw(nloc); Kie->Mult(w, Aw);
+                    for (size_t i=0;i<fisch_P.size();++i){
+                        double c=ip2(fisch_AP[i],w); w.Add(-c,fisch_P[i]); Aw.Add(-c,fisch_AP[i]); }
+                    double nrm=std::sqrt(ip2(w,Aw));
+                    if (nrm>1e-12){
+                        w*=1.0/nrm; Aw*=1.0/nrm;
+                        // SLIDING WINDOW: evict the oldest so the basis tracks the
+                        // current regime.  A frozen (append-only) basis fills with
+                        // early-QRS modes and is useless during the plateau -- the
+                        // recent history is the good predictor for a drifting u_e.
+                        if ((int)fisch_P.size()>=FISCH_MAX){
+                            fisch_P.erase(fisch_P.begin()); fisch_AP.erase(fisch_AP.begin()); }
+                        fisch_P.push_back(w); fisch_AP.push_back(Aw); }
+                    ue_prev = ue_h;                   // warm-start seed for next step
+                    fisch_cold+=it2_cold; fisch_warm+=it2_warm; fisch_fis+=it2_fis;
+                } else {
+                    cg2.Mult(b2, ue_h);               // u_e on heart (PETSc path)
+                }
                 double ue_mean = ue_h.Sum();
                 { double g; MPI_Allreduce(&ue_mean,&g,1,MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
                   ue_mean = g / ndof_h; }             // report the solution's mean
@@ -486,11 +558,17 @@ int main(int argc, char *argv[])
                 { PC pc; KSPGetPC((KSP)cg3,&pc); PCSetType(pc,PCBJACOBI); }
                 cg3.Mult(Bt, Xt);
                 ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
-                if (rank==0) cout << "[ITERS] t="<<(int)(t+dt+0.5)<<"ms  Sys1(CG+bj-ICC)="
-                    <<cg1.GetNumIterations()<<"  Sys2(singular)="<<cg2.GetNumIterations()
-                    <<"  Sys3(torso)="<<cg3.GetNumIterations()
-                    <<"  ue_mean="<<std::scientific<<std::setprecision(2)<<ue_mean
-                    <<std::defaultfloat<<"\n";
+                if (rank==0) {
+                    cout << "[ITERS] t="<<(int)(t+dt+0.5)<<"ms  Sys1(CG+bj-ICC)="
+                         <<cg1.GetNumIterations()<<"  Sys2(singular)=";
+                    if (do_fischer)
+                        cout << it2_fis<<" (cold="<<it2_cold<<" warm="<<it2_warm<<")";
+                    else
+                        cout << cg2.GetNumIterations();
+                    cout <<"  Sys3(torso)="<<cg3.GetNumIterations()
+                         <<"  ue_mean="<<std::scientific<<std::setprecision(2)<<ue_mean
+                         <<std::defaultfloat<<"\n";
+                }
             }
             // ECG = phi(left) - phi(right) at the globally-nearest body dof
             Vector phit_td; phi_t.GetTrueDofs(phit_td);
@@ -516,6 +594,15 @@ int main(int argc, char *argv[])
         }
     }
     if (fe) fclose(fe);
+
+    if (do_fischer && rank==0 && fisch_cold>0) {
+        cout << "\n[FISCHER] Sys2 EP-loop cross-time acceleration (total CG iters over the run):\n"
+             << "  cold (x0=0)          : " << fisch_cold << "\n"
+             << "  warm (prev u_e)      : " << fisch_warm
+             << "  (-" << (int)(100.0*(fisch_cold-fisch_warm)/fisch_cold) << "%)\n"
+             << "  Fischer (history)    : " << fisch_fis
+             << "  (-" << (int)(100.0*(fisch_cold-fisch_fis)/fisch_cold) << "%)\n";
+    }
 
     // ---- benchmark activation times + conduction velocity -----------------
     if (!do_precond) {
