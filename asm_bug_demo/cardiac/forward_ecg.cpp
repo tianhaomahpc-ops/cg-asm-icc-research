@@ -48,6 +48,57 @@ static const int TORSO_ATTR = 2;   // Gmsh Physical Volume("torso",2)
 static const int BODY_BDR   = 1;   // Gmsh Physical Surface("body",1)
 static const int IFACE_BDR  = 2;   // Gmsh Physical Surface("interface",2)
 
+// ---- shared Nicolaides coarse space (Sys1 -> Sys2 structural transfer) -------
+// Two-level ADDITIVE preconditioner  M^{-1} = M_fine^{-1} + R0 A0^{+} R0^T.
+// The coarse space R0 has ONE column per MPI subdomain: column k is the indicator
+// of rank k's true dofs (a partition of unity, sum_k R0 e_k = 1).  It therefore
+// spans the constants = the singular pure-Neumann nullspace of Kie = the slow
+// global mode (Task-1 result), and is IDENTICAL to the space Sys1 would build on
+// the SAME heart mesh -- so it is a genuine cross-system (Sys1->Sys2) transfer,
+// built once and reused.  A0 = R0^T Kie R0 is np x np, singular (A0 1 = 0);
+// we invert it on the mean-zero subspace (regularise the nullspace direction).
+class TwoLevelNicolaides : public Solver
+{
+    Solver &fine_;                 // fine level: bjacobi+ICC
+    const Operator &A_;            // Kie (HypreParMatrix as Operator)
+    MPI_Comm comm_; int np_, rk_;
+    DenseMatrix A0inv_;            // (A0 + 11^T/np)^{-1}, replicated
+    mutable Vector fz_;
+public:
+    TwoLevelNicolaides(Solver &fine, const Operator &A, MPI_Comm comm,
+                       int np, int rk, int nloc)
+        : Solver(nloc), fine_(fine), A_(A), comm_(comm), np_(np), rk_(rk), fz_(nloc)
+    {
+        // A0(:,k) = R0^T (A R0 e_k):  apply A to the indicator of rank k, then take
+        // per-rank sums.  np global matvecs, once.
+        DenseMatrix A0(np);
+        Vector vk(nloc), Av(nloc), col(np);
+        for (int k=0;k<np;++k){
+            vk = (rk==k) ? 1.0 : 0.0;          // local part of R0 e_k
+            A_.Mult(vk, Av);
+            double loc = Av.Sum();             // A0[rk][k] contribution
+            MPI_Allgather(&loc,1,MPI_DOUBLE, col.GetData(),1,MPI_DOUBLE, comm_);
+            for (int j=0;j<np;++j) A0(j,k)=col(j);
+        }
+        // regularise the constant nullspace direction so A0 is invertible; for a
+        // mean-zero rhs the mean-zero part of the solution equals A0^{+} rhs.
+        for (int i=0;i<np;++i) for (int j=0;j<np;++j) A0(i,j) += 1.0/np;
+        A0inv_ = A0; A0inv_.Invert();
+    }
+    void SetOperator(const Operator &) override {}
+    void Mult(const Vector &r, Vector &z) const override
+    {
+        fine_.Mult(r, fz_);                    // fine correction
+        // restriction c[k] = sum over rank k's dofs of r  (= rank k's local sum)
+        double loc = r.Sum(); Vector c(np_), y(np_);
+        MPI_Allgather(&loc,1,MPI_DOUBLE, c.GetData(),1,MPI_DOUBLE, comm_);
+        double cm=c.Sum()/np_; for(int k=0;k<np_;++k) c(k)-=cm;   // project out const
+        A0inv_.Mult(c, y);
+        double ym=y.Sum()/np_; for(int k=0;k<np_;++k) y(k)-=ym;
+        z = fz_; z += y(rk_);                  // prolong: add y[rk] to all local dofs
+    }
+};
+
 // diag conductivity tensor as a MatrixConstantCoefficient (fibers || x)
 static DenseMatrix DiagSigma(double sL, double sT)
 {
@@ -93,6 +144,11 @@ int main(int argc, char *argv[])
                    "Cross-time accel for the Sys2 EP-loop solve: MFEM-CG (||b||-relative "
                    "tol) + Fischer A-orthonormal projection of the previous u_e history "
                    "as the initial guess.  Reports cold/warm/Fischer iteration counts.");
+    bool do_coarse = false;
+    opts.AddOption(&do_coarse, "-coarse", "--coarse", "-nocoarse", "--no-coarse",
+                   "Cross-SYSTEM accel: two-level CG with the shared Nicolaides coarse "
+                   "space (one column per MPI subdomain; spans Sys2's singular nullspace "
+                   "= slow global mode).  Reports baseline vs two-level Sys2 iterations.");
     opts.AddOption(&no_meanremove, "-no_meanremove", "--no-meanremove",
                    "-meanremove", "--meanremove",
                    "Skip the zero-mean projection on the Sys2 RHS (demo: breaks the anchor).");
@@ -270,6 +326,28 @@ int main(int argc, char *argv[])
     const int FISCH_MAX = 16;
     long fisch_cold=0, fisch_warm=0, fisch_fis=0;   // cumulative iteration tallies
     auto ip2 = [&](const Vector&x,const Vector&y){ return InnerProduct(MPI_COMM_WORLD,x,y); };
+
+    // ---- cross-system path: shared Nicolaides coarse space (-coarse) ---------
+    // Build a SECOND Sys2 solver whose PC is the two-level (bjacobi+ICC + shared
+    // coarse) operator; the baseline cg2 (bjacobi+ICC only) still produces the
+    // kept field, so the ECG is unchanged.  Both use the same ||b||-relative test.
+    PetscPreconditioner *finePC = nullptr;
+    TwoLevelNicolaides  *twolvl = nullptr;
+    PetscPCGSolver      *cg2c   = nullptr;
+    long coarse_base=0, coarse_two=0;
+    if (do_coarse) {
+        KSPSetNormType((KSP)cg2, KSP_NORM_UNPRECONDITIONED);   // fair baseline test
+        finePC = new PetscPreconditioner(Kiep, "sys2fine_");
+        { PC pc=(PC)*finePC; PCSetType(pc, PCBJACOBI); }
+        twolvl = new TwoLevelNicolaides(*finePC, *Kie, MPI_COMM_WORLD,
+                                        Mpi::WorldSize(), rank, nloc);
+        cg2c = new PetscPCGSolver(Kiep, "sys2c_");
+        cg2c->SetMaxIter(2000);
+        KSPSetNormType((KSP)*cg2c, KSP_NORM_UNPRECONDITIONED);
+        cg2c->SetPreconditioner(*twolvl);      // wraps the mfem::Solver as a PCShell
+        if (rank==0) cout << "[COARSE] shared Nicolaides coarse space: nc="
+                          << Mpi::WorldSize() << " (one column per MPI subdomain)\n";
+    }
 
     // grid functions for the coupling (interface transfer `iface` built above)
     ParGridFunction ue_h(&fes_h);   ue_h = 0.0;   // heart u_e
@@ -493,7 +571,20 @@ int main(int argc, char *argv[])
                 Vector b2(nloc); Ki->Mult(Vm, b2); b2.Neg();
                 if (!no_meanremove) RemoveGlobalMean(b2, MPI_COMM_WORLD);  // zero-mean anchor
                 int it2_cold=-1, it2_warm=-1, it2_fis=-1;
-                if (do_fischer) {
+                int it2_base=-1, it2_two=-1;
+                if (do_coarse) {
+                    // baseline (bjacobi+ICC) -- keep this solve as the field
+                    double bn = std::sqrt(ip2(b2,b2));
+                    cg2.SetRelTol(0.0); cg2.SetAbsTol(1e-8*bn);
+                    KSPSetInitialGuessNonzero((KSP)cg2, PETSC_FALSE);
+                    cg2.Mult(b2, ue_h); it2_base=cg2.GetNumIterations();
+                    // two-level (bjacobi+ICC + shared coarse) -- measure only
+                    cg2c->SetRelTol(0.0); cg2c->SetAbsTol(1e-8*bn);
+                    KSPSetInitialGuessNonzero((KSP)*cg2c, PETSC_FALSE);
+                    Vector xtwo(nloc); xtwo=0.0; cg2c->Mult(b2, xtwo);
+                    it2_two=cg2c->GetNumIterations();
+                    coarse_base+=it2_base; coarse_two+=it2_two;
+                } else if (do_fischer) {
                     // Fixed accuracy relative to ||b|| (so the guess quality shows in
                     // the iteration count).  The ACTUAL field used downstream is the
                     // clean cold solve (x0=0), so the ECG is bit-identical to the
@@ -561,7 +652,9 @@ int main(int argc, char *argv[])
                 if (rank==0) {
                     cout << "[ITERS] t="<<(int)(t+dt+0.5)<<"ms  Sys1(CG+bj-ICC)="
                          <<cg1.GetNumIterations()<<"  Sys2(singular)=";
-                    if (do_fischer)
+                    if (do_coarse)
+                        cout << it2_two<<" (baseline="<<it2_base<<" two-level)";
+                    else if (do_fischer)
                         cout << it2_fis<<" (cold="<<it2_cold<<" warm="<<it2_warm<<")";
                     else
                         cout << cg2.GetNumIterations();
@@ -594,6 +687,16 @@ int main(int argc, char *argv[])
         }
     }
     if (fe) fclose(fe);
+
+    if (do_coarse && rank==0 && coarse_base>0) {
+        cout << "\n[COARSE] Sys2 EP-loop cross-system acceleration (total CG iters over the run):\n"
+             << "  baseline (bjacobi+ICC)      : " << coarse_base << "\n"
+             << "  two-level (+ shared coarse) : " << coarse_two
+             << "  (-" << (int)(100.0*(coarse_base-coarse_two)/coarse_base) << "%, "
+             << std::fixed << std::setprecision(2)
+             << (double)coarse_base/coarse_two << "x)\n" << std::defaultfloat;
+    }
+    delete cg2c; delete twolvl; delete finePC;
 
     if (do_fischer && rank==0 && fisch_cold>0) {
         cout << "\n[FISCHER] Sys2 EP-loop cross-time acceleration (total CG iters over the run):\n"
