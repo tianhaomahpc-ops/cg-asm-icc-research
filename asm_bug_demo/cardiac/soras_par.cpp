@@ -70,7 +70,7 @@ int main(int argc, char *argv[])
     Mpi::Init(argc, argv); Hypre::Init();
     const int rank = Mpi::WorldRank(), nranks = Mpi::WorldSize();
     int nx = 16; double alpha = 0.2; const char *meshfile = nullptr;
-    bool aniso=false, bjacobi=false, localicc0=false, localLU=false;
+    bool aniso=false, bjacobi=false, localicc0=false, localLU=false; int localcheby=0;
     for (int i=1;i<argc;++i){ string a=argv[i];
         if (a=="-nx"&&i+1<argc) nx=atoi(argv[++i]);
         else if (a=="-alpha"&&i+1<argc) alpha=atof(argv[++i]);
@@ -78,7 +78,8 @@ int main(int argc, char *argv[])
         else if (a=="-aniso") aniso=true;
         else if (a=="-bjacobi") bjacobi=true;      // baseline: block-Jacobi+ICC
         else if (a=="-localicc0") localicc0=true;
-        else if (a=="-localLU") localLU=true; }
+        else if (a=="-localLU") localLU=true;
+        else if (a=="-localcheby"&&i+1<argc) localcheby=atoi(argv[++i]); } // fixed-degree Cheby/ICC0
     PetscInitialize(&argc,&argv,NULL,NULL);
 
     Mesh smesh = meshfile ? Mesh(meshfile,1,1)
@@ -161,6 +162,12 @@ int main(int argc, char *argv[])
     KSPSetOperators(prec.kloc,Kp,Kp);
     if (localicc0) {          // inexact local solve: one ICC0 apply (preonly)
         KSPSetType(prec.kloc,KSPPREONLY);
+        PC pc; KSPGetPC(prec.kloc,&pc); PCSetType(pc,PCICC);
+    } else if (localcheby>0) {// fixed-degree Chebyshev over ICC0: memory-flat,
+        KSPSetType(prec.kloc,KSPCHEBYSHEV);          // parallel SpMV, fixed SPD op
+        KSPSetTolerances(prec.kloc,PETSC_DEFAULT,PETSC_DEFAULT,PETSC_DEFAULT,localcheby);
+        KSPSetNormType(prec.kloc,KSP_NORM_NONE);
+        KSPChebyshevEstEigSet(prec.kloc,0.0,0.1,0.0,1.1);
         PC pc; KSPGetPC(prec.kloc,&pc); PCSetType(pc,PCICC);
     } else if (localLU) {     // near-EXACT via direct factor: factor once, cheap apply
         KSPSetType(prec.kloc,KSPPREONLY);
