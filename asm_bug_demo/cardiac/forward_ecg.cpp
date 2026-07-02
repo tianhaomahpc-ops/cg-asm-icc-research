@@ -552,8 +552,9 @@ int main(int argc, char *argv[])
             cout << "\n[PRECOND] CG iters to rtol=1e-8, sub_pc=ICC(0), " << nsub_eff
                  << (Mpi::WorldSize()==1 ? " contiguous-block subdomains (serial)\n"
                                          : " METIS geometric subdomains (1/rank)\n");
-            cout << "  system                                    O   ASM(BASIC)  sASM\n";
+            cout << "  system                                    O  ASM_it  sASM_it   ASM_ms  sASM_ms\n";
         }
+        const int NREP = 20;   // repeat each solve for a stable wall-clock average
         for (int q=0;q<3;++q){
             Mat A = S3[q].A;
             Vec xstar, b, x; MatCreateVecs(A, &xstar, &b); VecDuplicate(xstar, &x);
@@ -568,14 +569,24 @@ int main(int argc, char *argv[])
             for (PetscInt O=0;O<=2;++O){
                 int ia = CountIters(A, b, x, false, O, 0, 1e-8, NSUB);
                 int is = CountIters(A, b, x, true,  O, 0, 1e-8, NSUB);
+                // wall-clock: full CountIters (KSP+PCASM setup + solve), averaged
+                MPI_Barrier(MPI_COMM_WORLD); double wa=MPI_Wtime();
+                for (int r=0;r<NREP;++r) CountIters(A, b, x, false, O, 0, 1e-8, NSUB);
+                MPI_Barrier(MPI_COMM_WORLD); double ta=1e3*(MPI_Wtime()-wa)/NREP;
+                MPI_Barrier(MPI_COMM_WORLD); double ws=MPI_Wtime();
+                for (int r=0;r<NREP;++r) CountIters(A, b, x, true,  O, 0, 1e-8, NSUB);
+                MPI_Barrier(MPI_COMM_WORLD); double ts=1e3*(MPI_Wtime()-ws)/NREP;
                 if (rank==0)
                     cout << "  " << std::left << std::setw(40) << (O==0?S3[q].name:"")
-                         << " " << O << "   " << std::right << std::setw(8) << ia
-                         << "   " << std::setw(6) << is << "\n";
+                         << " " << O << " " << std::right << std::setw(6) << ia
+                         << "  " << std::setw(6) << is
+                         << "  " << std::setw(7) << std::fixed << std::setprecision(2) << ta
+                         << "  " << std::setw(7) << ts << std::defaultfloat << "\n";
             }
             VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
         }
-        if (rank==0) cout << "[PRECOND] (negative = DIVERGED)\n";
+        if (rank==0) cout << "[PRECOND] iters to rtol=1e-8; ms = avg wall-clock over "
+                          << NREP << " (KSP+PCASM setup + solve); negative iters = DIVERGED\n";
     }
 
     // ====================================================================
