@@ -62,31 +62,22 @@ System & Equation & Algebraic type & baseline iters \\
 \end{itemize}
 \end{frame}
 
-\begin{frame}{Mesh: conforming unstructured tetrahedra (heart-in-torso)}
-\begin{columns}[T]
-\begin{column}{0.54\textwidth}
-\textbf{Geometry}: a heart slab $20\times7\times3$ mm centered inside a $50^3$ mm torso; the interface is \textbf{conforming} (Gmsh \texttt{BooleanFragments}, sharing the same interface nodes).\\[0.4em]
-\textbf{Discretization}: continuous P1 Galerkin (MFEM 4.9), anisotropic $\sigma$ (fibers $\parallel x$), units mm/ms/mV/mS$\cdot$mm$^{-1}$.
-\begin{table}\small
-\begin{tabular}{@{}lrrr@{}}
-\toprule
-mesh & nodes (dof) & tets & bdr tris \\
-\midrule
-heart & $10\,085$ & $47\,582$ & $9\,510$ \\
-torso & $36\,229$ & $206\,647$ & $12\,112$ \\
-\midrule
-\multicolumn{4}{@{}l}{interface shared dofs: $4\,757$ (coord-matched, partition-independent)}\\
-\bottomrule
-\end{tabular}
-\end{table}
-\end{column}
-\begin{column}{0.44\textwidth}
-\IfFileExists{fig_mesh.png}{\includegraphics[width=\linewidth]{fig_mesh.png}}%
-{\centering\vspace{2em}\fbox{\parbox{0.9\linewidth}{\centering \texttt{fig\_mesh.png}\\(heart slab in torso, $y{\sim}0$ slice)}}\vspace{2em}}
-\end{column}
-\end{columns}
+\begin{frame}{Geometry: conforming heart-in-torso domains}
+\centerline{\IfFileExists{fig_geom.png}{\includegraphics[width=0.82\linewidth]{fig_geom.png}}%
+{\fbox{\parbox{0.7\linewidth}{\centering \texttt{fig\_geom.png} --- run \texttt{python3 plot\_geom\_mesh.py}}}}}
 \vspace{0.3em}
-\footnotesize Subdomains $=$ MPI ranks (METIS geometric partition); $n_p{=}$ \#ranks $=$ \#subdomains.
+{\footnotesize Heart slab $20\times7\times3$ mm centered in a $50^3$ mm torso; \textbf{conforming} interface (Gmsh \texttt{BooleanFragments} $\Rightarrow$ shared interface surface). Anisotropic $\sigma$, fibers $\parallel x$; electrodes L,R at $x=\pm25$; subdomains $=$ MPI ranks (METIS).\par}
+\end{frame}
+
+\begin{frame}{Mesh: unstructured P1 tetrahedra (real connectivity)}
+\centerline{\IfFileExists{fig_meshview.png}{\includegraphics[width=0.80\linewidth]{fig_meshview.png}}%
+{\fbox{\parbox{0.7\linewidth}{\centering \texttt{fig\_meshview.png} --- run \texttt{python3 plot\_geom\_mesh.py}}}}}
+\vspace{0.3em}
+\centerline{\scriptsize
+\begin{tabular}{@{}lrrr@{\hskip 1.5em}l@{}}
+heart & $10\,085$ nodes & $47\,582$ tets & $9\,510$ tris & \multirow{2}{*}{interface shared dofs: $4\,757$;\ \ $y{=}0$ slice: heart $\sim$0.5 mm, torso $\sim$3 mm} \\
+torso & $36\,229$ nodes & $206\,647$ tets & $12\,112$ tris & \\
+\end{tabular}}
 \end{frame}
 
 \begin{frame}{Method: ASM(BASIC) vs.\ sASM(scaled / restricted)}
