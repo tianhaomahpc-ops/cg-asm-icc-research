@@ -244,45 +244,43 @@ Adding overlap to one-level \textbf{ASM(BASIC)} \emph{raises} iterations and slo
 \textbf{Conclusion}: on real-geometry FEM, \textbf{scaled/restricted ASM is the correct way to use overlapping DD}; BASIC overlap is harmful here. More subdomains ($n_p{:}4{\to}8$) $\Rightarrow$ stronger anomaly, underscoring that \emph{scalability} needs the correct weighting (and, later, a coarse space).
 \end{frame}
 
-\begin{frame}{sASM parameter sweep: ICC level $L$ $\times$ overlap $O$ ($n_p{=}8$)}
-Cells $=$ CG iterations (rtol $10^{-8}$); \textbf{\textcolor{good}{green}} $=$ optimum by \emph{solve-only} time; \colorbox{yellow!35}{yellow} $=$ fewest iterations.
-\vspace{0.3em}
+\begin{frame}{sASM sweep for minimum \emph{compute time}: $L$ (ICC) $\times$ $O$ (overlap), $n_p{=}8$}
+Cells $=$ \textbf{solve-only ms} (min of 3 runs; setup amortized over the EP loop); \textbf{\textcolor{good}{green}} $=$ time optimum; \colorbox{yellow!35}{yellow} $=$ fewest iterations (slower).
+\vspace{0.2em}
 \begin{columns}[T]
 \begin{column}{0.5\textwidth}\centering
-\textbf{Sys2 $u_e$ (singular)}\\[0.2em]
+\textbf{Sys2 $u_e$ (singular)} \quad{\scriptsize ms\,(iters)}\\[0.2em]
 \scriptsize
 \begin{tabular}{@{}c|ccc@{}}
 \toprule
 $L\backslash O$ & $O{=}0$ & $O{=}1$ & $O{=}2$ \\
 \midrule
-$L{=}0$ & 79 & 73 & 71 \\
-$L{=}1$ & 62 & \textbf{\textcolor{good}{47}} & 46 \\
-$L{=}2$ & 55 & 38 & \colorbox{yellow!35}{35} \\
+$L{=}0$ & 13.2\,(79) & 16.6\,(73) & 22.5\,(71) \\
+$L{=}1$ & 14.7\,(62) & \textbf{\textcolor{good}{12.5\,(47)}} & 15.5\,(46) \\
+$L{=}2$ & 15.3\,(55) & 14.0\,(38) & \colorbox{yellow!35}{18.0\,(35)} \\
 \bottomrule
-\end{tabular}\\[0.2em]
-{\scriptsize opt: $L{=}1,O{=}1$ --- 47 it, 13.5 ms}
+\end{tabular}
 \end{column}
 \begin{column}{0.5\textwidth}\centering
-\textbf{Sys3 $\varphi$ (torso)}\\[0.2em]
+\textbf{Sys3 $\varphi$ (torso)} \quad{\scriptsize ms\,(iters)}\\[0.2em]
 \scriptsize
 \begin{tabular}{@{}c|ccc@{}}
 \toprule
 $L\backslash O$ & $O{=}0$ & $O{=}1$ & $O{=}2$ \\
 \midrule
-$L{=}0$ & 66 & 55 & 53 \\
-$L{=}1$ & 50 & \textbf{\textcolor{good}{36}} & 37 \\
-$L{=}2$ & 46 & \colorbox{yellow!35}{30} & 30 \\
+$L{=}0$ & 36.0\,(66) & 38.8\,(55) & 40.8\,(53) \\
+$L{=}1$ & 38.0\,(50) & \textbf{\textcolor{good}{30.7\,(36)}} & 43.3\,(37) \\
+$L{=}2$ & 47.5\,(46) & 39.9\,(30) & \colorbox{yellow!35}{49.0\,(30)} \\
 \bottomrule
-\end{tabular}\\[0.2em]
-{\scriptsize opt: $L{=}1,O{=}1$ --- 36 it, 39.3 ms}
+\end{tabular}
 \end{column}
 \end{columns}
-\vspace{0.4em}
-\begin{block}{Optimum (measured $n_p{=}4$ and $8$): \ $L{=}1,\ O{=}1$ for the elliptic systems}
+\vspace{0.3em}
+\begin{block}{Time-optimal configuration (robust across $n_p{=}4$ and $8$): \ $\boxed{L{=}1,\ O{=}1}$}
 \footnotesize
 \begin{itemize}\itemsep1pt
-\item \textbf{Overlap: $O{=}1$ is best.} $O{=}0$ is worst (no transport); $O{=}1$ gives the big drop; $O{=}2$ shaves only a few more iterations but costs more setup$+$apply $\Rightarrow$ solve-time usually \emph{rises} $O{=}1{\to}2$.
-\item \textbf{ICC level: $L{=}1$ is the sweet spot.} $L{=}0{\to}1$ roughly halves iterations cheaply; $L{=}2$ gives the \emph{fewest} iterations but the denser factor makes each apply$+$setup dearer $\Rightarrow$ time rarely improves. (Sys1, mass-dominated: $L{=}0,O{=}1$.)
+\item \textbf{$O{=}1$} beats $O{=}0$ (no transport, many iters) and $O{=}2$ (a few fewer iters, but more overlap $\Rightarrow$ dearer apply $\Rightarrow$ time \emph{rises}). \textbf{$L{=}1$} beats $L{=}0$ (halves iters cheaply) and $L{=}2$ (fewest iters, but denser ICC factor is dearer per apply).
+\item Fewest \emph{iterations} $=$ $L{=}2,O{=}2$ (35 / 30) --- but $\sim$40\% slower than $L{=}1,O{=}1$. \textbf{Time optimum $\ne$ iteration optimum.} Sys1 (mass-dominated): $L{=}0,O{=}1$.
 \end{itemize}
 \end{block}
 \end{frame}
