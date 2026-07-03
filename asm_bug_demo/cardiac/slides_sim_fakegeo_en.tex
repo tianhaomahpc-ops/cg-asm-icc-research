@@ -244,6 +244,49 @@ Adding overlap to one-level \textbf{ASM(BASIC)} \emph{raises} iterations and slo
 \textbf{Conclusion}: on real-geometry FEM, \textbf{scaled/restricted ASM is the correct way to use overlapping DD}; BASIC overlap is harmful here. More subdomains ($n_p{:}4{\to}8$) $\Rightarrow$ stronger anomaly, underscoring that \emph{scalability} needs the correct weighting (and, later, a coarse space).
 \end{frame}
 
+\begin{frame}{sASM parameter sweep: ICC level $L$ $\times$ overlap $O$ ($n_p{=}8$)}
+Cells $=$ CG iterations (rtol $10^{-8}$); \textbf{\textcolor{good}{green}} $=$ optimum by \emph{solve-only} time; \colorbox{yellow!35}{yellow} $=$ fewest iterations.
+\vspace{0.3em}
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}\centering
+\textbf{Sys2 $u_e$ (singular)}\\[0.2em]
+\scriptsize
+\begin{tabular}{@{}c|ccc@{}}
+\toprule
+$L\backslash O$ & $O{=}0$ & $O{=}1$ & $O{=}2$ \\
+\midrule
+$L{=}0$ & 79 & 73 & 71 \\
+$L{=}1$ & 62 & \textbf{\textcolor{good}{47}} & 46 \\
+$L{=}2$ & 55 & 38 & \colorbox{yellow!35}{35} \\
+\bottomrule
+\end{tabular}\\[0.2em]
+{\scriptsize opt: $L{=}1,O{=}1$ --- 47 it, 13.5 ms}
+\end{column}
+\begin{column}{0.5\textwidth}\centering
+\textbf{Sys3 $\varphi$ (torso)}\\[0.2em]
+\scriptsize
+\begin{tabular}{@{}c|ccc@{}}
+\toprule
+$L\backslash O$ & $O{=}0$ & $O{=}1$ & $O{=}2$ \\
+\midrule
+$L{=}0$ & 66 & 55 & 53 \\
+$L{=}1$ & 50 & \textbf{\textcolor{good}{36}} & 37 \\
+$L{=}2$ & 46 & \colorbox{yellow!35}{30} & 30 \\
+\bottomrule
+\end{tabular}\\[0.2em]
+{\scriptsize opt: $L{=}1,O{=}1$ --- 36 it, 39.3 ms}
+\end{column}
+\end{columns}
+\vspace{0.4em}
+\begin{block}{Optimum (measured $n_p{=}4$ and $8$): \ $L{=}1,\ O{=}1$ for the elliptic systems}
+\footnotesize
+\begin{itemize}\itemsep1pt
+\item \textbf{Overlap: $O{=}1$ is best.} $O{=}0$ is worst (no transport); $O{=}1$ gives the big drop; $O{=}2$ shaves only a few more iterations but costs more setup$+$apply $\Rightarrow$ solve-time usually \emph{rises} $O{=}1{\to}2$.
+\item \textbf{ICC level: $L{=}1$ is the sweet spot.} $L{=}0{\to}1$ roughly halves iterations cheaply; $L{=}2$ gives the \emph{fewest} iterations but the denser factor makes each apply$+$setup dearer $\Rightarrow$ time rarely improves. (Sys1, mass-dominated: $L{=}0,O{=}1$.)
+\end{itemize}
+\end{block}
+\end{frame}
+
 \begin{frame}{Summary and outlook}
 \begin{itemize}
 \item \textbf{Problem}: coupled forward ECG on three systems; Sys2 (singular pure-Neumann elliptic) is the only hard one and the target of the preconditioning study.
