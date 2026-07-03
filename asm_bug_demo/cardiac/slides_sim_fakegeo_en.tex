@@ -244,43 +244,59 @@ Adding overlap to one-level \textbf{ASM(BASIC)} \emph{raises} iterations and slo
 \textbf{Conclusion}: on real-geometry FEM, \textbf{scaled/restricted ASM is the correct way to use overlapping DD}; BASIC overlap is harmful here. More subdomains ($n_p{:}4{\to}8$) $\Rightarrow$ stronger anomaly, underscoring that \emph{scalability} needs the correct weighting (and, later, a coarse space).
 \end{frame}
 
-\begin{frame}{sASM sweep for minimum \emph{compute time}: $L$ (ICC) $\times$ $O$ (overlap), $n_p{=}8$}
-Cells $=$ \textbf{solve-only ms} (min of 3 runs; setup amortized over the EP loop); \textbf{\textcolor{good}{green}} $=$ time optimum; \colorbox{yellow!35}{yellow} $=$ fewest iterations (slower).
+\begin{frame}{sASM sweep for minimum \emph{compute time}: all 3 systems, $n_p{=}8$}
+Cells $=$ \textbf{solve-only ms\,(iters)}, min of 3 runs (setup amortized over the EP loop); \textbf{\textcolor{good}{green}} $=$ per-system time optimum.
 \vspace{0.2em}
 \begin{columns}[T]
-\begin{column}{0.5\textwidth}\centering
-\textbf{Sys2 $u_e$ (singular)} \quad{\scriptsize ms\,(iters)}\\[0.2em]
-\scriptsize
+\begin{column}{0.32\textwidth}\centering
+\textbf{Sys1 $V_m$}\\{\tiny mass-dominated}\\[0.2em]
+\tiny
 \begin{tabular}{@{}c|ccc@{}}
 \toprule
-$L\backslash O$ & $O{=}0$ & $O{=}1$ & $O{=}2$ \\
+$L\backslash O$ & $0$ & $1$ & $2$ \\
 \midrule
-$L{=}0$ & 13.2\,(79) & 16.6\,(73) & 22.5\,(71) \\
-$L{=}1$ & 14.7\,(62) & \textbf{\textcolor{good}{12.5\,(47)}} & 15.5\,(46) \\
-$L{=}2$ & 15.3\,(55) & 14.0\,(38) & \colorbox{yellow!35}{18.0\,(35)} \\
+$0$ & 2.2\,(13) & \textbf{\textcolor{good}{1.8\,(8)}} & 2.0\,(8) \\
+$1$ & 2.6\,(12) & 2.2\,(8) & 2.5\,(8) \\
+$2$ & 3.1\,(12) & 3.0\,(8) & 3.4\,(8) \\
 \bottomrule
-\end{tabular}
+\end{tabular}\\[0.15em]
+{\tiny opt: $L{=}0,O{=}1$}
 \end{column}
-\begin{column}{0.5\textwidth}\centering
-\textbf{Sys3 $\varphi$ (torso)} \quad{\scriptsize ms\,(iters)}\\[0.2em]
-\scriptsize
+\begin{column}{0.34\textwidth}\centering
+\textbf{Sys2 $u_e$ (singular)}\\{\tiny elliptic, global}\\[0.2em]
+\tiny
 \begin{tabular}{@{}c|ccc@{}}
 \toprule
-$L\backslash O$ & $O{=}0$ & $O{=}1$ & $O{=}2$ \\
+$L\backslash O$ & $0$ & $1$ & $2$ \\
 \midrule
-$L{=}0$ & 36.0\,(66) & 38.8\,(55) & 40.8\,(53) \\
-$L{=}1$ & 38.0\,(50) & \textbf{\textcolor{good}{30.7\,(36)}} & 43.3\,(37) \\
-$L{=}2$ & 47.5\,(46) & 39.9\,(30) & \colorbox{yellow!35}{49.0\,(30)} \\
+$0$ & 13.2\,(79) & 16.6\,(73) & 22.5\,(71) \\
+$1$ & 14.7\,(62) & \textbf{\textcolor{good}{12.5\,(47)}} & 15.5\,(46) \\
+$2$ & 15.3\,(55) & 14.0\,(38) & 18.0\,(35) \\
 \bottomrule
-\end{tabular}
+\end{tabular}\\[0.15em]
+{\tiny opt: $L{=}1,O{=}1$}
+\end{column}
+\begin{column}{0.32\textwidth}\centering
+\textbf{Sys3 $\varphi$ (torso)}\\{\tiny elliptic, global}\\[0.2em]
+\tiny
+\begin{tabular}{@{}c|ccc@{}}
+\toprule
+$L\backslash O$ & $0$ & $1$ & $2$ \\
+\midrule
+$0$ & 36.0\,(66) & 38.8\,(55) & 40.8\,(53) \\
+$1$ & 38.0\,(50) & \textbf{\textcolor{good}{30.7\,(36)}} & 43.3\,(37) \\
+$2$ & 47.5\,(46) & 39.9\,(30) & 49.0\,(30) \\
+\bottomrule
+\end{tabular}\\[0.15em]
+{\tiny opt: $L{=}1,O{=}1$}
 \end{column}
 \end{columns}
 \vspace{0.3em}
-\begin{block}{Time-optimal configuration (robust across $n_p{=}4$ and $8$): \ $\boxed{L{=}1,\ O{=}1}$}
+\begin{block}{Time-optimal configuration (robust across $n_p{=}4$ and $8$)}
 \footnotesize
 \begin{itemize}\itemsep1pt
-\item \textbf{$O{=}1$} beats $O{=}0$ (no transport, many iters) and $O{=}2$ (a few fewer iters, but more overlap $\Rightarrow$ dearer apply $\Rightarrow$ time \emph{rises}). \textbf{$L{=}1$} beats $L{=}0$ (halves iters cheaply) and $L{=}2$ (fewest iters, but denser ICC factor is dearer per apply).
-\item Fewest \emph{iterations} $=$ $L{=}2,O{=}2$ (35 / 30) --- but $\sim$40\% slower than $L{=}1,O{=}1$. \textbf{Time optimum $\ne$ iteration optimum.} Sys1 (mass-dominated): $L{=}0,O{=}1$.
+\item \textbf{Elliptic systems (Sys2, Sys3): $\boxed{L{=}1,\ O{=}1}$.} $O{=}1$ beats $O{=}0$ (no transport) and $O{=}2$ (fewer iters but dearer apply). $L{=}1$ beats $L{=}0$ (halves iters cheaply) and $L{=}2$ (fewest iters but denser factor is dearer). \emph{Time optimum $\ne$ iteration optimum} ($L{=}2,O{=}2$ has the fewest iters yet is $\sim$40\% slower).
+\item \textbf{Sys1 (mass-dominated): $\boxed{L{=}0,\ O{=}1}$.} It is trivially conditioned (8 iters at $O{=}1$); ICC(0) is already ideal, so \emph{any} extra fill ($L{\ge}1$) only adds cost.
 \end{itemize}
 \end{block}
 \end{frame}
