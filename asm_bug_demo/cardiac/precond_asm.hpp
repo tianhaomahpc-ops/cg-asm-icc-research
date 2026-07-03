@@ -161,4 +161,27 @@ static inline int CountIters(Mat A, Vec b, Vec x, bool sasm,
     return (int)its;
 }
 
+// ---- SOLVE-ONLY wall-clock (setup excluded) --------------------------------
+// Build the ASM/sASM solver once, KSPSetUp (all setup: subdomains, ICC factors),
+// one warm KSPSolve, then time `nrep` KSPSolve calls with a fresh x0=0 each time.
+// Returns average ms of KSPSolve alone (no KSP/PCASM setup in the timed region).
+static inline double SolveOnlyMs(Mat A, Vec b, Vec x, bool sasm, PetscInt overlap,
+                                 PetscInt icc_levels, double rtol, PetscInt nsub, int nrep)
+{
+    MPI_Comm comm = PetscObjectComm((PetscObject)A);
+    KSP ksp = nullptr; KSPCreate(comm, &ksp);
+    KSPSetType(ksp, KSPCG); KSPSetNormType(ksp, KSP_NORM_PRECONDITIONED);
+    KSPSetOperators(ksp, A, A);
+    KSPSetTolerances(ksp, rtol, 1e-50, PETSC_DEFAULT, 2000);
+    if (sasm) InstallScaledASM(ksp, A, overlap, icc_levels, nsub);
+    else      SetupASM       (ksp, A, overlap, icc_levels, nsub);
+    VecSet(x, 0.0); KSPSetUp(ksp);          // force ALL setup now (excluded from timing)
+    KSPSolve(ksp, b, x);                     // warm solve (touch factors/caches)
+    MPI_Barrier(comm); double t0 = MPI_Wtime();
+    for (int r=0;r<nrep;++r){ VecSet(x,0.0); KSPSolve(ksp, b, x); }
+    MPI_Barrier(comm); double ms = 1e3*(MPI_Wtime()-t0)/nrep;
+    KSPDestroy(&ksp);
+    return ms;
+}
+
 #endif // PRECOND_ASM_HPP
