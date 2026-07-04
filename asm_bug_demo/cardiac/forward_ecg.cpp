@@ -129,6 +129,7 @@ struct SORASPrec : public Solver {
     Vector dL;                // partition-of-unity weight per L-dof
     mutable Vector rL, yL;    // work (L-space)
     KSP kloc=nullptr; Vec rloc=nullptr, zloc=nullptr; // local Robin solve (COMM_SELF)
+    mutable long inner_iters=0, n_applies=0;  // accumulate local-solve iterations
     SORASPrec(int tsize):Solver(tsize){}
     ~SORASPrec(){ if(kloc) KSPDestroy(&kloc); if(rloc) VecDestroy(&rloc); if(zloc) VecDestroy(&zloc); }
     void SetOperator(const Operator&) override {}
@@ -139,6 +140,7 @@ struct SORASPrec : public Solver {
         for (int i=0;i<rL.Size();++i) ra[i]=rL(i);
         VecRestoreArray(rloc,&ra);
         KSPSolve(kloc, rloc, zloc);
+        { PetscInt ni; KSPGetIterationNumber(kloc,&ni); inner_iters+=ni; n_applies++; }
         const PetscScalar *za; VecGetArrayRead(zloc,&za);
         for (int i=0;i<yL.Size();++i) yL(i)=za[i];
         VecRestoreArrayRead(zloc,&za);
@@ -170,10 +172,13 @@ static DenseMatrix DiagSigma(double sL, double sT)
 //               level, m x cost); 0 = ONE ICC0 apply ("direct ICC", fixed linear
 //               operator, ~sASM cost); K>0 = K Chebyshev steps over ICC0.
 //   * bext    : the SHARED outer RHS (so sASM and SORAS solve the identical system).
+//   * avg_inner (out): average local-solve iterations m per apply (compute driver);
+//   * solve_ms  (out): solve-only wall-clock (ms, avg over NREP warm re-solves).
 static int SorasPUIters(ParFiniteElementSpace &fes, ParMesh &pmesh,
                         ParBilinearForm &locform, PetscParMatrix &Aout,
                         double alpha, int pu_mode, int loc_mode, bool singular,
-                        const Array<int> &ess_ld, Vec bext)
+                        const Array<int> &ess_ld, Vec bext,
+                        double *avg_inner=nullptr, double *solve_ms=nullptr)
 {
     const int L = fes.GetVSize();
     const int nloc = fes.GetTrueVSize();
@@ -210,7 +215,10 @@ static int SorasPUIters(ParFiniteElementSpace &fes, ParMesh &pmesh,
     sp.rL.SetSize(L); sp.yL.SetSize(L);
     KSPCreate(PETSC_COMM_SELF, &sp.kloc);
     KSPSetOperators(sp.kloc, KrobA, KrobA);
-    if (loc_mode < 0) {                          // near-exact CG+ICC (strong)
+    if (loc_mode == -2) {                        // DIRECT Cholesky (exact, factor once)
+        KSPSetType(sp.kloc, KSPPREONLY);
+        { PC pc; KSPGetPC(sp.kloc,&pc); PCSetType(pc,PCCHOLESKY); }
+    } else if (loc_mode < 0) {                   // near-exact CG+ICC (memory-flat)
         KSPSetType(sp.kloc, KSPCG);
         KSPSetTolerances(sp.kloc, 1e-10, 1e-14, PETSC_DEFAULT, 500);
         KSPSetNormType(sp.kloc, KSP_NORM_UNPRECONDITIONED);
@@ -237,8 +245,16 @@ static int SorasPUIters(ParFiniteElementSpace &fes, ParMesh &pmesh,
     Vector Bv(nloc), Xv(nloc); Xv=0.0;
     { const PetscScalar *ba; VecGetArrayRead(bext,&ba);
       for(int i=0;i<nloc;++i) Bv(i)=ba[i]; VecRestoreArrayRead(bext,&ba); }
+    sp.inner_iters=0; sp.n_applies=0;
     cg.Mult(Bv, Xv);
     int it = cg.GetNumIterations();
+    if (avg_inner) *avg_inner = sp.n_applies? (double)sp.inner_iters/sp.n_applies : 0.0;
+    if (solve_ms) {                       // solve-only wall-clock (warm re-solves)
+        const int NREP=10; MPI_Comm comm=MPI_COMM_WORLD;
+        MPI_Barrier(comm); double t0=MPI_Wtime();
+        for(int r=0;r<NREP;++r){ Xv=0.0; cg.Mult(Bv,Xv); }
+        MPI_Barrier(comm); *solve_ms = 1e3*(MPI_Wtime()-t0)/NREP;
+    }
 
     MatDestroy(&KrobA);
     return it;
@@ -314,6 +330,12 @@ int main(int argc, char *argv[])
                    "SORAS PU-weight study on ALL 3 systems (real cardiac params): "
                    "multiplicity PU vs coefficient/diagonal PU iteration counts, strong "
                    "near-exact local solve (skips EP).");
+    bool do_tuned = false;
+    opts.AddOption(&do_tuned, "-tuned", "--tuned", "-notuned", "--no-tuned",
+                   "TUNED comparison: cw-SORAS at each system's optimal Robin alpha "
+                   "(from -transmit) vs sASM(O1,ICC0) -- iterations, avg inner-solve m, "
+                   "solve-only ms, and the derived compute & communication ratios "
+                   "(skips EP).");
     bool do_transmit = false;
     opts.AddOption(&do_transmit, "-transmit", "--transmit", "-notransmit", "--no-transmit",
                    "TRANSMISSION-SENSITIVITY diagnostic: hold subdomains + near-exact "
@@ -1000,6 +1022,108 @@ int main(int argc, char *argv[])
     }
 
     // ====================================================================
+    //  -tuned : cw-SORAS at each system's OPTIMAL alpha (from -transmit) vs
+    //  sASM(O1,ICC0).  Reports, per system:  outer iters (=> #Allreduce, the
+    //  communication proxy), avg inner-solve m (=> local-compute driver),
+    //  solve-only ms (measured), and the derived compute/comm ratios.
+    //    * communication ~ outer iters (each outer CG iter = 2 Allreduce + halo);
+    //    * local compute per outer apply:  sASM = 1 ICC0 (~2 nnz);
+    //      cw-SORAS = m x (SpMV+ICC) (~m x 4 nnz);
+    //      => total compute ratio ~ (it_soras/it_sasm) x 2m.
+    // ====================================================================
+    if (do_tuned)
+    {
+        const double a_opt[3] = {0.001, 0.1, 0.01};   // Sys1, Sys2, Sys3 (from -transmit)
+        const PetscInt NSUB = 8;
+        if (rank==0){
+            cout << "\n[TUNED] cw-SORAS(opt alpha, coef PU) vs sASM(O1,ICC0), rtol 1e-8, "
+                 << Mpi::WorldSize() << " subdomains.  SORAS local solve: CG+ICC (memory-flat, "
+                    "m inner iters) AND direct Cholesky (exact, factor-once)\n";
+            cout << "  system                                a*    sASM_it SORAS_it | comm(cw/sASM) "
+                    "| sASM_ms  SORAS_ms(CG+ICC,m)  SORAS_ms(Chol)\n";
+        }
+        ConstantCoefficient inv_dt(1.0/dt);
+        DenseMatrix DmonoH = DiagSigma(0.5*sLm/chiCm, 0.5*sTm/chiCm);
+        MatrixConstantCoefficient sig_monoH(DmonoH);
+        ParBilinearForm a1loc(&fes_h);
+        a1loc.AddDomainIntegrator(new MassIntegrator(inv_dt));
+        a1loc.AddDomainIntegrator(new DiffusionIntegrator(sig_monoH));
+        a1loc.Assemble(); a1loc.Finalize();
+        ParBilinearForm ktloc(&fes_t);
+        ktloc.AddDomainIntegrator(new DiffusionIntegrator(sig_o));
+        ktloc.Assemble(); ktloc.Finalize();
+        HypreParMatrix Kt3; ktf.FormSystemMatrix(ess_tdofs_t, Kt3);
+        PetscParMatrix Kt3p; HypreToPetscAIJ(Kt3, Kt3p, "Sys3_Kt", rank, 1, true);
+        Array<int> ess_vmark, ess_ld3;
+        fes_t.GetEssentialVDofs(ess_iface, ess_vmark);
+        for (int i=0;i<ess_vmark.Size();++i) if (ess_vmark[i]<0) ess_ld3.Append(i);
+
+        // timed sASM (O1, ICC0, mult weight, same unpreconditioned ||b||-rel test)
+        auto sasm_run = [&](Mat A, Vec b, Vec x, double *ms)->int{
+            KSP ksp; KSPCreate(PetscObjectComm((PetscObject)A), &ksp);
+            KSPSetType(ksp, KSPCG); KSPSetNormType(ksp, KSP_NORM_UNPRECONDITIONED);
+            KSPSetOperators(ksp, A, A);
+            KSPSetTolerances(ksp, 1e-8, 1e-50, PETSC_DEFAULT, 2000);
+            InstallScaledASM(ksp, A, 1, 0, NSUB, 0);
+            VecSet(x,0.0); KSPSetUp(ksp); KSPSolve(ksp,b,x);       // warm
+            PetscInt it; KSPGetIterationNumber(ksp,&it);
+            KSPConvergedReason r; KSPGetConvergedReason(ksp,&r); if(r<0) it=-it;
+            const int NREP=10; MPI_Barrier(MPI_COMM_WORLD); double t0=MPI_Wtime();
+            for(int rr=0;rr<NREP;++rr){ VecSet(x,0.0); KSPSolve(ksp,b,x); }
+            MPI_Barrier(MPI_COMM_WORLD); *ms=1e3*(MPI_Wtime()-t0)/NREP;
+            KSPDestroy(&ksp); return (int)it;
+        };
+
+        Array<int> none;
+        struct Row { const char *name; ParFiniteElementSpace *fes; ParMesh *pm;
+                     ParBilinearForm *loc; PetscParMatrix *A; bool sing; Array<int>*ess; };
+        Row R[3] = {
+            {"Sys1 monodomain (heart, SPD, mass-dom)",   &fes_h,&heart,&a1loc,&A1p, false,&none},
+            {"Sys2 u_e recover (heart, singular, aniso)",&fes_h,&heart,&kief, &Kiep, true, &none},
+            {"Sys3 torso Laplace (torso, SPD)",          &fes_t,&torso,&ktloc,&Kt3p,false,&ess_ld3},
+        };
+        for (int q=0;q<3;++q){
+            Mat A = (Mat)*R[q].A;
+            if (R[q].sing) AttachConstNullSpace(A, MPI_COMM_WORLD);
+            Vec xstar, b, x; MatCreateVecs(A, &xstar, &b); VecDuplicate(xstar, &x);
+            PetscInt rs, re; MatGetOwnershipRange(A, &rs, &re);
+            PetscInt N; MatGetSize(A, &N, NULL);
+            { PetscScalar *a; VecGetArray(xstar, &a);
+              for (PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
+              VecRestoreArray(xstar, &a); }
+            if (R[q].sing){ PetscScalar s; VecSum(xstar,&s); VecShift(xstar,-s/N); }
+            MatMult(A, xstar, b);
+            if (R[q].sing){ PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
+
+            double sms=0, cms=0, hms=0, m=0, mh=0;
+            int sit = sasm_run(A, b, x, &sms);
+            int cit = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,a_opt[q],1,-1,
+                                   R[q].sing,*R[q].ess,b,&m,&cms);      // CG+ICC local
+            int hit = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,a_opt[q],1,-2,
+                                   R[q].sing,*R[q].ess,b,&mh,&hms);     // direct Cholesky local
+            if (rank==0){
+                double comm = sit>0? (double)cit/sit : 0.0;     // outer-iter ratio = Allreduce ratio
+                char mbuf[24]; snprintf(mbuf,sizeof mbuf,"%.1f (m=%.0f)", cms, m);
+                cout << "  " << std::left << std::setw(38) << R[q].name << std::right
+                     << " " << std::setw(6) << a_opt[q]
+                     << " " << std::setw(6) << sit << "  " << std::setw(6) << cit
+                     << " (" << hit << ") | " << std::fixed << std::setprecision(2)
+                     << std::setw(6) << comm << "x       | "
+                     << std::setw(7) << sms << "  " << std::setw(14) << mbuf
+                     << "  " << std::setw(7) << hms
+                     << std::defaultfloat << "\n";
+            }
+            VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
+        }
+        if (rank==0) cout << "[TUNED] comm(cw/sASM)=outer-iter ratio (=Allreduce count, the >>P<< "
+                             "scalability bottleneck): cw-SORAS ALWAYS fewer.  Local compute: CG+ICC "
+                             "costs m x (memory-flat); direct Cholesky costs ~1 solve/apply (factor "
+                             "once) => the SORAS_ms(Chol) column is the real per-iter cost.  ms is "
+                             "THIS-node wall-clock (small scale, comm ~free => sASM still fastest; "
+                             "the fewer-Allreduce win only cashes in at large P).\n";
+    }
+
+    // ====================================================================
     //  -propagation : point-source information-propagation probe.
     //  Put a unit impulse at one node and solve each system capped at
     //  prop_maxit CG iterations; the support of the k-th iterate is how far
@@ -1066,13 +1190,13 @@ int main(int argc, char *argv[])
     double t_base=0.0, t_acc=0.0;
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
-    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
+    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
     if (fe) fprintf(fe,"# t(ms)  ECG(phi_L-phi_R)  Vm@center  u_e@center  phi_torso@L\n");
 
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
-    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
+    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
     const int sample = std::max(1, (int)(1.0/dt));    // ~ every 1 ms
     for (int s=0;s<nsteps;++s)
     {
@@ -1262,7 +1386,7 @@ int main(int argc, char *argv[])
     }
 
     // ---- benchmark activation times + conduction velocity -----------------
-    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit) {
+    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned) {
     if (rank==0) cout << "\nActivation times (V crosses 0 mV):\n";
     double tP1=-1, tP8=-1;
     for (int q=0;q<8;++q){
