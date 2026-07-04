@@ -206,5 +206,22 @@ $$\boxed{\text{对称加权加性(系数缩放 PU)}\ +\ \text{适度 ICC}(L{=}1)
   3. **看通信排名**(Sys2 迭代=Allreduce):cwSORAS-1ICC **80** > sASM **67** > cwSORAS-Chol **36**。3000 核 Allreduce 主导时,**cwSORAS-1ICC 反而最不扩展**。
 
   **==> 便宜档 cw-SORAS(单遍 ICC)没意义:迭代比 sASM 还多、扩展更差。cw-SORAS 的收益是拿"贵本地解"换的,不是拿"Robin 结构"换的——正好印证"省通信必须花贵本地计算买,单遍 ICC 买不到"。**
+
+- **`-overlap`:公平比较(两边都近精确本地解)→ 重要更正:overlapping sASM 打赢零重叠 cw-SORAS**。cw-SORAS 天生零 overlap(Robin 替代重叠);这里在**同等近精确本地解**下扫 sASM overlap 0/1/2,对比零重叠 Robin cw-SORAS(np=8,迭代):
+
+  | 系统 | α* | cwSORAS(δ=0,Robin) | sASM O0 | sASM O1 | sASM O2 | overlap 增益 O0→O2 |
+  |---|---|---|---|---|---|---|
+  | Sys1 | 0.001 | **6** | 12 | 8 | 8 | 0.67× |
+  | Sys2 | 0.1 | 36 | 51 | 31 | **28** | 0.55× |
+  | Sys3 | 0.01 | 38 | 44 | 25 | **24** | 0.55× |
+
+  **结论(纠正前面对 cw-SORAS 的乐观)**:
+  1. **本地解够强时 overlap 是强杠杆(O0→O2≈0.55×,近 1.8×)**;而便宜本地(单遍 ICC)时 overlap 几乎没用(~0.9×)——**overlap 与本地解精度互补**,本地不准,多给重叠也吃不下。
+  2. **一层 overlap 就把 Robin 比下去**:零重叠时 Robin 赢(36<51,符合理论 δ=0 时 Robin>Dirichlet);但 sASM O1 起(Sys2 31<36、Sys3 25<38)就反超,O2(28/24)完胜。
+  3. **纠正 `-tuned` 的印象**:那里 "SORAS 36 vs sASM 67" 是**近精确 SORAS 对便宜 sASM**,不公平。**同等本地解下(便宜端 sASM-O1 67 < cwSORAS-1ICC 80;近精确端 sASM-O1 31 < cwSORAS 36),overlapping sASM 两端都赢 cw-SORAS。**
+  4. **本质仍是"计算/通信折衷"下沉一层**:overlap 迭代少(Allreduce 少)但每迭代本地块更大、halo 更宽(近邻,不随 P 恶化);Robin 迭代多但每迭代更瘦。总 Allreduce ∝ 迭代数 → sASM O2(28)比 SORAS(36)**全局同步还更少**,大规模瓶颈上也不亏。
+  5. **都治不了地板**(sASM O2 仍 24–28)→ 仍需粗空间。
+
+  **==> 修正选型:三系统都用 sASM + overlap(O1–O2)+ 够强本地解,放弃 cw-SORAS(要调 α、装 M_Γ、还打不过);再上粗空间治地板。** 忠实的 overlapping-Robin(Neumann patch + 移位 Robin 界面)需跨 rank 单元重装配,未实现,但既然 overlapping-Dirichlet 已胜零重叠 Robin,它即便更好也是边际收益,不值那复杂度。`InstallScaledASM` 新增 `local_exact` 档(近精确本地 CG+ICC)。
 - RAS(1.1)= 把 $D_i$ 换成非重叠 0/1 指示、单边放,外层换 flexible-CG/GMRES(仍会因 $A^{(i)}_{jj}$ 问题受限于装配块)。
 - 乘性/着色:另写一个 PCSHELL,按 §2.3 逐色扫;仅建议做 MG-smoother 时用。

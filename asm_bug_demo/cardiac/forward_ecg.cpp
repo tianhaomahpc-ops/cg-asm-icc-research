@@ -330,6 +330,12 @@ int main(int argc, char *argv[])
                    "SORAS PU-weight study on ALL 3 systems (real cardiac params): "
                    "multiplicity PU vs coefficient/diagonal PU iteration counts, strong "
                    "near-exact local solve (skips EP).");
+    bool do_overlap = false;
+    opts.AddOption(&do_overlap, "-overlap", "--overlap", "-nooverlap", "--no-overlap",
+                   "OVERLAP study: does overlap help a NEAR-EXACT-local additive Schwarz, "
+                   "and does it reach zero-overlap Robin cw-SORAS?  Compares (per system, "
+                   "near-exact local, optimal alpha) cw-SORAS(delta=0,Robin) vs sASM at "
+                   "overlap 0/1/2 (skips EP).");
     bool do_tuned = false;
     opts.AddOption(&do_tuned, "-tuned", "--tuned", "-notuned", "--no-tuned",
                    "TUNED comparison: cw-SORAS at each system's optimal Robin alpha "
@@ -1124,6 +1130,99 @@ int main(int argc, char *argv[])
     }
 
     // ====================================================================
+    //  -overlap : does OVERLAP help?  cw-SORAS uses ZERO overlap (the Robin
+    //  transmission substitutes for it).  Here, at a NEAR-EXACT local solve
+    //  (equal local-accuracy footing), sweep sASM overlap 0/1/2 and compare
+    //  to zero-overlap Robin cw-SORAS.  A truly faithful OVERLAPPING-Robin
+    //  (Neumann patch + moved Robin interface) needs element reassembly over
+    //  ghost layers and is not built; but if overlap barely moves near-exact
+    //  sASM, adding it to SORAS won't help either (both attack only the fine
+    //  level, not the global mode).
+    // ====================================================================
+    if (do_overlap)
+    {
+        const double a_opt[3] = {0.001, 0.1, 0.01};
+        const PetscInt NSUB = 8;
+        if (rank==0){
+            cout << "\n[OVERLAP] near-exact local everywhere, rtol 1e-8, " << Mpi::WorldSize()
+                 << " subdomains.  cw-SORAS(delta=0, Robin) vs sASM(overlap 0/1/2)\n";
+            cout << "  system                             a*   | cwSORAS(d0)  sASM(O0) sASM(O1) "
+                    "sASM(O2)  | overlap gain O0->O2\n";
+        }
+        ConstantCoefficient inv_dt(1.0/dt);
+        DenseMatrix DmonoH = DiagSigma(0.5*sLm/chiCm, 0.5*sTm/chiCm);
+        MatrixConstantCoefficient sig_monoH(DmonoH);
+        ParBilinearForm a1loc(&fes_h);
+        a1loc.AddDomainIntegrator(new MassIntegrator(inv_dt));
+        a1loc.AddDomainIntegrator(new DiffusionIntegrator(sig_monoH));
+        a1loc.Assemble(); a1loc.Finalize();
+        ParBilinearForm ktloc(&fes_t);
+        ktloc.AddDomainIntegrator(new DiffusionIntegrator(sig_o));
+        ktloc.Assemble(); ktloc.Finalize();
+        HypreParMatrix Kt3; ktf.FormSystemMatrix(ess_tdofs_t, Kt3);
+        PetscParMatrix Kt3p; HypreToPetscAIJ(Kt3, Kt3p, "Sys3_Kt", rank, 1, true);
+        Array<int> ess_vmark, ess_ld3;
+        fes_t.GetEssentialVDofs(ess_iface, ess_vmark);
+        for (int i=0;i<ess_vmark.Size();++i) if (ess_vmark[i]<0) ess_ld3.Append(i);
+
+        // near-exact sASM at a given overlap (assembled block, Dirichlet transmission)
+        auto sasm_exact = [&](Mat A, Vec b, Vec x, int O)->int{
+            KSP ksp; KSPCreate(PetscObjectComm((PetscObject)A), &ksp);
+            KSPSetType(ksp, KSPCG); KSPSetNormType(ksp, KSP_NORM_UNPRECONDITIONED);
+            KSPSetOperators(ksp, A, A);
+            KSPSetTolerances(ksp, 1e-8, 1e-50, PETSC_DEFAULT, 2000);
+            InstallScaledASM(ksp, A, O, 0, NSUB, 0, /*local_exact=*/true);
+            VecSet(x,0.0); KSPSolve(ksp,b,x);
+            PetscInt it; KSPGetIterationNumber(ksp,&it);
+            KSPConvergedReason r; KSPGetConvergedReason(ksp,&r); if(r<0) it=-it;
+            KSPDestroy(&ksp); return (int)it;
+        };
+
+        Array<int> none;
+        struct Row { const char *name; ParFiniteElementSpace *fes; ParMesh *pm;
+                     ParBilinearForm *loc; PetscParMatrix *A; bool sing; Array<int>*ess; };
+        Row R[3] = {
+            {"Sys1 monodomain (heart, SPD, mass-dom)",   &fes_h,&heart,&a1loc,&A1p, false,&none},
+            {"Sys2 u_e recover (heart, singular, aniso)",&fes_h,&heart,&kief, &Kiep, true, &none},
+            {"Sys3 torso Laplace (torso, SPD)",          &fes_t,&torso,&ktloc,&Kt3p,false,&ess_ld3},
+        };
+        for (int q=0;q<3;++q){
+            Mat A = (Mat)*R[q].A;
+            if (R[q].sing) AttachConstNullSpace(A, MPI_COMM_WORLD);
+            Vec xstar, b, x; MatCreateVecs(A, &xstar, &b); VecDuplicate(xstar, &x);
+            PetscInt rs, re; MatGetOwnershipRange(A, &rs, &re);
+            PetscInt N; MatGetSize(A, &N, NULL);
+            { PetscScalar *a; VecGetArray(xstar, &a);
+              for (PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
+              VecRestoreArray(xstar, &a); }
+            if (R[q].sing){ PetscScalar s; VecSum(xstar,&s); VecShift(xstar,-s/N); }
+            MatMult(A, xstar, b);
+            if (R[q].sing){ PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
+
+            int cs = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,a_opt[q],1,-1,
+                                  R[q].sing,*R[q].ess,b);           // Robin cw-SORAS, delta=0
+            int o0 = sasm_exact(A, b, x, 0);
+            int o1 = sasm_exact(A, b, x, 1);
+            int o2 = sasm_exact(A, b, x, 2);
+            if (rank==0){
+                double gain = o0>0? (double)o2/o0 : 0.0;
+                cout << "  " << std::left << std::setw(34) << R[q].name << std::right
+                     << " " << std::setw(6) << a_opt[q] << " | "
+                     << std::setw(9) << cs << "  " << std::setw(7) << o0 << "  "
+                     << std::setw(7) << o1 << "  " << std::setw(7) << o2 << "   | "
+                     << std::fixed << std::setprecision(2) << gain << "x"
+                     << std::defaultfloat << "\n";
+            }
+            VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
+        }
+        if (rank==0) cout << "[OVERLAP] near-exact local isolates the coupling mechanism: Robin"
+                             "(delta=0) vs Dirichlet+overlap.  If sASM O0->O2 barely drops, overlap "
+                             "is a weak lever even at strong local solve => adding it to SORAS won't "
+                             "help; if sASM(O2) beats/ties cwSORAS(d0), overlap alone matches Robin "
+                             "and combining is redundant.  Neither removes the global-mode floor.\n";
+    }
+
+    // ====================================================================
     //  -propagation : point-source information-propagation probe.
     //  Put a unit impulse at one node and solve each system capped at
     //  prop_maxit CG iterations; the support of the k-th iterate is how far
@@ -1190,13 +1289,13 @@ int main(int argc, char *argv[])
     double t_base=0.0, t_acc=0.0;
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
-    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
+    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
     if (fe) fprintf(fe,"# t(ms)  ECG(phi_L-phi_R)  Vm@center  u_e@center  phi_torso@L\n");
 
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
-    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
+    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
     const int sample = std::max(1, (int)(1.0/dt));    // ~ every 1 ms
     for (int s=0;s<nsteps;++s)
     {
@@ -1386,7 +1485,7 @@ int main(int argc, char *argv[])
     }
 
     // ---- benchmark activation times + conduction velocity -----------------
-    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned) {
+    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap) {
     if (rank==0) cout << "\nActivation times (V crosses 0 mV):\n";
     double tP1=-1, tP8=-1;
     for (int q=0;q<8;++q){

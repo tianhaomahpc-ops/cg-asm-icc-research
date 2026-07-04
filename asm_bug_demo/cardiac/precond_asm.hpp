@@ -50,6 +50,24 @@ static inline void SetSubICC(PC asm_pc, PetscInt icc_levels)
     }
 }
 
+// configure the local blocks as NEAR-EXACT solves: CG+ICC(L) to 1e-10 (the
+// strong-fine-level analogue of SORAS's near-exact local Robin solve, so an
+// overlap sweep can be compared to SORAS on an equal local-accuracy footing).
+static inline void SetSubExact(PC asm_pc, PetscInt icc_levels)
+{
+    KSP *subs = nullptr; PetscInt nl = 0, first = 0;
+    PCASMGetSubKSP(asm_pc, &nl, &first, &subs);
+    for (PetscInt i = 0; i < nl; ++i)
+    {
+        KSPSetType(subs[i], KSPCG);
+        KSPSetTolerances(subs[i], 1e-10, 1e-14, PETSC_DEFAULT, 500);
+        KSPSetNormType(subs[i], KSP_NORM_UNPRECONDITIONED);
+        KSPSetErrorIfNotConverged(subs[i], PETSC_FALSE);
+        PC sp = nullptr; KSPGetPC(subs[i], &sp);
+        PCSetType(sp, PCICC); PCFactorSetLevels(sp, icc_levels);
+    }
+}
+
 // Split A's local row range into `nsub` contiguous (non-overlapping) blocks
 // and hand them to PCASM; PCASMSetOverlap then grows the overlap layers.
 // This gives multiple subdomains per rank, so the overlap/over-counting
@@ -102,7 +120,8 @@ static inline void SetupASM(KSP ksp, Mat A, PetscInt overlap, PetscInt icc_level
 //   weighting only differs when the local blocks are UNASSEMBLED Neumann blocks,
 //   i.e. the SORAS/Neumann-Neumann setting -- verified empirically by -weightcmp.)
 static inline void InstallScaledASM(KSP ksp, Mat A, PetscInt overlap, PetscInt icc_levels,
-                                    PetscInt nsub, int weight_mode = 0)
+                                    PetscInt nsub, int weight_mode = 0,
+                                    bool local_exact = false)
 {
     MPI_Comm comm = PetscObjectComm((PetscObject)A);
     PC inner = nullptr;
@@ -112,7 +131,8 @@ static inline void InstallScaledASM(KSP ksp, Mat A, PetscInt overlap, PetscInt i
     PCSetOperators(inner, A, A);
     SetSubdomains(inner, A, nsub, overlap);
     PCSetUp(inner);
-    SetSubICC(inner, icc_levels);
+    if (local_exact) SetSubExact(inner, icc_levels);
+    else             SetSubICC  (inner, icc_levels);
 
     PetscInt n_sub = 0; IS *is_ovl = nullptr, *is_loc = nullptr;
     PCASMGetLocalSubdomains(inner, &n_sub, &is_ovl, &is_loc);
