@@ -166,11 +166,14 @@ static DenseMatrix DiagSigma(double sL, double sT)
 //   * pu_mode : 0 = multiplicity PU (dL=1/mult), 1 = coefficient/diagonal PU
 //               (dL(j)=K_loc_jj / assembled diag -- anisotropy-aware, differs per
 //               subdomain because K_loc is UNASSEMBLED).
-// Near-exact local solve (CG+ICC, 1e-10) so the fine level is the strong SORAS.
+//   * loc_mode: local Robin solve.  <0 = near-exact CG+ICC(1e-10) (strong fine
+//               level, m x cost); 0 = ONE ICC0 apply ("direct ICC", fixed linear
+//               operator, ~sASM cost); K>0 = K Chebyshev steps over ICC0.
+//   * bext    : the SHARED outer RHS (so sASM and SORAS solve the identical system).
 static int SorasPUIters(ParFiniteElementSpace &fes, ParMesh &pmesh,
                         ParBilinearForm &locform, PetscParMatrix &Aout,
-                        double alpha, int pu_mode, bool singular,
-                        const Array<int> &ess_ld)
+                        double alpha, int pu_mode, int loc_mode, bool singular,
+                        const Array<int> &ess_ld, Vec bext)
 {
     const int L = fes.GetVSize();
     const int nloc = fes.GetTrueVSize();
@@ -207,39 +210,37 @@ static int SorasPUIters(ParFiniteElementSpace &fes, ParMesh &pmesh,
     sp.rL.SetSize(L); sp.yL.SetSize(L);
     KSPCreate(PETSC_COMM_SELF, &sp.kloc);
     KSPSetOperators(sp.kloc, KrobA, KrobA);
-    KSPSetType(sp.kloc, KSPCG);
-    KSPSetTolerances(sp.kloc, 1e-10, 1e-14, PETSC_DEFAULT, 500);
-    KSPSetNormType(sp.kloc, KSP_NORM_UNPRECONDITIONED);
-    { PC pc; KSPGetPC(sp.kloc,&pc); PCSetType(pc,PCICC); }
+    if (loc_mode < 0) {                          // near-exact CG+ICC (strong)
+        KSPSetType(sp.kloc, KSPCG);
+        KSPSetTolerances(sp.kloc, 1e-10, 1e-14, PETSC_DEFAULT, 500);
+        KSPSetNormType(sp.kloc, KSP_NORM_UNPRECONDITIONED);
+        { PC pc; KSPGetPC(sp.kloc,&pc); PCSetType(pc,PCICC); }
+    } else if (loc_mode == 0) {                  // ONE ICC0 apply ("direct ICC")
+        KSPSetType(sp.kloc, KSPPREONLY);
+        { PC pc; KSPGetPC(sp.kloc,&pc); PCSetType(pc,PCICC); }
+    } else {                                     // K Chebyshev steps over ICC0
+        KSPSetType(sp.kloc, KSPCHEBYSHEV);
+        KSPSetTolerances(sp.kloc,PETSC_DEFAULT,PETSC_DEFAULT,PETSC_DEFAULT,loc_mode);
+        KSPSetNormType(sp.kloc, KSP_NORM_NONE);
+        KSPChebyshevEstEigSet(sp.kloc, 0.0, 0.1, 0.0, 1.1);
+        { PC pc; KSPGetPC(sp.kloc,&pc); PCSetType(pc,PCICC); }
+    }
     KSPSetErrorIfNotConverged(sp.kloc, PETSC_FALSE);
     MatCreateVecs(KrobA, &sp.rloc, &sp.zloc);
 
-    // outer system:  b = Aout * xstar  (mean-removed if singular)
-    Mat A = (Mat)Aout;
-    if (singular) AttachConstNullSpace(A, MPI_COMM_WORLD);
-    Vec xstar, b, x; MatCreateVecs(A, &xstar, &b); VecDuplicate(xstar, &x);
-    PetscInt rs, re; MatGetOwnershipRange(A, &rs, &re);
-    PetscInt N; MatGetSize(A, &N, NULL);
-    { PetscScalar *a; VecGetArray(xstar, &a);
-      for (PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
-      VecRestoreArray(xstar, &a); }
-    if (singular){ PetscScalar s; VecSum(xstar,&s); VecShift(xstar,-s/N); }
-    MatMult(A, xstar, b);
-    if (singular){ PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
-
+    if (singular) AttachConstNullSpace((Mat)Aout, MPI_COMM_WORLD);
     PetscPCGSolver cg(Aout, "soraspu_");
     cg.SetMaxIter(2000); cg.SetRelTol(1e-8); cg.iterative_mode=false;
     KSPSetNormType((KSP)cg, KSP_NORM_UNPRECONDITIONED);
     cg.SetPreconditioner(sp);
-    // copy PETSc b -> mfem true-dof Vector, solve like the EP path (line ~941)
+    // copy the SHARED PETSc RHS bext -> mfem true-dof Vector, solve (EP-path style)
     Vector Bv(nloc), Xv(nloc); Xv=0.0;
-    { const PetscScalar *ba; VecGetArrayRead(b,&ba);
-      for(PetscInt i=0;i<re-rs;++i) Bv(i)=ba[i]; VecRestoreArrayRead(b,&ba); }
+    { const PetscScalar *ba; VecGetArrayRead(bext,&ba);
+      for(int i=0;i<nloc;++i) Bv(i)=ba[i]; VecRestoreArrayRead(bext,&ba); }
     cg.Mult(Bv, Xv);
     int it = cg.GetNumIterations();
 
     MatDestroy(&KrobA);
-    VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
     return it;
 }
 
@@ -817,24 +818,26 @@ int main(int argc, char *argv[])
     }
 
     // ====================================================================
-    //  -soraspu : SORAS PU-weight study on ALL 3 systems (real cardiac params).
-    //  Unlike PCASM, SORAS uses the UNASSEMBLED local Neumann block, so the
-    //  coefficient/diagonal PU (dL = K_loc_jj / assembled diag) genuinely differs
-    //  per subdomain at shared dofs (carries sigma) -- the anisotropy-aware path.
-    //  For each system we build the SORAS fine level with multiplicity PU (mode 0)
-    //  and coefficient PU (mode 1) and count near-exact-local CG iters.
+    //  -soraspu : head-to-head on ALL 3 systems (real cardiac params), at EQUAL
+    //  local-solve cost (one ICC0 apply each):  sASM ("just ICC" = assembled
+    //  PCASM block + 1/mult weight) vs cw-SORAS ("direct-ICC" = UNASSEMBLED
+    //  Neumann block + alpha M_Gamma Robin + coef/diag PU).  Same RHS, same
+    //  unpreconditioned ||b||-rel test, same #subdomains -> the iteration delta
+    //  is purely the Schwarz STRUCTURE, not the local solver.  The near-exact
+    //  cw-SORAS column is the fine-level strength upper bound (m x local cost).
     // ====================================================================
     if (do_soraspu)
     {
         const int nsub_eff = Mpi::WorldSize();
+        const PetscInt NSUB = 8;   // serial fallback (parallel: 1 subdomain/rank)
         if (rank==0) {
-            cout << "\n[SORASPU] SORAS mult-PU vs coef/diag-PU iters (rtol 1e-8, near-exact "
-                    "local CG+ICC, alpha=" << soras_alpha << "), " << nsub_eff
-                 << " subdomains (=ranks)\n";
+            cout << "\n[SORASPU] sASM vs cw-SORAS, EQUAL local cost (1 ICC0 apply), rtol 1e-8, "
+                 << nsub_eff << " subdomains (=ranks), alpha=" << soras_alpha << "\n";
             if (nsub_eff==1)
-                cout << "  NOTE: np=1 => single subdomain, no shared faces => SORAS is a plain "
-                        "global solve; run with mpirun -np 4/8 for the real comparison.\n";
-            cout << "  system                                     mult   coef    delta\n";
+                cout << "  NOTE: np=1 => 1 subdomain, no shared faces => SORAS Robin term empty; "
+                        "run mpirun -np 4/8 for the real comparison.\n";
+            cout << "  system                                     sASM(O0) sASM(O1) | "
+                    "cwSORAS-1ICC(mult) (coef) | cwSORAS-exact(coef)\n";
         }
 
         // Sys1: local Neumann block = (1/dt)M_loc + (1/2)K_mono_loc  (SPD, non-singular)
@@ -858,6 +861,19 @@ int main(int argc, char *argv[])
         fes_t.GetEssentialVDofs(ess_iface, ess_vmark);
         for (int i=0;i<ess_vmark.Size();++i) if (ess_vmark[i]<0) ess_ld3.Append(i);
 
+        // sASM iter counter: SAME unpreconditioned ||b||-rel test as cw-SORAS above
+        auto sasm_iters = [&](Mat A, Vec b, Vec x, int O)->int{
+            KSP ksp; KSPCreate(PetscObjectComm((PetscObject)A), &ksp);
+            KSPSetType(ksp, KSPCG); KSPSetNormType(ksp, KSP_NORM_UNPRECONDITIONED);
+            KSPSetOperators(ksp, A, A);
+            KSPSetTolerances(ksp, 1e-8, 1e-50, PETSC_DEFAULT, 2000);
+            InstallScaledASM(ksp, A, O, 0, NSUB, 0);       // sASM, ICC0, multiplicity weight
+            VecSet(x,0.0); KSPSolve(ksp,b,x);
+            PetscInt it; KSPGetIterationNumber(ksp,&it);
+            KSPConvergedReason r; KSPGetConvergedReason(ksp,&r); if(r<0) it=-it;
+            KSPDestroy(&ksp); return (int)it;
+        };
+
         Array<int> none;   // no local Dirichlet for the heart systems
         struct Row { const char *name; ParFiniteElementSpace *fes; ParMesh *pm;
                      ParBilinearForm *loc; PetscParMatrix *A; bool sing; Array<int>*ess; };
@@ -867,23 +883,35 @@ int main(int argc, char *argv[])
             {"Sys3 torso Laplace (torso, SPD)",          &fes_t,&torso,&ktloc,&Kt3p,false,&ess_ld3},
         };
         for (int q=0;q<3;++q){
-            int im = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,soras_alpha,0,R[q].sing,*R[q].ess);
-            int ic = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,soras_alpha,1,R[q].sing,*R[q].ess);
+            Mat A = (Mat)*R[q].A;
+            if (R[q].sing) AttachConstNullSpace(A, MPI_COMM_WORLD);
+            Vec xstar, b, x; MatCreateVecs(A, &xstar, &b); VecDuplicate(xstar, &x);
+            PetscInt rs, re; MatGetOwnershipRange(A, &rs, &re);
+            PetscInt N; MatGetSize(A, &N, NULL);
+            { PetscScalar *a; VecGetArray(xstar, &a);
+              for (PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
+              VecRestoreArray(xstar, &a); }
+            if (R[q].sing){ PetscScalar s; VecSum(xstar,&s); VecShift(xstar,-s/N); }
+            MatMult(A, xstar, b);
+            if (R[q].sing){ PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
+
+            int sa0 = sasm_iters(A, b, x, 0);
+            int sa1 = sasm_iters(A, b, x, 1);
+            int cm  = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,soras_alpha,0,0,R[q].sing,*R[q].ess,b);
+            int cc  = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,soras_alpha,1,0,R[q].sing,*R[q].ess,b);
+            int ce  = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,soras_alpha,1,-1,R[q].sing,*R[q].ess,b);
             if (rank==0){
-                double d = im>0 ? 100.0*(ic-im)/im : 0.0;
-                char buf[16]; snprintf(buf,sizeof buf,"%+.1f%%", d);
-                cout << "  " << std::left << std::setw(42) << R[q].name
-                     << " " << std::right << std::setw(5) << im
-                     << "  " << std::setw(5) << ic
-                     << "  " << std::setw(7) << buf << (im==ic?"  (identical)":"") << "\n";
+                cout << "  " << std::left << std::setw(42) << R[q].name << std::right
+                     << " " << std::setw(6) << sa0 << "   " << std::setw(6) << sa1 << "   | "
+                     << std::setw(12) << cm << "  " << std::setw(6) << cc << "  | "
+                     << std::setw(12) << ce << "\n";
             }
+            VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
         }
-        if (rank==0) cout << "[SORASPU] coef/diag PU weights by each subdomain's own UNASSEMBLED "
-                             "Neumann diagonal (local element volume x sigma) instead of a flat "
-                             "1/mult => cuts iters on ALL 3 systems.  Driver is diagonal NON-"
-                             "uniformity (mesh grading + coefficient), not anisotropy alone: the "
-                             "isotropic torso Sys3 gains MORE than the anisotropic Sys2, and the "
-                             "mass-dominated Sys1 (diag ~ lumped volume) gains most.\n";
+        if (rank==0) cout << "[SORASPU] EQUAL local cost columns are sASM(O0/O1) vs cwSORAS-1ICC: "
+                             "the delta is pure Schwarz structure (unassembled Neumann + Robin + "
+                             "coef PU).  cwSORAS-exact (near-exact local, m x cost) is the fine-"
+                             "level strength ceiling, not a same-cost option.\n";
     }
 
     // ====================================================================
