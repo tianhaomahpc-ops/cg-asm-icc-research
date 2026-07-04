@@ -254,5 +254,22 @@ $$\boxed{\text{对称加权加性(系数缩放 PU)}\ +\ \text{适度 ICC}(L{=}1)
   1. **Neumann 好、Dirichlet 灾难,不精确下更极端**:Neumann→Dirichlet,Sys2 迭代 10×/时间 11×、Sys3 35×/36×、Sys1 8×。迭代与时间几乎同比(每 apply 成本固定)。
   2. **【关键新发现】不精确本地解把"优化 Robin"甜点抹平了**:Sys2 near-exact 有甜点(α=.001 53 → α=.2 **37**,省 30%);inexact(ICC0)整段 Neumann→Robin 基本平(81/79/74),**调 α 几乎白调**。原因:优化 Robin 收益要靠准确解本地 Robin 才能兑现;ICC0 的 $\omega$(本地不精确)大,主导 $\kappa\le C_0^2\omega(N_c+1)$,把传输优化淹没进噪声。
   3. **==> 大规模(必用 ICC)下,边界条件的实际教训只剩一条:零重叠时别用 Dirichlet,取 Neumann/小 α 即可,调 α 不值得。** 又一次印证:SORAS 的"精调 Robin"卖点要靠昂贵准确本地解买,大规模用不上。
+
+- **`-neumann`:不调 Robin 参数,直接构造 Neumann 子域 vs Dirichlet 子域(ASM)**。分析先行(见下),再实测。
+
+  **分析——纯 Neumann 子域怎么解**:Dirichlet 块 $R_iAR_i^\top$ 排除外部 dof ≈ 齐次 Dirichlet → **非奇异**;Neumann 块(未装配、自然 BC)对纯扩散**常数在核里 → 奇异**,且局部 RHS $D R_i r$ 一般**不零均值 → 不相容**。四条解法:A 伪逆(投影 RHS+解,贵)、B 钉一点(能配 ICC0,但 hack)、C 正则化 $K+\varepsilon M$(=小 α Robin,即要避免的调参)、D 局部挂核 CG(贵)。**关键:纯 Neumann 子域的常数核合起来正是一组粗空间基 → 它天然要配粗空间(Neumann-Neumann/BDD/FETI)。** 谱直觉:Dirichlet 太硬、Neumann 太软(常数自由)、Robin 居中。
+
+  **实测(用 B 钉一点,零重叠,np=8,迭代/solve-ms)**:
+
+  | 系统 | Dirichlet ICC0 | Dirichlet 近精确 | Neumann ICC0 | Neumann 近精确 |
+  |---|---|---|---|---|
+  | Sys1 | **13/2.0** | 12/12 | 17/3.1 | 14/17.6 |
+  | Sys2 | **76/13.2** | **51/172** | 84/16.7 | **114**/664 |
+  | Sys3 | 63/32.1 | **44/675** | 57/35.3 | 55/1535 |
+
+  **结论**:
+  1. **Dirichlet 迭代上赢或平、时间全赢**;Sys3 Neumann 迭代略少但时间反而更慢(本地块更大)。
+  2. **冒烟证据:Neumann 越精确解越差**——Sys2 Neumann 近精确 114 > 它自己 ICC0 84 > Dirichlet 近精确 51。钉点的 Neumann 块是**病态**预条件:常数模没被正确约束,near-exact 忠实放大坏分量,ICC0 的不精确反而抹平它。
+  3. **==> 数值证明:纯 Neumann 子域单层站不住,打不过 Dirichlet-ASM,且"解得越准越糟"。它天生要配粗空间(Neumann-Neumann/FETI),不是一个能独立用的单层法。**
 - RAS(1.1)= 把 $D_i$ 换成非重叠 0/1 指示、单边放,外层换 flexible-CG/GMRES(仍会因 $A^{(i)}_{jj}$ 问题受限于装配块)。
 - 乘性/着色:另写一个 PCSHELL,按 §2.3 逐色扫;仅建议做 MG-smoother 时用。

@@ -196,8 +196,13 @@ static int SorasPUIters(ParFiniteElementSpace &fes, ParMesh &pmesh,
     }
     MG.Finalize();
     SparseMatrix Krob(locform.SpMat());   // local Neumann block (copy)
-    Krob.Add(alpha, MG);                  // + alpha M_Gamma  (Robin transmission)
+    if (alpha != 0.0) Krob.Add(alpha, MG); // + alpha M_Gamma  (Robin transmission)
     for (int k=0;k<ess_ld.Size();++k) Krob.EliminateRowCol(ess_ld[k]); // local Dirichlet
+    // alpha==0 => PURE Neumann local block: singular for a diffusion operator
+    // (constant nullspace).  Pin ONE local dof (minimal Dirichlet anchor) so the
+    // block is invertible and a cheap ICC0 apply is possible -- the direct
+    // "Neumann subdomain" the -neumann study compares against ASM's Dirichlet.
+    if (alpha == 0.0 && ess_ld.Size() == 0) Krob.EliminateRowCol(0);
     Mat KrobA = ToSeqAIJ(Krob);
 
     const Operator *Ph = fes.GetProlongationMatrix();
@@ -349,6 +354,12 @@ int main(int argc, char *argv[])
                    "(from -transmit) vs sASM(O1,ICC0) -- iterations, avg inner-solve m, "
                    "solve-only ms, and the derived compute & communication ratios "
                    "(skips EP).");
+    bool do_neumann = false;
+    opts.AddOption(&do_neumann, "-neumann", "--neumann", "-noneumann", "--no-neumann",
+                   "DIRECT Neumann-subdomain vs Dirichlet-subdomain (ASM): local block is "
+                   "the UNASSEMBLED Neumann block (alpha=0, one dof pinned to remove the "
+                   "constant nullspace) vs ASM's assembled Dirichlet block.  Zero overlap, "
+                   "ICC0 and near-exact local, iters + solve-ms (skips EP).");
     bool do_transmiti = false;
     opts.AddOption(&do_transmiti, "-transmiti", "--transmiti", "-notransmiti", "--no-transmiti",
                    "TRANSMISSION sensitivity with INEXACT local solve (one ICC0 apply, "
@@ -1110,6 +1121,102 @@ int main(int argc, char *argv[])
     }
 
     // ====================================================================
+    //  -neumann : DIRECT Neumann-subdomain vs Dirichlet-subdomain (ASM).
+    //  Dirichlet subdomain = sASM assembled block R_i A R_i^T (interface pinned
+    //  => non-singular, cheap).  Neumann subdomain = UNASSEMBLED Neumann block
+    //  (alpha=0, natural BC); it is SINGULAR for pure diffusion (constant null-
+    //  space), so we pin ONE local dof (minimal Dirichlet anchor) to invert it
+    //  with a cheap ICC0 -- see the analysis: pure Neumann is inconsistent/
+    //  singular and really wants a coarse space (Neumann-Neumann/FETI).  Zero
+    //  overlap both; ICC0 and near-exact local; iters + solve-ms.
+    // ====================================================================
+    if (do_neumann)
+    {
+        const PetscInt NSUB = 8;
+        if (rank==0){
+            cout << "\n[NEUMANN] Neumann-subdomain (alpha=0, 1 dof pinned) vs Dirichlet-subdomain"
+                    " (ASM), zero overlap, rtol 1e-8, " << Mpi::WorldSize() << " subdomains\n";
+            cout << "  system                        | Dirichlet(ASM) ICC0  exact | Neumann ICC0  exact"
+                    "   (iters/solve-ms)\n";
+        }
+        ConstantCoefficient inv_dt(1.0/dt);
+        DenseMatrix DmonoH = DiagSigma(0.5*sLm/chiCm, 0.5*sTm/chiCm);
+        MatrixConstantCoefficient sig_monoH(DmonoH);
+        ParBilinearForm a1loc(&fes_h);
+        a1loc.AddDomainIntegrator(new MassIntegrator(inv_dt));
+        a1loc.AddDomainIntegrator(new DiffusionIntegrator(sig_monoH));
+        a1loc.Assemble(); a1loc.Finalize();
+        ParBilinearForm ktloc(&fes_t);
+        ktloc.AddDomainIntegrator(new DiffusionIntegrator(sig_o));
+        ktloc.Assemble(); ktloc.Finalize();
+        HypreParMatrix Kt3; ktf.FormSystemMatrix(ess_tdofs_t, Kt3);
+        PetscParMatrix Kt3p; HypreToPetscAIJ(Kt3, Kt3p, "Sys3_Kt", rank, 1, true);
+        Array<int> ess_vmark, ess_ld3;
+        fes_t.GetEssentialVDofs(ess_iface, ess_vmark);
+        for (int i=0;i<ess_vmark.Size();++i) if (ess_vmark[i]<0) ess_ld3.Append(i);
+
+        // timed sASM (Dirichlet subdomain, zero overlap); local_exact toggles ICC0 vs near-exact
+        auto asm_run = [&](Mat A, Vec b, Vec x, bool exact, double *ms)->int{
+            KSP ksp; KSPCreate(PetscObjectComm((PetscObject)A), &ksp);
+            KSPSetType(ksp, KSPCG); KSPSetNormType(ksp, KSP_NORM_UNPRECONDITIONED);
+            KSPSetOperators(ksp, A, A);
+            KSPSetTolerances(ksp, 1e-8, 1e-50, PETSC_DEFAULT, 2000);
+            InstallScaledASM(ksp, A, 0, 0, NSUB, 0, exact);
+            VecSet(x,0.0); KSPSetUp(ksp); KSPSolve(ksp,b,x);
+            PetscInt it; KSPGetIterationNumber(ksp,&it);
+            KSPConvergedReason r; KSPGetConvergedReason(ksp,&r); if(r<0) it=-it;
+            const int NREP=10; MPI_Barrier(MPI_COMM_WORLD); double t0=MPI_Wtime();
+            for(int rr=0;rr<NREP;++rr){ VecSet(x,0.0); KSPSolve(ksp,b,x); }
+            MPI_Barrier(MPI_COMM_WORLD); *ms=1e3*(MPI_Wtime()-t0)/NREP;
+            KSPDestroy(&ksp); return (int)it;
+        };
+
+        Array<int> none;
+        struct Row { const char *name; ParFiniteElementSpace *fes; ParMesh *pm;
+                     ParBilinearForm *loc; PetscParMatrix *A; bool sing; Array<int>*ess; };
+        Row R[3] = {
+            {"Sys1 monodomain (mass-dom)",   &fes_h,&heart,&a1loc,&A1p, false,&none},
+            {"Sys2 u_e (singular, aniso)",   &fes_h,&heart,&kief, &Kiep, true, &none},
+            {"Sys3 torso Laplace",           &fes_t,&torso,&ktloc,&Kt3p,false,&ess_ld3},
+        };
+        for (int q=0;q<3;++q){
+            Mat A = (Mat)*R[q].A;
+            if (R[q].sing) AttachConstNullSpace(A, MPI_COMM_WORLD);
+            Vec xstar, b, x; MatCreateVecs(A, &xstar, &b); VecDuplicate(xstar, &x);
+            PetscInt rs, re; MatGetOwnershipRange(A, &rs, &re);
+            PetscInt N; MatGetSize(A, &N, NULL);
+            { PetscScalar *a; VecGetArray(xstar, &a);
+              for (PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
+              VecRestoreArray(xstar, &a); }
+            if (R[q].sing){ PetscScalar s; VecSum(xstar,&s); VecShift(xstar,-s/N); }
+            MatMult(A, xstar, b);
+            if (R[q].sing){ PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
+
+            double dm0=0, dme=0, nm0=0, nme=0;
+            int di0 = asm_run(A, b, x, false, &dm0);   // Dirichlet, ICC0
+            int die = asm_run(A, b, x, true,  &dme);   // Dirichlet, near-exact
+            int ni0 = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,0.0,1, 0,
+                                   R[q].sing,*R[q].ess,b,nullptr,&nm0);  // Neumann(pin), ICC0
+            int nie = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,0.0,1,-1,
+                                   R[q].sing,*R[q].ess,b,nullptr,&nme);  // Neumann(pin), near-exact
+            if (rank==0){
+                cout << "  " << std::left << std::setw(28) << R[q].name << std::right
+                     << " | " << std::fixed << std::setprecision(1)
+                     << std::setw(4) << di0 << "/" << std::setw(6) << dm0 << "  "
+                     << std::setw(4) << die << "/" << std::setw(6) << dme << " | "
+                     << std::setw(4) << ni0 << "/" << std::setw(6) << nm0 << "  "
+                     << std::setw(4) << nie << "/" << std::setw(6) << nme
+                     << std::defaultfloat << "\n";
+            }
+            VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
+        }
+        if (rank==0) cout <<
+          "[NEUMANN] Dirichlet block = self-contained, non-singular, cheap ICC0.  Neumann block =\n"
+          "  singular (pinned here); it under-constrains the constant mode => its real home is a\n"
+          "  coarse space (Neumann-Neumann/FETI), not a stand-alone one-level solve.\n";
+    }
+
+    // ====================================================================
     //  -tuned : cw-SORAS at each system's OPTIMAL alpha (from -transmit) vs
     //  sASM(O1,ICC0).  Reports, per system:  outer iters (=> #Allreduce, the
     //  communication proxy), avg inner-solve m (=> local-compute driver),
@@ -1459,13 +1566,13 @@ int main(int argc, char *argv[])
     double t_base=0.0, t_acc=0.0;
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
-    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
+    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
     if (fe) fprintf(fe,"# t(ms)  ECG(phi_L-phi_R)  Vm@center  u_e@center  phi_torso@L\n");
 
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
-    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap||do_fair||do_transmiti) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
+    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap||do_fair||do_transmiti||do_neumann) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
     const int sample = std::max(1, (int)(1.0/dt));    // ~ every 1 ms
     for (int s=0;s<nsteps;++s)
     {
@@ -1655,7 +1762,7 @@ int main(int argc, char *argv[])
     }
 
     // ---- benchmark activation times + conduction velocity -----------------
-    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti) {
+    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann) {
     if (rank==0) cout << "\nActivation times (V crosses 0 mV):\n";
     double tP1=-1, tP8=-1;
     for (int q=0;q<8;++q){
