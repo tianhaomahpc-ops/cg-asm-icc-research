@@ -216,6 +216,10 @@ int main(int argc, char *argv[])
     opts.AddOption(&soras_local, "-soras_local", "--soras-local",
                    "SORAS local solve: -1 near-exact CG+ICC (strong, expensive/iter); "
                    "0 one ICC0 apply (cheap); K>0 K-step Chebyshev over ICC0 (memory-flat).");
+    int soras_pu = 0;   // partition-of-unity weight: 0=multiplicity, 1=coefficient/diagonal
+    opts.AddOption(&soras_pu, "-soras_pu", "--soras-pu",
+                   "SORAS PU weight: 0=multiplicity (1/mult), 1=coefficient/diagonal "
+                   "(local Neumann-block diagonal / assembled diagonal -- anisotropy-aware).");
     opts.AddOption(&no_meanremove, "-no_meanremove", "--no-meanremove",
                    "-meanremove", "--meanremove",
                    "Skip the zero-mean projection on the Sys2 RHS (demo: breaks the anchor).");
@@ -428,10 +432,24 @@ int main(int argc, char *argv[])
             Krob.Add(soras_alpha, MG);        // + alpha M_Gamma  (Robin)
             KrobA = ToSeqAIJ(Krob);
             const Operator *Ph = fes_h.GetProlongationMatrix();
-            Vector onesL(L); onesL=1.0; Vector multT(nloc); Ph->MultTranspose(onesL,multT);
-            Vector multL(L); Ph->Mult(multT, multL);
             soras = new SORASPrec(nloc);
-            soras->P = Ph; soras->dL.SetSize(L); for(int i=0;i<L;++i) soras->dL(i)=1.0/multL(i);
+            soras->P = Ph; soras->dL.SetSize(L);
+            if (soras_pu == 0) {
+                // multiplicity PU:  dL = 1/mult   (Sum_ranks dL = 1)
+                Vector onesL(L); onesL=1.0; Vector multT(nloc); Ph->MultTranspose(onesL,multT);
+                Vector multL(L); Ph->Mult(multT, multL);
+                for(int i=0;i<L;++i) soras->dL(i)=1.0/multL(i);
+            } else {
+                // coefficient/diagonal PU:  dL(j) = K_loc_jj / (assembled diag).
+                // Unlike PCASM, K_loc = kief.SpMat() is the UNASSEMBLED Neumann block,
+                // so its diagonal at a shared dof is THIS subdomain's own (sigma-
+                // weighted) partial contribution -> the weight genuinely differs
+                // per subdomain.  P^T sums local diagonals = the assembled diagonal.
+                Vector dloc(L); kief.SpMat().GetDiag(dloc);          // local Neumann diag
+                Vector sumT(nloc); Ph->MultTranspose(dloc, sumT);    // assembled diag (true)
+                Vector sumL(L);    Ph->Mult(sumT, sumL);             // broadcast back to L
+                for(int i=0;i<L;++i) soras->dL(i)= (sumL(i)!=0.0) ? dloc(i)/sumL(i) : 1.0;
+            }
             soras->rL.SetSize(L); soras->yL.SetSize(L);
             KSPCreate(PETSC_COMM_SELF, &soras->kloc);
             KSPSetOperators(soras->kloc, KrobA, KrobA);
@@ -467,7 +485,7 @@ int main(int argc, char *argv[])
         cg2c->SetMaxIter(2000);
         KSPSetNormType((KSP)*cg2c, KSP_NORM_UNPRECONDITIONED);
         cg2c->SetPreconditioner(*accPC);       // wraps the mfem::Solver as a PCShell
-        acc_label = std::string(do_soras?"SORAS":"bjacobi")
+        acc_label = std::string(do_soras?(soras_pu?"SORAS(coefPU)":"SORAS(multPU)"):"bjacobi")
                   + (do_coarse?"+coarse":"");
         if (rank==0) cout << "[ACC] Sys2 accelerated PC = " << acc_label
                           << (do_soras?("  (alpha="+std::to_string(soras_alpha)+")"):"")

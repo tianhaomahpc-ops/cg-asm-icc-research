@@ -125,6 +125,8 @@ $$\boxed{\text{对称加权加性(系数缩放 PU)}\ +\ \text{适度 ICC}(L{=}1)
 - `precond_asm.hpp::InstallScaledASM(..., weight_mode)`:`0`=重数权(1.3a),`1`=系数/对角权(1.3b)。
   `forward_ecg -weightcmp` 对比二者 ⟹ **实测逐格相同**(见 1.3b):代数 PCASM 里对角重加权是空操作。
 - **真正的升级路线(各向异性感知)= SORAS**:用**非装配 Neumann 块** + 共享面 Robin,权按子域自身刚度自然不同。
-  仓库已有 `-soras`;各向异性 $\sigma_L/\sigma_T\approx8$ 的收益在那条线上,不在 sASM 的权里。
+  `forward_ecg -soras -soras_pu {0=重数,1=系数}`:coef PU = $K_\text{loc}$ 对角 / 装配对角(Neumann 块对角**逐子域不同**,
+  含 $\sigma$)。**实测(各向异性 Sys2,弱扩展):重数 PU → 系数 PU 迭代 np=4 276→260、np=8 324→305,约 −6%,且几乎免费**
+  (只在 setup 换一次 $dL$ 向量)。—— **验证了整条逻辑:代数 PCASM 里 0%,SORAS 里 −6%**,各向异性收益确实只在非装配那条线上。
 - RAS(1.1)= 把 $D_i$ 换成非重叠 0/1 指示、单边放,外层换 flexible-CG/GMRES(仍会因 $A^{(i)}_{jj}$ 问题受限于装配块)。
 - 乘性/着色:另写一个 PCSHELL,按 §2.3 逐色扫;仅建议做 MG-smoother 时用。
