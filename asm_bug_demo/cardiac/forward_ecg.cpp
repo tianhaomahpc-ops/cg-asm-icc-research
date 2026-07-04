@@ -176,10 +176,13 @@ int main(int argc, char *argv[])
                    "Run the cross-system preconditioning study on FEM Sys2.");
     opts.AddOption(&do_precond, "-precond", "--precond", "-noprecond", "--no-precond",
                    "ASM vs sASM iteration-count study on the 3 systems (skips EP).");
-    bool do_sweep = false;
+    bool do_sweep = false, do_weightcmp = false;
     opts.AddOption(&do_sweep, "-sweep", "--sweep", "-nosweep", "--no-sweep",
                    "sASM parameter sweep: ICC level L in {0,1,2} x overlap O in {0,1,2} "
                    "on the 3 systems; report iters + solve-only ms, pick the optimum (skips EP).");
+    opts.AddOption(&do_weightcmp, "-weightcmp", "--weightcmp", "-noweightcmp", "--no-weightcmp",
+                   "sASM weight comparison: multiplicity vs coefficient/diagonal weight on "
+                   "the 3 systems, O=0/1/2, L=0 (skips EP).");
     opts.AddOption(&do_dump, "-dump_fields", "--dump-fields", "-nodump", "--no-dump",
                    "Dump node coords + Vm/u_e/torso-phi snapshots for plotting.");
     bool do_prop = false; int prop_maxit = 4; const char *prop_prefix = "prop";
@@ -656,6 +659,53 @@ int main(int argc, char *argv[])
     }
 
     // ====================================================================
+    //  -weightcmp : sASM multiplicity weight vs coefficient/diagonal weight.
+    //  For the ASSEMBLED PCASM blocks the two are expected to COINCIDE (the
+    //  principal-submatrix diagonal A_i_jj == A_jj is subdomain-invariant).
+    // ====================================================================
+    if (do_weightcmp)
+    {
+        HypreParMatrix Kt3; ktf.FormSystemMatrix(ess_tdofs_t, Kt3);
+        PetscParMatrix Kt3p; HypreToPetscAIJ(Kt3, Kt3p, "Sys3_Kt", rank, 1, true);
+        struct Sysp { const char *name; Mat A; bool singular; };
+        Sysp S3[3] = {
+            {"Sys1 monodomain (heart, mass-dom)", (Mat)A1p,  false},
+            {"Sys2 u_e recover (heart, singular, aniso)",(Mat)Kiep, true },
+            {"Sys3 torso Laplace (torso)",        (Mat)Kt3p, false},
+        };
+        const PetscInt NSUB = 8;
+        const int nsub_eff = (Mpi::WorldSize()==1) ? (int)NSUB : Mpi::WorldSize();
+        if (rank==0)
+            cout << "\n[WEIGHTCMP] sASM iters (rtol 1e-8, ICC0), " << nsub_eff
+                 << " subdomains:  mult weight vs coef/diag weight\n"
+                 << "  system                                    O   mult   coef\n";
+        for (int q=0;q<3;++q){
+            Mat A = S3[q].A;
+            Vec xstar, b, x; MatCreateVecs(A, &xstar, &b); VecDuplicate(xstar, &x);
+            PetscInt rs, re; MatGetOwnershipRange(A, &rs, &re);
+            PetscInt N; MatGetSize(A, &N, NULL);
+            { PetscScalar *a; VecGetArray(xstar, &a);
+              for (PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
+              VecRestoreArray(xstar, &a); }
+            if (S3[q].singular){ PetscScalar s; VecSum(xstar,&s); VecShift(xstar,-s/N); }
+            MatMult(A, xstar, b);
+            if (S3[q].singular){ PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
+            for (PetscInt O=0;O<=2;++O){
+                int im = CountIters(A, b, x, true, O, 0, 1e-8, NSUB, 0);  // multiplicity
+                int ic = CountIters(A, b, x, true, O, 0, 1e-8, NSUB, 1);  // coefficient
+                if (rank==0)
+                    cout << "  " << std::left << std::setw(40) << (O==0?S3[q].name:"")
+                         << " " << O << "  " << std::right << std::setw(5) << im
+                         << "  " << std::setw(5) << ic << (im==ic?"   (identical)":"") << "\n";
+            }
+            VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
+        }
+        if (rank==0) cout << "[WEIGHTCMP] identical => algebraic diag reweight is a no-op for "
+                             "assembled PCASM blocks (A_i_jj=A_jj); anisotropy-aware weighting "
+                             "needs UNASSEMBLED Neumann blocks (SORAS).\n";
+    }
+
+    // ====================================================================
     //  -propagation : point-source information-propagation probe.
     //  Put a unit impulse at one node and solve each system capped at
     //  prop_maxit CG iterations; the support of the k-th iterate is how far
@@ -722,13 +772,13 @@ int main(int argc, char *argv[])
     double t_base=0.0, t_acc=0.0;
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
-    FILE *fe = (!do_precond && !do_prop && !do_sweep && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
+    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
     if (fe) fprintf(fe,"# t(ms)  ECG(phi_L-phi_R)  Vm@center  u_e@center  phi_torso@L\n");
 
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
-    const int nsteps = (do_precond||do_prop||do_sweep) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
+    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
     const int sample = std::max(1, (int)(1.0/dt));    // ~ every 1 ms
     for (int s=0;s<nsteps;++s)
     {
@@ -918,7 +968,7 @@ int main(int argc, char *argv[])
     }
 
     // ---- benchmark activation times + conduction velocity -----------------
-    if (!do_precond && !do_sweep) {
+    if (!do_precond && !do_sweep && !do_weightcmp) {
     if (rank==0) cout << "\nActivation times (V crosses 0 mV):\n";
     double tP1=-1, tP8=-1;
     for (int q=0;q<8;++q){

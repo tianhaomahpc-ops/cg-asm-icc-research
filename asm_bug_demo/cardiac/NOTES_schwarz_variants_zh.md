@@ -45,9 +45,11 @@ $$\boxed{\ \sum_{i}R_i^\top D_i R_i=I\ }\quad(\text{每个 dof 上,覆盖它的�
 $$D_i(j)=\frac1{m(j)},\qquad j\in\Omega_i.$$
 自动满足单位分解。零成本,均匀问题上就够。**缺点**:不看系数,强各向异性/高对比时不是最优。
 
-**(b) 系数/对角(stiffness)权 —— 各向异性/高对比首选**
+**(b) 系数/对角(stiffness)权 —— 需要"非装配 Neumann 块"才有效**
 $$D_i(j)=\frac{A^{(i)}_{jj}}{\sum_{k\in\mathcal S(j)}A^{(k)}_{jj}},$$
-即按各子域在该 dof 的**刚度对角元**加权($A^{(i)}_{jj}$ = 子域 $i$ 单元装配到 $j$ 的对角贡献)。系数大的子域"话语权"大。**对系数跳变鲁棒**($\rho$-scaling / 对角缩放)。对我的各向异性 $\sigma_L/\sigma_T\approx8$,**比纯重数稳**。仍满足单位分解。
+即按各子域在该 dof 的**刚度对角元** $A^{(i)}_{jj}$ 加权。**⚠ 关键实测发现(`-weightcmp`,已验证)**:在**代数 PCASM**里,本地块 $A_i=R_iAR_i^\top$ 是 $A$ 的**主子阵**,其对角 $A^{(i)}_{jj}\equiv A_{jj}$ **与子域无关**,于是
+$$D_i(j)=\frac{A_{jj}}{m(j)\,A_{jj}}=\frac1{m(j)}\ \Longrightarrow\ \text{与重数权(a)完全相同}.$$
+实测(heart.msh,np=4/8,含各向异性 Sys2):mult 与 coef 的迭代数**逐格相同**(如 Sys2 O=1 都是 73)。**结论:纯代数对角重加权对 ASM 是空操作。** 系数权只有当各子域用**各自装配的 Neumann 块**(共享 dof 处对角 = 该子域元素的**部分**贡献,随 $\sigma$ 变化)时才与重数不同 —— 那是 **SORAS / Neumann–Neumann** 的设置(仓库里已有 SORAS)。所以"各向异性感知加权"要在 SORAS 里做,不在算法 PCASM 里做。
 
 **(c) 光滑/距离权 —— 再降 $\lambda_{\max}$**
 $$D_i(j)=\frac{\phi_i(j)}{\sum_{k\in\mathcal S(j)}\phi_k(j)},\quad \phi_i(j)=\text{dist}\big(j,\ \partial\Omega_i\setminus\Gamma\big),$$
@@ -120,7 +122,9 @@ $$\boxed{\text{对称加权加性(系数缩放 PU)}\ +\ \text{适度 ICC}(L{=}1)
 
 ## 4. 映射到代码
 
-- `precond_asm.hpp::InstallScaledASM`:当前 = **重数权(1.3a)+ 全局对称缩放(1.1)**。
-- **升级点**:把权从 $1/m(j)$ 换成**对角/系数权(1.3b)** ⟹ 对各向异性更鲁棒(改动仅在组装 $D$ 时,用 $A^{(i)}_{jj}$ 归一化)。
-- RAS(1.1)= 把 $D_i$ 换成非重叠 0/1 指示、单边放,外层换 flexible-CG/GMRES。
+- `precond_asm.hpp::InstallScaledASM(..., weight_mode)`:`0`=重数权(1.3a),`1`=系数/对角权(1.3b)。
+  `forward_ecg -weightcmp` 对比二者 ⟹ **实测逐格相同**(见 1.3b):代数 PCASM 里对角重加权是空操作。
+- **真正的升级路线(各向异性感知)= SORAS**:用**非装配 Neumann 块** + 共享面 Robin,权按子域自身刚度自然不同。
+  仓库已有 `-soras`;各向异性 $\sigma_L/\sigma_T\approx8$ 的收益在那条线上,不在 sASM 的权里。
+- RAS(1.1)= 把 $D_i$ 换成非重叠 0/1 指示、单边放,外层换 flexible-CG/GMRES(仍会因 $A^{(i)}_{jj}$ 问题受限于装配块)。
 - 乘性/着色:另写一个 PCSHELL,按 §2.3 逐色扫;仅建议做 MG-smoother 时用。

@@ -93,9 +93,16 @@ static inline void SetupASM(KSP ksp, Mat A, PetscInt overlap, PetscInt icc_level
     SetSubICC(pc, icc_levels);
 }
 
-// ---- sASM: inner PCASM(BASIC)+ICC wrapped in D^{-1/2}(.)D^{-1/2} PCSHELL ----
+// ---- sASM: inner PCASM(BASIC)+ICC wrapped in W(.)W PCSHELL, W=diag(w) --------
+// weight_mode 0 = multiplicity   : w = 1/sqrt(m[k]),  m[k]=#subdomains at dof k.
+// weight_mode 1 = coefficient/diag: D_i(j)=A^(i)_jj / sum_{k cover j} A^(k)_jj,
+//   w = sqrt(A_jj / sum_i A^(i)_jj).  NOTE: for PCASM the local block A_i is the
+//   PRINCIPAL SUBMATRIX of A, so A^(i)_jj == A_jj for every covering subdomain
+//   => sum = m[k]*A_jj => w = 1/sqrt(m[k]) IDENTICAL to mode 0.  (Coefficient
+//   weighting only differs when the local blocks are UNASSEMBLED Neumann blocks,
+//   i.e. the SORAS/Neumann-Neumann setting -- verified empirically by -weightcmp.)
 static inline void InstallScaledASM(KSP ksp, Mat A, PetscInt overlap, PetscInt icc_levels,
-                                    PetscInt nsub)
+                                    PetscInt nsub, int weight_mode = 0)
 {
     MPI_Comm comm = PetscObjectComm((PetscObject)A);
     PC inner = nullptr;
@@ -107,24 +114,42 @@ static inline void InstallScaledASM(KSP ksp, Mat A, PetscInt overlap, PetscInt i
     PCSetUp(inner);
     SetSubICC(inner, icc_levels);
 
-    // multiplicity m[k] = #subdomains containing dof k (with overlap)
-    Vec mult = nullptr; MatCreateVecs(A, &mult, NULL); VecSet(mult, 0.0);
     PetscInt n_sub = 0; IS *is_ovl = nullptr, *is_loc = nullptr;
     PCASMGetLocalSubdomains(inner, &n_sub, &is_ovl, &is_loc);
-    for (PetscInt i = 0; i < n_sub; ++i)
-    {
-        const PetscInt *idx = nullptr; PetscInt n = 0;
-        ISGetLocalSize(is_ovl[i], &n);
-        ISGetIndices(is_ovl[i], &idx);
-        std::vector<PetscScalar> ones(n, 1.0);
-        VecSetValues(mult, n, idx, ones.data(), ADD_VALUES);
-        ISRestoreIndices(is_ovl[i], &idx);
-    }
-    VecAssemblyBegin(mult); VecAssemblyEnd(mult);
+    Vec w = nullptr; MatCreateVecs(A, &w, NULL);
 
-    Vec w = nullptr; VecDuplicate(mult, &w); VecCopy(mult, w);
-    VecReciprocal(w); VecSqrtAbs(w);            // w = 1/sqrt(m[k]) = D^{-1/2}
-    VecDestroy(&mult);
+    if (weight_mode == 0) {
+        // multiplicity m[k] = #subdomains containing dof k (with overlap)
+        Vec mult = nullptr; VecDuplicate(w, &mult); VecSet(mult, 0.0);
+        for (PetscInt i = 0; i < n_sub; ++i) {
+            const PetscInt *idx = nullptr; PetscInt n = 0;
+            ISGetLocalSize(is_ovl[i], &n); ISGetIndices(is_ovl[i], &idx);
+            std::vector<PetscScalar> ones(n, 1.0);
+            VecSetValues(mult, n, idx, ones.data(), ADD_VALUES);
+            ISRestoreIndices(is_ovl[i], &idx);
+        }
+        VecAssemblyBegin(mult); VecAssemblyEnd(mult);
+        VecCopy(mult, w); VecReciprocal(w); VecSqrtAbs(w);   // w = 1/sqrt(m)
+        VecDestroy(&mult);
+    } else {
+        // coefficient/diagonal: coef[j] = sum_i (A_i)_jj (per-subdomain block diag)
+        Vec dA = nullptr; VecDuplicate(w, &dA); MatGetDiagonal(A, dA);   // global A_jj
+        Vec coef = nullptr; VecDuplicate(w, &coef); VecSet(coef, 0.0);
+        KSP *subs = nullptr; PetscInt nl = 0, first = 0;
+        PCASMGetSubKSP(inner, &nl, &first, &subs);
+        for (PetscInt i = 0; i < nl; ++i) {
+            Mat Ai = nullptr; KSPGetOperators(subs[i], &Ai, NULL);
+            Vec di = nullptr; MatCreateVecs(Ai, &di, NULL); MatGetDiagonal(Ai, di); // (A_i)_jj
+            const PetscScalar *dv = nullptr; VecGetArrayRead(di, &dv);
+            const PetscInt *idx = nullptr; PetscInt n = 0;
+            ISGetLocalSize(is_ovl[i], &n); ISGetIndices(is_ovl[i], &idx);
+            VecSetValues(coef, n, idx, dv, ADD_VALUES);         // accumulate block diag
+            ISRestoreIndices(is_ovl[i], &idx); VecRestoreArrayRead(di, &dv); VecDestroy(&di);
+        }
+        VecAssemblyBegin(coef); VecAssemblyEnd(coef);
+        VecPointwiseDivide(w, dA, coef); VecSqrtAbs(w);         // w = sqrt(A_jj/coef)
+        VecDestroy(&dA); VecDestroy(&coef);
+    }
 
     PC outer = nullptr; KSPGetPC(ksp, &outer);
     PCSetType(outer, PCSHELL);
@@ -142,7 +167,7 @@ static inline void InstallScaledASM(KSP ksp, Mat A, PetscInt overlap, PetscInt i
 // (singular Sys2): CG then projects it out.
 static inline int CountIters(Mat A, Vec b, Vec x, bool sasm,
                              PetscInt overlap, PetscInt icc_levels, double rtol,
-                             PetscInt nsub)
+                             PetscInt nsub, int weight_mode = 0)
 {
     KSP ksp = nullptr;
     KSPCreate(PetscObjectComm((PetscObject)A), &ksp);
@@ -150,7 +175,7 @@ static inline int CountIters(Mat A, Vec b, Vec x, bool sasm,
     KSPSetNormType(ksp, KSP_NORM_PRECONDITIONED);
     KSPSetOperators(ksp, A, A);
     KSPSetTolerances(ksp, rtol, 1e-50, PETSC_DEFAULT, 2000);
-    if (sasm) InstallScaledASM(ksp, A, overlap, icc_levels, nsub);
+    if (sasm) InstallScaledASM(ksp, A, overlap, icc_levels, nsub, weight_mode);
     else      SetupASM       (ksp, A, overlap, icc_levels, nsub);
     VecSet(x, 0.0);
     KSPSolve(ksp, b, x);
