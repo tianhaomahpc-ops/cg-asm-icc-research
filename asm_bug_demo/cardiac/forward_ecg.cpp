@@ -314,6 +314,13 @@ int main(int argc, char *argv[])
                    "SORAS PU-weight study on ALL 3 systems (real cardiac params): "
                    "multiplicity PU vs coefficient/diagonal PU iteration counts, strong "
                    "near-exact local solve (skips EP).");
+    bool do_transmit = false;
+    opts.AddOption(&do_transmit, "-transmit", "--transmit", "-notransmit", "--no-transmit",
+                   "TRANSMISSION-SENSITIVITY diagnostic: hold subdomains + near-exact "
+                   "local solve + coef PU fixed, sweep ONLY the Robin parameter alpha "
+                   "(0=Neumann .. inf=Dirichlet) on the 3 systems.  Answers whether the "
+                   "iteration count depends on the interface transmission at all before "
+                   "choosing how to treat the boundary (skips EP).");
     opts.AddOption(&no_meanremove, "-no_meanremove", "--no-meanremove",
                    "-meanremove", "--meanremove",
                    "Skip the zero-mean projection on the Sys2 RHS (demo: breaks the anchor).");
@@ -915,6 +922,84 @@ int main(int argc, char *argv[])
     }
 
     // ====================================================================
+    //  -transmit : TRANSMISSION-SENSITIVITY diagnostic (do this BEFORE deciding
+    //  how to treat the interface).  Everything is held fixed -- same non-
+    //  overlapping subdomains, same near-exact local solve (CG+ICC 1e-10), same
+    //  coef PU -- and ONLY the Robin parameter alpha is swept:
+    //     alpha->0   : Neumann transmission
+    //     alpha  ~   : optimized Robin
+    //     alpha->inf : alpha*M_Gamma pins the interface => Dirichlet transmission
+    //  If iters move a lot across alpha, the interface transmission MATTERS and
+    //  it is worth optimizing (Robin).  If iters are flat, the transmission is
+    //  irrelevant -- the bottleneck is the global/coarse mode, and no boundary
+    //  treatment helps; go straight to a coarse space.
+    // ====================================================================
+    if (do_transmit)
+    {
+        const double alphas[] = {1e-3, 1e-2, 0.05, 0.2, 1.0, 10.0, 1e3};
+        const int NA = sizeof(alphas)/sizeof(alphas[0]);
+        if (rank==0){
+            cout << "\n[TRANSMIT] iters vs Robin alpha (near-exact local, coef PU, rtol 1e-8), "
+                 << Mpi::WorldSize() << " subdomains.  alpha: 0~Neumann .. inf~Dirichlet\n";
+            cout << "  system                                    ";
+            for (int a=0;a<NA;++a){ char b[16]; snprintf(b,sizeof b,"a=%g",alphas[a]); cout<<std::setw(9)<<b; }
+            cout << "   span(max/min)\n";
+        }
+        // Sys1 / Sys3 local Neumann forms (same as -soraspu)
+        ConstantCoefficient inv_dt(1.0/dt);
+        DenseMatrix DmonoH = DiagSigma(0.5*sLm/chiCm, 0.5*sTm/chiCm);
+        MatrixConstantCoefficient sig_monoH(DmonoH);
+        ParBilinearForm a1loc(&fes_h);
+        a1loc.AddDomainIntegrator(new MassIntegrator(inv_dt));
+        a1loc.AddDomainIntegrator(new DiffusionIntegrator(sig_monoH));
+        a1loc.Assemble(); a1loc.Finalize();
+        ParBilinearForm ktloc(&fes_t);
+        ktloc.AddDomainIntegrator(new DiffusionIntegrator(sig_o));
+        ktloc.Assemble(); ktloc.Finalize();
+        HypreParMatrix Kt3; ktf.FormSystemMatrix(ess_tdofs_t, Kt3);
+        PetscParMatrix Kt3p; HypreToPetscAIJ(Kt3, Kt3p, "Sys3_Kt", rank, 1, true);
+        Array<int> ess_vmark, ess_ld3;
+        fes_t.GetEssentialVDofs(ess_iface, ess_vmark);
+        for (int i=0;i<ess_vmark.Size();++i) if (ess_vmark[i]<0) ess_ld3.Append(i);
+        Array<int> none;
+        struct Row { const char *name; ParFiniteElementSpace *fes; ParMesh *pm;
+                     ParBilinearForm *loc; PetscParMatrix *A; bool sing; Array<int>*ess; };
+        Row R[3] = {
+            {"Sys1 monodomain (heart, SPD, mass-dom)",   &fes_h,&heart,&a1loc,&A1p, false,&none},
+            {"Sys2 u_e recover (heart, singular, aniso)",&fes_h,&heart,&kief, &Kiep, true, &none},
+            {"Sys3 torso Laplace (torso, SPD)",          &fes_t,&torso,&ktloc,&Kt3p,false,&ess_ld3},
+        };
+        for (int q=0;q<3;++q){
+            Mat A = (Mat)*R[q].A;
+            if (R[q].sing) AttachConstNullSpace(A, MPI_COMM_WORLD);
+            Vec xstar, b, x; MatCreateVecs(A, &xstar, &b); VecDuplicate(xstar, &x);
+            PetscInt rs, re; MatGetOwnershipRange(A, &rs, &re);
+            PetscInt N; MatGetSize(A, &N, NULL);
+            { PetscScalar *a; VecGetArray(xstar, &a);
+              for (PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
+              VecRestoreArray(xstar, &a); }
+            if (R[q].sing){ PetscScalar s; VecSum(xstar,&s); VecShift(xstar,-s/N); }
+            MatMult(A, xstar, b);
+            if (R[q].sing){ PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
+            int mn=1<<30, mx=0;
+            if (rank==0) cout << "  " << std::left << std::setw(42) << R[q].name << std::right;
+            for (int a=0;a<NA;++a){
+                int it = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,alphas[a],1,-1,R[q].sing,*R[q].ess,b);
+                if (it>0){ mn=std::min(mn,it); mx=std::max(mx,it); }
+                if (rank==0) cout << std::setw(9) << it;
+            }
+            if (rank==0){ double span = mn>0 ? (double)mx/mn : 0.0;
+                cout << "   " << std::fixed << std::setprecision(2) << span << "x"
+                     << std::defaultfloat << "\n"; }
+            VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
+        }
+        if (rank==0) cout << "[TRANSMIT] span = max/min over alpha.  span~1 => iters INSENSITIVE "
+                             "to interface transmission (bottleneck is the global/coarse mode, "
+                             "boundary treatment won't help -> use a coarse space).  span>>1 with "
+                             "an interior minimum => transmission MATTERS -> optimize alpha (Robin).\n";
+    }
+
+    // ====================================================================
     //  -propagation : point-source information-propagation probe.
     //  Put a unit impulse at one node and solve each system capped at
     //  prop_maxit CG iterations; the support of the k-th iterate is how far
@@ -981,13 +1066,13 @@ int main(int argc, char *argv[])
     double t_base=0.0, t_acc=0.0;
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
-    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
+    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
     if (fe) fprintf(fe,"# t(ms)  ECG(phi_L-phi_R)  Vm@center  u_e@center  phi_torso@L\n");
 
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
-    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
+    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
     const int sample = std::max(1, (int)(1.0/dt));    // ~ every 1 ms
     for (int s=0;s<nsteps;++s)
     {
@@ -1177,7 +1262,7 @@ int main(int argc, char *argv[])
     }
 
     // ---- benchmark activation times + conduction velocity -----------------
-    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu) {
+    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit) {
     if (rank==0) cout << "\nActivation times (V crosses 0 mV):\n";
     double tP1=-1, tP8=-1;
     for (int q=0;q<8;++q){
