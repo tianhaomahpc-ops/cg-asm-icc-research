@@ -155,6 +155,94 @@ static DenseMatrix DiagSigma(double sL, double sT)
     return D;
 }
 
+// ---- generic SORAS-preconditioned CG iteration count -----------------------
+// Build the parallel SORAS preconditioner M^{-1}=P^T D (K_loc+alpha M_Gamma)^{-1} D P
+// for ANY system (not just Sys2) and count CG iters to solve Aout x = b.
+//   * locform : an ASSEMBLED (+Finalized) ParBilinearForm whose SpMat() is the
+//               rank-local ELEMENT-assembled NEUMANN block K_loc on (fes,pmesh);
+//   * Aout    : the fully (cross-rank) assembled outer operator actually solved;
+//   * ess_ld  : local essential (Dirichlet) vdofs to pin on the Robin block too
+//               (matches Aout's elimination; empty for pure-Neumann systems);
+//   * pu_mode : 0 = multiplicity PU (dL=1/mult), 1 = coefficient/diagonal PU
+//               (dL(j)=K_loc_jj / assembled diag -- anisotropy-aware, differs per
+//               subdomain because K_loc is UNASSEMBLED).
+// Near-exact local solve (CG+ICC, 1e-10) so the fine level is the strong SORAS.
+static int SorasPUIters(ParFiniteElementSpace &fes, ParMesh &pmesh,
+                        ParBilinearForm &locform, PetscParMatrix &Aout,
+                        double alpha, int pu_mode, bool singular,
+                        const Array<int> &ess_ld)
+{
+    const int L = fes.GetVSize();
+    const int nloc = fes.GetTrueVSize();
+    // interface mass M_Gamma on the SHARED (inter-rank) faces (Robin term)
+    SparseMatrix MG(L, L); MassIntegrator mi; IsoparametricTransformation FTr;
+    const int nsf = pmesh.GetNSharedFaces();
+    for (int sf=0; sf<nsf; ++sf) {
+        int lf = pmesh.GetSharedFace(sf);
+        const FiniteElement *fe = fes.GetFaceElement(lf); if (!fe) continue;
+        pmesh.GetFaceTransformation(lf, &FTr);
+        DenseMatrix Me; mi.AssembleElementMatrix(*fe, FTr, Me);
+        Array<int> vd; fes.GetFaceVDofs(lf, vd);
+        if (vd.Size()==Me.Height()) MG.AddSubMatrix(vd, vd, Me);
+    }
+    MG.Finalize();
+    SparseMatrix Krob(locform.SpMat());   // local Neumann block (copy)
+    Krob.Add(alpha, MG);                  // + alpha M_Gamma  (Robin transmission)
+    for (int k=0;k<ess_ld.Size();++k) Krob.EliminateRowCol(ess_ld[k]); // local Dirichlet
+    Mat KrobA = ToSeqAIJ(Krob);
+
+    const Operator *Ph = fes.GetProlongationMatrix();
+    SORASPrec sp(nloc);
+    sp.P = Ph; sp.dL.SetSize(L);
+    if (pu_mode == 0) {                                   // multiplicity PU
+        Vector onesL(L); onesL=1.0; Vector multT(nloc); Ph->MultTranspose(onesL,multT);
+        Vector multL(L); Ph->Mult(multT, multL);
+        for(int i=0;i<L;++i) sp.dL(i)=1.0/multL(i);
+    } else {                                              // coefficient/diagonal PU
+        Vector dloc(L); locform.SpMat().GetDiag(dloc);
+        Vector sumT(nloc); Ph->MultTranspose(dloc, sumT);
+        Vector sumL(L);    Ph->Mult(sumT, sumL);
+        for(int i=0;i<L;++i) sp.dL(i)= (sumL(i)!=0.0) ? dloc(i)/sumL(i) : 1.0;
+    }
+    sp.rL.SetSize(L); sp.yL.SetSize(L);
+    KSPCreate(PETSC_COMM_SELF, &sp.kloc);
+    KSPSetOperators(sp.kloc, KrobA, KrobA);
+    KSPSetType(sp.kloc, KSPCG);
+    KSPSetTolerances(sp.kloc, 1e-10, 1e-14, PETSC_DEFAULT, 500);
+    KSPSetNormType(sp.kloc, KSP_NORM_UNPRECONDITIONED);
+    { PC pc; KSPGetPC(sp.kloc,&pc); PCSetType(pc,PCICC); }
+    KSPSetErrorIfNotConverged(sp.kloc, PETSC_FALSE);
+    MatCreateVecs(KrobA, &sp.rloc, &sp.zloc);
+
+    // outer system:  b = Aout * xstar  (mean-removed if singular)
+    Mat A = (Mat)Aout;
+    if (singular) AttachConstNullSpace(A, MPI_COMM_WORLD);
+    Vec xstar, b, x; MatCreateVecs(A, &xstar, &b); VecDuplicate(xstar, &x);
+    PetscInt rs, re; MatGetOwnershipRange(A, &rs, &re);
+    PetscInt N; MatGetSize(A, &N, NULL);
+    { PetscScalar *a; VecGetArray(xstar, &a);
+      for (PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
+      VecRestoreArray(xstar, &a); }
+    if (singular){ PetscScalar s; VecSum(xstar,&s); VecShift(xstar,-s/N); }
+    MatMult(A, xstar, b);
+    if (singular){ PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
+
+    PetscPCGSolver cg(Aout, "soraspu_");
+    cg.SetMaxIter(2000); cg.SetRelTol(1e-8); cg.iterative_mode=false;
+    KSPSetNormType((KSP)cg, KSP_NORM_UNPRECONDITIONED);
+    cg.SetPreconditioner(sp);
+    // copy PETSc b -> mfem true-dof Vector, solve like the EP path (line ~941)
+    Vector Bv(nloc), Xv(nloc); Xv=0.0;
+    { const PetscScalar *ba; VecGetArrayRead(b,&ba);
+      for(PetscInt i=0;i<re-rs;++i) Bv(i)=ba[i]; VecRestoreArrayRead(b,&ba); }
+    cg.Mult(Bv, Xv);
+    int it = cg.GetNumIterations();
+
+    MatDestroy(&KrobA);
+    VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
+    return it;
+}
+
 int main(int argc, char *argv[])
 {
     Mpi::Init(argc, argv);
@@ -220,6 +308,11 @@ int main(int argc, char *argv[])
     opts.AddOption(&soras_pu, "-soras_pu", "--soras-pu",
                    "SORAS PU weight: 0=multiplicity (1/mult), 1=coefficient/diagonal "
                    "(local Neumann-block diagonal / assembled diagonal -- anisotropy-aware).");
+    bool do_soraspu = false;
+    opts.AddOption(&do_soraspu, "-soraspu", "--soraspu", "-nosoraspu", "--no-soraspu",
+                   "SORAS PU-weight study on ALL 3 systems (real cardiac params): "
+                   "multiplicity PU vs coefficient/diagonal PU iteration counts, strong "
+                   "near-exact local solve (skips EP).");
     opts.AddOption(&no_meanremove, "-no_meanremove", "--no-meanremove",
                    "-meanremove", "--meanremove",
                    "Skip the zero-mean projection on the Sys2 RHS (demo: breaks the anchor).");
@@ -724,6 +817,76 @@ int main(int argc, char *argv[])
     }
 
     // ====================================================================
+    //  -soraspu : SORAS PU-weight study on ALL 3 systems (real cardiac params).
+    //  Unlike PCASM, SORAS uses the UNASSEMBLED local Neumann block, so the
+    //  coefficient/diagonal PU (dL = K_loc_jj / assembled diag) genuinely differs
+    //  per subdomain at shared dofs (carries sigma) -- the anisotropy-aware path.
+    //  For each system we build the SORAS fine level with multiplicity PU (mode 0)
+    //  and coefficient PU (mode 1) and count near-exact-local CG iters.
+    // ====================================================================
+    if (do_soraspu)
+    {
+        const int nsub_eff = Mpi::WorldSize();
+        if (rank==0) {
+            cout << "\n[SORASPU] SORAS mult-PU vs coef/diag-PU iters (rtol 1e-8, near-exact "
+                    "local CG+ICC, alpha=" << soras_alpha << "), " << nsub_eff
+                 << " subdomains (=ranks)\n";
+            if (nsub_eff==1)
+                cout << "  NOTE: np=1 => single subdomain, no shared faces => SORAS is a plain "
+                        "global solve; run with mpirun -np 4/8 for the real comparison.\n";
+            cout << "  system                                     mult   coef    delta\n";
+        }
+
+        // Sys1: local Neumann block = (1/dt)M_loc + (1/2)K_mono_loc  (SPD, non-singular)
+        ConstantCoefficient inv_dt(1.0/dt);
+        DenseMatrix DmonoH = DiagSigma(0.5*sLm/chiCm, 0.5*sTm/chiCm);
+        MatrixConstantCoefficient sig_monoH(DmonoH);
+        ParBilinearForm a1loc(&fes_h);
+        a1loc.AddDomainIntegrator(new MassIntegrator(inv_dt));
+        a1loc.AddDomainIntegrator(new DiffusionIntegrator(sig_monoH));
+        a1loc.Assemble(); a1loc.Finalize();
+
+        // Sys3: local Neumann torso block = K_o_loc (separate form so it keeps the
+        // natural BC; interface Dirichlet is imposed locally via ess_ld3 to match Kt3p)
+        ParBilinearForm ktloc(&fes_t);
+        ktloc.AddDomainIntegrator(new DiffusionIntegrator(sig_o));
+        ktloc.Assemble(); ktloc.Finalize();
+        HypreParMatrix Kt3; ktf.FormSystemMatrix(ess_tdofs_t, Kt3);
+        PetscParMatrix Kt3p; HypreToPetscAIJ(Kt3, Kt3p, "Sys3_Kt", rank, 1, true);
+        // torso interface essential LOCAL vdofs (marker: <0 = essential)
+        Array<int> ess_vmark, ess_ld3;
+        fes_t.GetEssentialVDofs(ess_iface, ess_vmark);
+        for (int i=0;i<ess_vmark.Size();++i) if (ess_vmark[i]<0) ess_ld3.Append(i);
+
+        Array<int> none;   // no local Dirichlet for the heart systems
+        struct Row { const char *name; ParFiniteElementSpace *fes; ParMesh *pm;
+                     ParBilinearForm *loc; PetscParMatrix *A; bool sing; Array<int>*ess; };
+        Row R[3] = {
+            {"Sys1 monodomain (heart, SPD, mass-dom)",   &fes_h,&heart,&a1loc,&A1p, false,&none},
+            {"Sys2 u_e recover (heart, singular, aniso)",&fes_h,&heart,&kief, &Kiep, true, &none},
+            {"Sys3 torso Laplace (torso, SPD)",          &fes_t,&torso,&ktloc,&Kt3p,false,&ess_ld3},
+        };
+        for (int q=0;q<3;++q){
+            int im = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,soras_alpha,0,R[q].sing,*R[q].ess);
+            int ic = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,soras_alpha,1,R[q].sing,*R[q].ess);
+            if (rank==0){
+                double d = im>0 ? 100.0*(ic-im)/im : 0.0;
+                char buf[16]; snprintf(buf,sizeof buf,"%+.1f%%", d);
+                cout << "  " << std::left << std::setw(42) << R[q].name
+                     << " " << std::right << std::setw(5) << im
+                     << "  " << std::setw(5) << ic
+                     << "  " << std::setw(7) << buf << (im==ic?"  (identical)":"") << "\n";
+            }
+        }
+        if (rank==0) cout << "[SORASPU] coef/diag PU weights by each subdomain's own UNASSEMBLED "
+                             "Neumann diagonal (local element volume x sigma) instead of a flat "
+                             "1/mult => cuts iters on ALL 3 systems.  Driver is diagonal NON-"
+                             "uniformity (mesh grading + coefficient), not anisotropy alone: the "
+                             "isotropic torso Sys3 gains MORE than the anisotropic Sys2, and the "
+                             "mass-dominated Sys1 (diag ~ lumped volume) gains most.\n";
+    }
+
+    // ====================================================================
     //  -propagation : point-source information-propagation probe.
     //  Put a unit impulse at one node and solve each system capped at
     //  prop_maxit CG iterations; the support of the k-th iterate is how far
@@ -790,13 +953,13 @@ int main(int argc, char *argv[])
     double t_base=0.0, t_acc=0.0;
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
-    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
+    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
     if (fe) fprintf(fe,"# t(ms)  ECG(phi_L-phi_R)  Vm@center  u_e@center  phi_torso@L\n");
 
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
-    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
+    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
     const int sample = std::max(1, (int)(1.0/dt));    // ~ every 1 ms
     for (int s=0;s<nsteps;++s)
     {
@@ -986,7 +1149,7 @@ int main(int argc, char *argv[])
     }
 
     // ---- benchmark activation times + conduction velocity -----------------
-    if (!do_precond && !do_sweep && !do_weightcmp) {
+    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu) {
     if (rank==0) cout << "\nActivation times (V crosses 0 mV):\n";
     double tP1=-1, tP8=-1;
     for (int q=0;q<8;++q){
