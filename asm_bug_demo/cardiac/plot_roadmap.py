@@ -52,8 +52,8 @@ ax.text(7.25, 7.42, "② 诊断:过计数(over-count) × 不精确(inexact ICC(0
         ha="center", va="center", fontsize=13, weight="bold")
 ax.text(7.25, 7.06, "重叠 dof 按重数各加一次 => |M^-1|、λmax 放大;ICC(0) 不精确 => 误差不被吸收 => 迭代升",
         ha="center", fontsize=8.8, color="0.15")
-ax.text(7.25, 6.70, "上界 (Toselli & Widlund 2005):  λmax(M^-1 A) ≤ (N_c + 1)·ω    [N_c = 着色数 = 过计数,  ω = 不精确本地解]",
-        ha="center", fontsize=8.6, color="#7c2d12", weight="bold")
+ax.text(7.25, 6.70, "上界 (Gander-Halpern-Santugini 2015, Thm 2.7):  κ(P_ad) ≤ C_0^2·ω·(N_c+1)    [N_c=着色数(可换最大重叠重数)=过计数,  ω=不精确本地解]",
+        ha="center", fontsize=8.4, color="#7c2d12", weight="bold")
 ax.text(7.25, 6.34, "三视角:  信息传播(每迭代一子域跳)  |  Green 函数(Sys1 指数短程 / Sys2,3 代数 1/r 长程)  |  谱桥 iters~½√κ",
         ha="center", fontsize=8.2, color="#7c2d12")
 arrow(7.25, 6.08, 7.25, 5.72, "对症")

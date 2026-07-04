@@ -60,15 +60,17 @@ P1 非结构四面体 FEM(heart 47582 tets,torso 206647 tets);各向异性 $\sig
   $\lambda_{\max}$ 偏大),谱被拉坏。
 - 本地 ICC(0) 解**不精确**,这份放大误差不被本地精解吸收 ⇒ 迭代升。(两条缺一不可:精确本地解或无重叠都不会反常。)
 
-**理论上界(抽象 Schwarz 理论,Toselli & Widlund 2005;亦见 Smith–Bjørstad–Gropp 1996、Dryja–Widlund 1987)**:
-一层加性 Schwarz 满足
-$$\lambda_{\max}\!\big(M_{\text{ASM}}^{-1}A\big)\le N_c,\qquad
-\text{带不精确本地解}:\quad a(P_{ad}u,u)\le (N_c+1)\,\omega\,a(u,u)\ \Rightarrow\ \lambda_{\max}\le(N_c+1)\,\omega,$$
-其中 **$N_c=$ 着色数(coloring number,同色子域互不重叠所需的最少颜色数)= 我们的"过计数/重数"**,
-**$\omega=$ 本地(不精确)求解器的稳定常数($=1$ 为精确解,$>1$ 为 ICC(0))= 我们的"不精确"**。
-**这条上界正是"过计数 × 不精确"的严格数学表述**:加重叠抬高 $N_c$、ICC(0) 抬高 $\omega$ ⇒ $\lambda_{\max}$ 升 ⇒ 迭代升;
-sASM 的单位分解把重数归一 ⇒ $N_c$ 那一因子被抵消 ⇒ $\lambda_{\max}\approx1$。(下界 $\lambda_{\min}\ge \tau_1/\mathcal M_c$
-由稳定分解常数给出,对应 §四的慢全局模 / 需要粗空间。)
+**理论上界(Gander–Halpern–Santugini 2015,ESAIM: M2AN 49(3):713–740,Thm 2.7 / Rmk 2.8 / Assumption 2.4;
+抽象结果源自 Toselli–Widlund 2005 Thm 2.7)**:对称加性 Schwarz(**含不精确本地解**)满足
+$$\kappa(P_{ad})\le C_0^2\,\omega\,(N_c+1),\qquad\text{即}\quad \lambda_{\max}\le\omega\,(N_c+1),\ \ \lambda_{\min}\ge 1/C_0^2,$$
+其中 **$N_c=$ 着色数(Def 2.6;可换成最大重叠重数 $\hat N$,Rmk 2.8)= 我们的"过计数/重数"**;
+**$\omega=$ 本地(不精确)求解器稳定常数(Assumption 2.4:$a(R_i^\top u_i,R_i^\top u_i)\le\omega\,\tilde a_i(u_i,u_i)$;
+$=1$ 精确、$>1$ 如 ICC(0))= 我们的"不精确"**;$C_0=$ 稳定分解常数(对应 §四 $\lambda_{\min}$ / 慢全局模)。
+**这条上界正是"过计数 × 不精确"的严格数学形式**:加重叠抬高 $N_c$($\hat N$)、ICC(0) 抬高 $\omega$ ⇒ $\lambda_{\max}$ 升 ⇒ 迭代升;
+sASM 的单位分解把重数归一 ⇒ 那一因子被抵消 ⇒ $\lambda_{\max}\approx1$。
+**假设吻合**:$a$ 对称正定 + 对称加性 Schwarz + 本地形式 $\tilde a_i$ SPD(允许不精确)—— 对上我的 ASM(BASIC)/sASM + ICC(0);
+唯一注脚:Sys2 纯 Neumann 奇异,需在零均值子空间上应用(去掉常数核后 SPD)。(注:该文\emph{自身}的新贡献是\emph{连续}
+两层粗空间分析令 $C_0$ 显式,那是另一设置;我们引用的是其 Thm 2.7 抽象组合界,对我的离散一层情形适用。)
 
 三个互补的解释视角(为报告/汇报准备):
 1. **信息传播**:一层 Schwarz 每迭代把边界势推进**一个子域跳**;要传遍全域需 $\sim$(子域直径)步 ⇒ 迭代随 $n_p$ 增长。
@@ -145,11 +147,13 @@ overlap-1(**时间最优 ≠ 迭代最优**)。③ 一层的两个瓶颈:$\lambd
 
 ## 参考文献(诊断部分的理论上界)
 
-- **A. Toselli, O. Widlund**, *Domain Decomposition Methods — Algorithms and Theory*, Springer Series in
-  Computational Mathematics **34**, 2005. —— 抽象 Schwarz 理论:一层加性 Schwarz 的
-  $\lambda_{\max}(M_{\text{ASM}}^{-1}A)\le N_c$(着色数),不精确本地解给出 $\lambda_{\max}\le(N_c{+}1)\,\omega$
-  ($\omega=$ 本地求解器稳定常数),$\lambda_{\min}\ge\tau_1/\mathcal M_c$。**"过计数 × 不精确"上界的权威出处。**
-- **B. Smith, P. Bjørstad, W. Gropp**, *Domain Decomposition: Parallel Multilevel Methods for Elliptic PDEs*,
-  Cambridge Univ. Press, 1996. —— 着色(coloring)论证给出 $\lambda_{\max}\le N_c$ 的经典教科书表述。
-- **M. Dryja, O. Widlund**, *An additive variant of the Schwarz alternating method for the case of many
-  subregions*, Tech. Rep. 339, Courant Institute, 1987. —— 加性 Schwarz 与着色论证的奠基工作。
+- **M. J. Gander, L. Halpern, K. Santugini-Repiquet**, *Continuous analysis of the additive Schwarz method:
+  A stable decomposition in $H^1$ with explicit constants*, **ESAIM: M2AN 49(3) (2015) 713–740**. ——
+  **本项目诊断上界的直接出处**:Thm 2.7 给出 $\kappa(P_{ad})\le C_0^2\,\omega\,(N_c+1)$,$N_c=$ 着色数(Def 2.6,
+  可换最大重叠重数 $\hat N$,Rmk 2.8),$\omega=$ **不精确**本地求解器稳定常数(Assumption 2.4)。**"着色数 × 不精确
+  求解器"上界的最清晰组合形式。**(该文自身新贡献为连续两层粗空间下 $C_0$ 的显式估计,属另一设置。)
+- **A. Toselli, O. Widlund**, *Domain Decomposition Methods — Algorithms and Theory*, Springer SCM **34**, 2005.
+  —— 上述抽象组合界的原始出处(其 Thm 2.7);GHS 2015 明确基于并复述之。
+- **B. Smith, P. Bjørstad, W. Gropp**, *Domain Decomposition*, Cambridge Univ. Press, 1996;
+  **M. Dryja, O. Widlund**, TR-339, Courant Institute, 1987. —— 着色论证 $\lambda_{\max}\le N_c$ 及最大重数
+  $\hat N$ 版本($[15]$, Thm 4.1)的经典/奠基出处。
