@@ -191,5 +191,20 @@ $$\boxed{\text{对称加权加性(系数缩放 PU)}\ +\ \text{适度 ICC}(L{=}1)
   **外推 3000 核(通信受限)**:$T\approx \text{it}\times(\text{本地 apply}+c\log P)$,Allreduce 延迟不随核数缩小。Sys2 sASM 67 vs cw 36 → **cw 墙钟优势随 P 只增不减**;Sys1/Sys3 迭代优势(0.75×)压不过本地开销。
 
   **逐系统结论**:**Sys1/Sys3 → sASM(O1)**;**Sys2 → cw-SORAS(α≈0.1 + 直接本地 Cholesky)**,是三样(迭代/通信/墙钟)同时不亏、且随 P 拉大优势的**唯一**系统。`SorasPUIters` 现支持 loc_mode = -2(直接 Chol)/ -1(近精确 CG+ICC)/ 0(单遍 ICC)/ K(Chebyshev)。
+
+- **`-tuned` 补:最优 α 下 cw-SORAS 的三个本地档 vs sASM(np=8,it / solve-ms)**——**关键是加了"单遍 ICC"这个等本地成本档**:
+
+  | 系统 | α* | sASM | **cwSORAS-1ICC**(等成本) | cwSORAS-近精确(m) | cwSORAS-Chol |
+  |---|---|---|---|---|---|
+  | Sys1 | 0.001 | **8**/2.7 | 9/2.3 | 6/12.1(m10) | 6/5.5 |
+  | Sys2 | 0.1 | **67**/25.4 | 80/22.1 | 36/275(m45) | 36/27.1 |
+  | Sys3 | 0.01 | **51**/48.1 | 56/45.4 | 38/1123(m49) | 38/245 |
+
+  **结论(收紧,可能反直觉)**:
+  1. **等本地成本(单遍 ICC)下,即使 α 调到最优,cwSORAS-1ICC 迭代仍全线 > sASM**(9>8、80>67、56>51)。**SORAS 结构本身不省迭代**;67→36 的收益**全来自昂贵的近精确/直接本地解**,与 Robin 结构无关。
+  2. **墙钟有迷惑性**:cwSORAS-1ICC 的 ms 略低(SORAS 本地块是非重叠 Neumann,比 sASM 的 O1 重叠装配块每 apply 更便宜),但它**迭代最多 → Allreduce 最多 → 扩展性最差**。小规模 ms 持平掩盖了这一点。
+  3. **看通信排名**(Sys2 迭代=Allreduce):cwSORAS-1ICC **80** > sASM **67** > cwSORAS-Chol **36**。3000 核 Allreduce 主导时,**cwSORAS-1ICC 反而最不扩展**。
+
+  **==> 便宜档 cw-SORAS(单遍 ICC)没意义:迭代比 sASM 还多、扩展更差。cw-SORAS 的收益是拿"贵本地解"换的,不是拿"Robin 结构"换的——正好印证"省通信必须花贵本地计算买,单遍 ICC 买不到"。**
 - RAS(1.1)= 把 $D_i$ 换成非重叠 0/1 指示、单边放,外层换 flexible-CG/GMRES(仍会因 $A^{(i)}_{jj}$ 问题受限于装配块)。
 - 乘性/着色:另写一个 PCSHELL,按 §2.3 逐色扫;仅建议做 MG-smoother 时用。

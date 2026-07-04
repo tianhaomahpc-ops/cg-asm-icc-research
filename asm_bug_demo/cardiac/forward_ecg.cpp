@@ -1037,10 +1037,10 @@ int main(int argc, char *argv[])
         const PetscInt NSUB = 8;
         if (rank==0){
             cout << "\n[TUNED] cw-SORAS(opt alpha, coef PU) vs sASM(O1,ICC0), rtol 1e-8, "
-                 << Mpi::WorldSize() << " subdomains.  SORAS local solve: CG+ICC (memory-flat, "
-                    "m inner iters) AND direct Cholesky (exact, factor-once)\n";
-            cout << "  system                                a*    sASM_it SORAS_it | comm(cw/sASM) "
-                    "| sASM_ms  SORAS_ms(CG+ICC,m)  SORAS_ms(Chol)\n";
+                 << Mpi::WorldSize() << " subdomains.  cw-SORAS local solve at 3 costs: "
+                    "1ICC (=sASM local cost), near-exact CG+ICC (m x), direct Cholesky\n";
+            cout << "  system                             a*   | sASM      | cwSORAS-1ICC   "
+                    "cwSORAS-exact(m)   cwSORAS-Chol   (each: it / solve-ms)\n";
         }
         ConstantCoefficient inv_dt(1.0/dt);
         DenseMatrix DmonoH = DiagSigma(0.5*sLm/chiCm, 0.5*sTm/chiCm);
@@ -1095,32 +1095,32 @@ int main(int argc, char *argv[])
             MatMult(A, xstar, b);
             if (R[q].sing){ PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
 
-            double sms=0, cms=0, hms=0, m=0, mh=0;
+            double sms=0, oms=0, cms=0, hms=0, mo=0, m=0, mh=0;
             int sit = sasm_run(A, b, x, &sms);
+            int oit = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,a_opt[q],1, 0,
+                                   R[q].sing,*R[q].ess,b,&mo,&oms);     // ONE ICC0 apply (=sASM cost)
             int cit = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,a_opt[q],1,-1,
-                                   R[q].sing,*R[q].ess,b,&m,&cms);      // CG+ICC local
+                                   R[q].sing,*R[q].ess,b,&m,&cms);      // near-exact CG+ICC local
             int hit = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,a_opt[q],1,-2,
                                    R[q].sing,*R[q].ess,b,&mh,&hms);     // direct Cholesky local
             if (rank==0){
-                double comm = sit>0? (double)cit/sit : 0.0;     // outer-iter ratio = Allreduce ratio
-                char mbuf[24]; snprintf(mbuf,sizeof mbuf,"%.1f (m=%.0f)", cms, m);
-                cout << "  " << std::left << std::setw(38) << R[q].name << std::right
-                     << " " << std::setw(6) << a_opt[q]
-                     << " " << std::setw(6) << sit << "  " << std::setw(6) << cit
-                     << " (" << hit << ") | " << std::fixed << std::setprecision(2)
-                     << std::setw(6) << comm << "x       | "
-                     << std::setw(7) << sms << "  " << std::setw(14) << mbuf
-                     << "  " << std::setw(7) << hms
+                char eb[24]; snprintf(eb,sizeof eb,"%d/%.1f(m%.0f)", cit, cms, m);
+                cout << "  " << std::left << std::setw(34) << R[q].name << std::right
+                     << " " << std::setw(6) << a_opt[q] << " | "
+                     << std::fixed << std::setprecision(1)
+                     << std::setw(4) << sit << "/" << std::setw(6) << sms << " | "
+                     << std::setw(4) << oit << "/" << std::setw(6) << oms << "   "
+                     << std::setw(15) << eb << "   "
+                     << std::setw(4) << hit << "/" << std::setw(6) << hms
                      << std::defaultfloat << "\n";
             }
             VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
         }
-        if (rank==0) cout << "[TUNED] comm(cw/sASM)=outer-iter ratio (=Allreduce count, the >>P<< "
-                             "scalability bottleneck): cw-SORAS ALWAYS fewer.  Local compute: CG+ICC "
-                             "costs m x (memory-flat); direct Cholesky costs ~1 solve/apply (factor "
-                             "once) => the SORAS_ms(Chol) column is the real per-iter cost.  ms is "
-                             "THIS-node wall-clock (small scale, comm ~free => sASM still fastest; "
-                             "the fewer-Allreduce win only cashes in at large P).\n";
+        if (rank==0) cout << "[TUNED] cwSORAS-1ICC is the EQUAL-local-cost comparison to sASM "
+                             "(both one ICC0 apply): if its it/ms don't beat sASM, the SORAS "
+                             "structure alone (at equal cost) isn't enough -- the win needs the "
+                             "expensive near-exact/Cholesky local.  Comm ~ outer-iter count "
+                             "(Allreduce, the >>P<< bottleneck); ms is THIS-node solve-only.\n";
     }
 
     // ====================================================================
