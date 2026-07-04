@@ -241,5 +241,18 @@ $$\boxed{\text{对称加权加性(系数缩放 PU)}\ +\ \text{适度 ICC}(L{=}1)
   - **构造难度**:sASM = `PCASMSetOverlap`(1 行)+ ICC level;cwSORAS δ0 = 手装 M_Γ+P+coef-PU(中等);**overlapping cwSORAS = 跨 rank Neumann-patch 装配 + 移位 Robin 界面 + 自定义 gather/scatter(难,未实现)**。
 
   **多维总账**:在"最少迭代/最少 Allreduce"(3000 核最关键)这维,**sASM+overlap+ICC(1–2) 赢**,且构造上是一行 vs 一大坨。cwSORAS δ0 只在"本地块最瘦/halo 最窄"这两维略优,但被更多迭代抵消。**overlapping cwSORAS 即便建出来,要追的目标(sASM O2+ICC2≈33)overlapping-Dirichlet 的 sASM 已达到,Robin 优化只比 Dirichlet 边际好一点 → 不值那构造成本。** 故推荐仍是 **sASM + overlap(O1–O2)+ ICC(1–2)+ 粗空间**。
+
+- **`-transmiti`:传输条件在【不精确本地解(ICC0)】下的敏感性 + 时间**(而 `-transmit` 用近精确)。np=8,格子=迭代/solve-ms:
+
+  | 系统 | α=.001(Neumann) | α=.2 | α=1 | α=1e3(Dirichlet) |
+  |---|---|---|---|---|
+  | Sys1 | 9/1.6 | 8/1.9 | 9/2.0 | **72/13.5** |
+  | Sys2 | 81/16.2 | 79/15.9 | 74/16.1 | **807/185** |
+  | Sys3 | 57/37.8 | 65/47.4 | 109/68.9 | **2000/1376** |
+
+  **结论**:
+  1. **Neumann 好、Dirichlet 灾难,不精确下更极端**:Neumann→Dirichlet,Sys2 迭代 10×/时间 11×、Sys3 35×/36×、Sys1 8×。迭代与时间几乎同比(每 apply 成本固定)。
+  2. **【关键新发现】不精确本地解把"优化 Robin"甜点抹平了**:Sys2 near-exact 有甜点(α=.001 53 → α=.2 **37**,省 30%);inexact(ICC0)整段 Neumann→Robin 基本平(81/79/74),**调 α 几乎白调**。原因:优化 Robin 收益要靠准确解本地 Robin 才能兑现;ICC0 的 $\omega$(本地不精确)大,主导 $\kappa\le C_0^2\omega(N_c+1)$,把传输优化淹没进噪声。
+  3. **==> 大规模(必用 ICC)下,边界条件的实际教训只剩一条:零重叠时别用 Dirichlet,取 Neumann/小 α 即可,调 α 不值得。** 又一次印证:SORAS 的"精调 Robin"卖点要靠昂贵准确本地解买,大规模用不上。
 - RAS(1.1)= 把 $D_i$ 换成非重叠 0/1 指示、单边放,外层换 flexible-CG/GMRES(仍会因 $A^{(i)}_{jj}$ 问题受限于装配块)。
 - 乘性/着色:另写一个 PCSHELL,按 §2.3 逐色扫;仅建议做 MG-smoother 时用。

@@ -349,6 +349,11 @@ int main(int argc, char *argv[])
                    "(from -transmit) vs sASM(O1,ICC0) -- iterations, avg inner-solve m, "
                    "solve-only ms, and the derived compute & communication ratios "
                    "(skips EP).");
+    bool do_transmiti = false;
+    opts.AddOption(&do_transmiti, "-transmiti", "--transmiti", "-notransmiti", "--no-transmiti",
+                   "TRANSMISSION sensitivity with INEXACT local solve (one ICC0 apply, "
+                   "not near-exact): sweep Robin alpha (0~Neumann .. inf~Dirichlet) on the "
+                   "3 systems, report iters AND solve-only ms (skips EP).");
     bool do_transmit = false;
     opts.AddOption(&do_transmit, "-transmit", "--transmit", "-notransmit", "--no-transmit",
                    "TRANSMISSION-SENSITIVITY diagnostic: hold subdomains + near-exact "
@@ -1035,6 +1040,76 @@ int main(int argc, char *argv[])
     }
 
     // ====================================================================
+    //  -transmiti : SAME transmission sweep but with an INEXACT local solve
+    //  (one ICC0 apply, the realistic large-scale local solver -- not the
+    //  near-exact CG+ICC of -transmit).  Reports iters AND solve-only ms, so
+    //  the Neumann(alpha->0) vs Dirichlet(alpha->inf) effect is measured on
+    //  BOTH iteration count and wall-clock with a cheap subdomain solver.
+    // ====================================================================
+    if (do_transmiti)
+    {
+        const double alphas[] = {1e-3, 1e-2, 0.05, 0.2, 1.0, 10.0, 1e3};
+        const int NA = sizeof(alphas)/sizeof(alphas[0]);
+        if (rank==0){
+            cout << "\n[TRANSMITI] INEXACT local (one ICC0 apply), coef PU, rtol 1e-8, "
+                 << Mpi::WorldSize() << " subdomains.  alpha: 0~Neumann .. inf~Dirichlet\n"
+                 << "  each cell = iters / solve-ms\n";
+            cout << "  system                          ";
+            for (int a=0;a<NA;++a){ char b[16]; snprintf(b,sizeof b,"a=%g",alphas[a]); cout<<std::setw(13)<<b; }
+            cout << "\n";
+        }
+        ConstantCoefficient inv_dt(1.0/dt);
+        DenseMatrix DmonoH = DiagSigma(0.5*sLm/chiCm, 0.5*sTm/chiCm);
+        MatrixConstantCoefficient sig_monoH(DmonoH);
+        ParBilinearForm a1loc(&fes_h);
+        a1loc.AddDomainIntegrator(new MassIntegrator(inv_dt));
+        a1loc.AddDomainIntegrator(new DiffusionIntegrator(sig_monoH));
+        a1loc.Assemble(); a1loc.Finalize();
+        ParBilinearForm ktloc(&fes_t);
+        ktloc.AddDomainIntegrator(new DiffusionIntegrator(sig_o));
+        ktloc.Assemble(); ktloc.Finalize();
+        HypreParMatrix Kt3; ktf.FormSystemMatrix(ess_tdofs_t, Kt3);
+        PetscParMatrix Kt3p; HypreToPetscAIJ(Kt3, Kt3p, "Sys3_Kt", rank, 1, true);
+        Array<int> ess_vmark, ess_ld3;
+        fes_t.GetEssentialVDofs(ess_iface, ess_vmark);
+        for (int i=0;i<ess_vmark.Size();++i) if (ess_vmark[i]<0) ess_ld3.Append(i);
+        Array<int> none;
+        struct Row { const char *name; ParFiniteElementSpace *fes; ParMesh *pm;
+                     ParBilinearForm *loc; PetscParMatrix *A; bool sing; Array<int>*ess; };
+        Row R[3] = {
+            {"Sys1 monodomain (mass-dom)",   &fes_h,&heart,&a1loc,&A1p, false,&none},
+            {"Sys2 u_e (singular, aniso)",   &fes_h,&heart,&kief, &Kiep, true, &none},
+            {"Sys3 torso Laplace",           &fes_t,&torso,&ktloc,&Kt3p,false,&ess_ld3},
+        };
+        for (int q=0;q<3;++q){
+            Mat A = (Mat)*R[q].A;
+            if (R[q].sing) AttachConstNullSpace(A, MPI_COMM_WORLD);
+            Vec xstar, b, x; MatCreateVecs(A, &xstar, &b); VecDuplicate(xstar, &x);
+            PetscInt rs, re; MatGetOwnershipRange(A, &rs, &re);
+            PetscInt N; MatGetSize(A, &N, NULL);
+            { PetscScalar *a; VecGetArray(xstar, &a);
+              for (PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
+              VecRestoreArray(xstar, &a); }
+            if (R[q].sing){ PetscScalar s; VecSum(xstar,&s); VecShift(xstar,-s/N); }
+            MatMult(A, xstar, b);
+            if (R[q].sing){ PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
+            if (rank==0) cout << "  " << std::left << std::setw(30) << R[q].name << std::right;
+            for (int a=0;a<NA;++a){
+                double ms=0;
+                int it = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,alphas[a],1,0,
+                                      R[q].sing,*R[q].ess,b,nullptr,&ms,0);   // loc_mode 0 = ICC0
+                if (rank==0){ char c[16]; snprintf(c,sizeof c,"%d/%.1f",it,ms);
+                              cout << std::setw(13) << c; }
+            }
+            if (rank==0) cout << "\n";
+            VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
+        }
+        if (rank==0) cout << "[TRANSMITI] inexact (1 ICC0) local: contrast with -transmit "
+                             "(near-exact).  Neumann side = small alpha, Dirichlet side = large "
+                             "alpha; both iters and wall-clock shown.\n";
+    }
+
+    // ====================================================================
     //  -tuned : cw-SORAS at each system's OPTIMAL alpha (from -transmit) vs
     //  sASM(O1,ICC0).  Reports, per system:  outer iters (=> #Allreduce, the
     //  communication proxy), avg inner-solve m (=> local-compute driver),
@@ -1384,13 +1459,13 @@ int main(int argc, char *argv[])
     double t_base=0.0, t_acc=0.0;
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
-    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
+    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
     if (fe) fprintf(fe,"# t(ms)  ECG(phi_L-phi_R)  Vm@center  u_e@center  phi_torso@L\n");
 
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
-    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap||do_fair) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
+    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap||do_fair||do_transmiti) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
     const int sample = std::max(1, (int)(1.0/dt));    // ~ every 1 ms
     for (int s=0;s<nsteps;++s)
     {
@@ -1580,7 +1655,7 @@ int main(int argc, char *argv[])
     }
 
     // ---- benchmark activation times + conduction velocity -----------------
-    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair) {
+    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti) {
     if (rank==0) cout << "\nActivation times (V crosses 0 mV):\n";
     double tP1=-1, tP8=-1;
     for (int q=0;q<8;++q){
