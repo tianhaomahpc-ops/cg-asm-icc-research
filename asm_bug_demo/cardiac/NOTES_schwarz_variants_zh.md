@@ -223,5 +223,23 @@ $$\boxed{\text{对称加权加性(系数缩放 PU)}\ +\ \text{适度 ICC}(L{=}1)
   5. **都治不了地板**(sASM O2 仍 24–28)→ 仍需粗空间。
 
   **==> 修正选型:三系统都用 sASM + overlap(O1–O2)+ 够强本地解,放弃 cw-SORAS(要调 α、装 M_Γ、还打不过);再上粗空间治地板。** 忠实的 overlapping-Robin(Neumann patch + 移位 Robin 界面)需跨 rank 单元重装配,未实现,但既然 overlapping-Dirichlet 已胜零重叠 Robin,它即便更好也是边际收益,不值那复杂度。`InstallScaledASM` 新增 `local_exact` 档(近精确本地 CG+ICC)。
+
+- **`-fair`:多维公平比较,本地解只用 ICC(0/1/2)(不用 Cholesky —— 大规模 Cholesky 慢且吃内存;ICC(L) 单遍是内存平、固定线性、CG 合法的现实本地解)**。sASM(overlap O,mult PU) vs cw-SORAS(δ=0,coef PU,最优 α),iters(np=8):
+
+  | | Sys2(难)L0 | L1 | L2 | | Sys3 L0 | L1 | L2 |
+  |---|---|---|---|---|---|---|---|
+  | sASM O0 | 76 | 59 | 53 | | 63 | 48 | 44 |
+  | sASM O1 | 67 | 43 | **35** | | 51 | 33 | **28** |
+  | sASM O2 | 66 | 41 | **33** | | 50 | 35 | **28** |
+  | cwSORAS δ0 | 80 | 59 | 48 | | 56 | 41 | 36 |
+
+  **ICC-only 下的多维结论**:
+  - **迭代(→Allreduce/通信)**:**sASM O1–O2 + ICC2 最少**(Sys2 33、Sys3 28);cwSORAS δ0 追不上(48/36)。零重叠时 cwSORAS≈sASM O0(Robin 略好过 O0),但 overlap 值 ~1.5×,比 δ0 的 Robin 强。
+  - **ICC level 是便宜杠杆**:L0→L2 约减半(Sys2 sASM O2 66→33),内存平、比 Cholesky 省太多。
+  - **每 apply 计算/内存**:cwSORAS δ0 与 sASM O0 本地块最小(1 遍 ICC);sASM O1/O2 块加 1–2 层 ghost → 每 apply 更贵、ICC(L) fill 更多。cwSORAS δ0 块最瘦但多存 M_Γ+Krob。
+  - **通信 halo 宽**:cwSORAS δ0 = 仅界面(最窄)< sASM O 的 O+1 层;但 halo 是近邻通信,非强扩展瓶颈(瓶颈是 Allreduce ∝ 迭代数,sASM O2 更少)。
+  - **构造难度**:sASM = `PCASMSetOverlap`(1 行)+ ICC level;cwSORAS δ0 = 手装 M_Γ+P+coef-PU(中等);**overlapping cwSORAS = 跨 rank Neumann-patch 装配 + 移位 Robin 界面 + 自定义 gather/scatter(难,未实现)**。
+
+  **多维总账**:在"最少迭代/最少 Allreduce"(3000 核最关键)这维,**sASM+overlap+ICC(1–2) 赢**,且构造上是一行 vs 一大坨。cwSORAS δ0 只在"本地块最瘦/halo 最窄"这两维略优,但被更多迭代抵消。**overlapping cwSORAS 即便建出来,要追的目标(sASM O2+ICC2≈33)overlapping-Dirichlet 的 sASM 已达到,Robin 优化只比 Dirichlet 边际好一点 → 不值那构造成本。** 故推荐仍是 **sASM + overlap(O1–O2)+ ICC(1–2)+ 粗空间**。
 - RAS(1.1)= 把 $D_i$ 换成非重叠 0/1 指示、单边放,外层换 flexible-CG/GMRES(仍会因 $A^{(i)}_{jj}$ 问题受限于装配块)。
 - 乘性/着色:另写一个 PCSHELL,按 §2.3 逐色扫;仅建议做 MG-smoother 时用。

@@ -178,7 +178,8 @@ static int SorasPUIters(ParFiniteElementSpace &fes, ParMesh &pmesh,
                         ParBilinearForm &locform, PetscParMatrix &Aout,
                         double alpha, int pu_mode, int loc_mode, bool singular,
                         const Array<int> &ess_ld, Vec bext,
-                        double *avg_inner=nullptr, double *solve_ms=nullptr)
+                        double *avg_inner=nullptr, double *solve_ms=nullptr,
+                        int icc_level=0)
 {
     const int L = fes.GetVSize();
     const int nloc = fes.GetTrueVSize();
@@ -223,9 +224,9 @@ static int SorasPUIters(ParFiniteElementSpace &fes, ParMesh &pmesh,
         KSPSetTolerances(sp.kloc, 1e-10, 1e-14, PETSC_DEFAULT, 500);
         KSPSetNormType(sp.kloc, KSP_NORM_UNPRECONDITIONED);
         { PC pc; KSPGetPC(sp.kloc,&pc); PCSetType(pc,PCICC); }
-    } else if (loc_mode == 0) {                  // ONE ICC0 apply ("direct ICC")
+    } else if (loc_mode == 0) {                  // ONE ICC(icc_level) apply
         KSPSetType(sp.kloc, KSPPREONLY);
-        { PC pc; KSPGetPC(sp.kloc,&pc); PCSetType(pc,PCICC); }
+        { PC pc; KSPGetPC(sp.kloc,&pc); PCSetType(pc,PCICC); PCFactorSetLevels(pc,icc_level); }
     } else {                                     // K Chebyshev steps over ICC0
         KSPSetType(sp.kloc, KSPCHEBYSHEV);
         KSPSetTolerances(sp.kloc,PETSC_DEFAULT,PETSC_DEFAULT,PETSC_DEFAULT,loc_mode);
@@ -330,6 +331,12 @@ int main(int argc, char *argv[])
                    "SORAS PU-weight study on ALL 3 systems (real cardiac params): "
                    "multiplicity PU vs coefficient/diagonal PU iteration counts, strong "
                    "near-exact local solve (skips EP).");
+    bool do_fair = false;
+    opts.AddOption(&do_fair, "-fair", "--fair", "-nofair", "--no-fair",
+                   "FAIR multi-dim comparison, ICC(0/1/2) local ONLY (no Cholesky -- "
+                   "realistic large-scale local solve): sASM(overlap 0/1/2) vs cw-SORAS"
+                   "(delta=0, opt alpha).  Reports iters across L x O and the per-apply "
+                   "compute/comm/memory characteristics (skips EP).");
     bool do_overlap = false;
     opts.AddOption(&do_overlap, "-overlap", "--overlap", "-nooverlap", "--no-overlap",
                    "OVERLAP study: does overlap help a NEAR-EXACT-local additive Schwarz, "
@@ -1223,6 +1230,94 @@ int main(int argc, char *argv[])
     }
 
     // ====================================================================
+    //  -fair : FAIR multi-dimensional comparison with ICC(0/1/2) local ONLY
+    //  (no Cholesky/near-exact -- the realistic large-scale local solve: one
+    //  memory-flat ICC(L) apply, a fixed linear op so CG stays valid).
+    //  sASM(overlap O, ICC L, mult PU) vs cw-SORAS(delta=0, ICC L, coef PU,
+    //  optimal alpha).  Prints the iteration grid L x O, then a per-apply
+    //  cost annotation (compute, communication, memory, construction).
+    // ====================================================================
+    if (do_fair)
+    {
+        const double a_opt[3] = {0.001, 0.1, 0.01};
+        const PetscInt NSUB = 8;
+        if (rank==0)
+            cout << "\n[FAIR] ICC(L) local only, rtol 1e-8, " << Mpi::WorldSize()
+                 << " subdomains.  iters:  sASM(overlap O) | cw-SORAS(delta=0)   [L=ICC level]\n";
+        ConstantCoefficient inv_dt(1.0/dt);
+        DenseMatrix DmonoH = DiagSigma(0.5*sLm/chiCm, 0.5*sTm/chiCm);
+        MatrixConstantCoefficient sig_monoH(DmonoH);
+        ParBilinearForm a1loc(&fes_h);
+        a1loc.AddDomainIntegrator(new MassIntegrator(inv_dt));
+        a1loc.AddDomainIntegrator(new DiffusionIntegrator(sig_monoH));
+        a1loc.Assemble(); a1loc.Finalize();
+        ParBilinearForm ktloc(&fes_t);
+        ktloc.AddDomainIntegrator(new DiffusionIntegrator(sig_o));
+        ktloc.Assemble(); ktloc.Finalize();
+        HypreParMatrix Kt3; ktf.FormSystemMatrix(ess_tdofs_t, Kt3);
+        PetscParMatrix Kt3p; HypreToPetscAIJ(Kt3, Kt3p, "Sys3_Kt", rank, 1, true);
+        Array<int> ess_vmark, ess_ld3;
+        fes_t.GetEssentialVDofs(ess_iface, ess_vmark);
+        for (int i=0;i<ess_vmark.Size();++i) if (ess_vmark[i]<0) ess_ld3.Append(i);
+
+        auto sasm_LO = [&](Mat A, Vec b, Vec x, int O, int L)->int{
+            KSP ksp; KSPCreate(PetscObjectComm((PetscObject)A), &ksp);
+            KSPSetType(ksp, KSPCG); KSPSetNormType(ksp, KSP_NORM_UNPRECONDITIONED);
+            KSPSetOperators(ksp, A, A);
+            KSPSetTolerances(ksp, 1e-8, 1e-50, PETSC_DEFAULT, 2000);
+            InstallScaledASM(ksp, A, O, L, NSUB, 0);       // ICC(L) apply, mult PU
+            VecSet(x,0.0); KSPSolve(ksp,b,x);
+            PetscInt it; KSPGetIterationNumber(ksp,&it);
+            KSPConvergedReason r; KSPGetConvergedReason(ksp,&r); if(r<0) it=-it;
+            KSPDestroy(&ksp); return (int)it;
+        };
+
+        Array<int> none;
+        struct Row { const char *name; ParFiniteElementSpace *fes; ParMesh *pm;
+                     ParBilinearForm *loc; PetscParMatrix *A; bool sing; Array<int>*ess; };
+        Row R[3] = {
+            {"Sys1 monodomain",   &fes_h,&heart,&a1loc,&A1p, false,&none},
+            {"Sys2 u_e (hard)",   &fes_h,&heart,&kief, &Kiep, true, &none},
+            {"Sys3 torso Laplace",&fes_t,&torso,&ktloc,&Kt3p,false,&ess_ld3},
+        };
+        for (int q=0;q<3;++q){
+            Mat A = (Mat)*R[q].A;
+            if (R[q].sing) AttachConstNullSpace(A, MPI_COMM_WORLD);
+            Vec xstar, b, x; MatCreateVecs(A, &xstar, &b); VecDuplicate(xstar, &x);
+            PetscInt rs, re; MatGetOwnershipRange(A, &rs, &re);
+            PetscInt N; MatGetSize(A, &N, NULL);
+            { PetscScalar *a; VecGetArray(xstar, &a);
+              for (PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
+              VecRestoreArray(xstar, &a); }
+            if (R[q].sing){ PetscScalar s; VecSum(xstar,&s); VecShift(xstar,-s/N); }
+            MatMult(A, xstar, b);
+            if (R[q].sing){ PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
+            if (rank==0) cout << "  " << R[q].name << "  (alpha=" << a_opt[q] << ")\n"
+                              << "     L | sASM_O0 sASM_O1 sASM_O2 | cwSORAS_d0\n";
+            for (int L=0;L<=2;++L){
+                int s0=sasm_LO(A,b,x,0,L), s1=sasm_LO(A,b,x,1,L), s2=sasm_LO(A,b,x,2,L);
+                int cs=SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,a_opt[q],1,0,
+                                    R[q].sing,*R[q].ess,b,nullptr,nullptr,L);   // cw-SORAS ICC(L)
+                if (rank==0) cout << "     " << L << " |  " << std::setw(5) << s0 << "  "
+                                  << std::setw(5) << s1 << "  " << std::setw(5) << s2
+                                  << "  |  " << std::setw(5) << cs << "\n";
+            }
+            VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
+        }
+        if (rank==0) cout <<
+          "[FAIR] all local solves = one ICC(L) apply (memory-flat, CG-valid).\n"
+          "  per-apply COMPUTE : sASM_O0 ~ cwSORAS_d0 (both 1 ICC on ~same-size block); sASM_O1/O2\n"
+          "                      grow the block by 1-2 ghost layers => more work + ICC(L) fill.\n"
+          "  COMMUNICATION     : outer Allreduce ~ iter count (the >>P<< bottleneck); halo width\n"
+          "                      = 1(cwSORAS_d0, interface only) < O+1(sASM_O overlap) (nearest-nbr).\n"
+          "  MEMORY            : ICC(L) fill grows with L and with overlap block size; cwSORAS_d0\n"
+          "                      smallest block; sASM_O2 largest.\n"
+          "  CONSTRUCTION      : sASM = PCASMSetOverlap (1 line).  cwSORAS_d0 = hand M_Gamma + P +\n"
+          "                      coef-PU (moderate).  overlapping cwSORAS = cross-rank Neumann-patch\n"
+          "                      assembly + moved Robin + gather/scatter (HARD; not built).\n";
+    }
+
+    // ====================================================================
     //  -propagation : point-source information-propagation probe.
     //  Put a unit impulse at one node and solve each system capped at
     //  prop_maxit CG iterations; the support of the k-th iterate is how far
@@ -1289,13 +1384,13 @@ int main(int argc, char *argv[])
     double t_base=0.0, t_acc=0.0;
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
-    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
+    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
     if (fe) fprintf(fe,"# t(ms)  ECG(phi_L-phi_R)  Vm@center  u_e@center  phi_torso@L\n");
 
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
-    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
+    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap||do_fair) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
     const int sample = std::max(1, (int)(1.0/dt));    // ~ every 1 ms
     for (int s=0;s<nsteps;++s)
     {
@@ -1485,7 +1580,7 @@ int main(int argc, char *argv[])
     }
 
     // ---- benchmark activation times + conduction velocity -----------------
-    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap) {
+    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair) {
     if (rank==0) cout << "\nActivation times (V crosses 0 mV):\n";
     double tP1=-1, tP8=-1;
     for (int q=0;q<8;++q){
