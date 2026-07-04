@@ -60,6 +60,16 @@ P1 非结构四面体 FEM(heart 47582 tets,torso 206647 tets);各向异性 $\sig
   $\lambda_{\max}$ 偏大),谱被拉坏。
 - 本地 ICC(0) 解**不精确**,这份放大误差不被本地精解吸收 ⇒ 迭代升。(两条缺一不可:精确本地解或无重叠都不会反常。)
 
+**理论上界(抽象 Schwarz 理论,Toselli & Widlund 2005;亦见 Smith–Bjørstad–Gropp 1996、Dryja–Widlund 1987)**:
+一层加性 Schwarz 满足
+$$\lambda_{\max}\!\big(M_{\text{ASM}}^{-1}A\big)\le N_c,\qquad
+\text{带不精确本地解}:\quad a(P_{ad}u,u)\le (N_c+1)\,\omega\,a(u,u)\ \Rightarrow\ \lambda_{\max}\le(N_c+1)\,\omega,$$
+其中 **$N_c=$ 着色数(coloring number,同色子域互不重叠所需的最少颜色数)= 我们的"过计数/重数"**,
+**$\omega=$ 本地(不精确)求解器的稳定常数($=1$ 为精确解,$>1$ 为 ICC(0))= 我们的"不精确"**。
+**这条上界正是"过计数 × 不精确"的严格数学表述**:加重叠抬高 $N_c$、ICC(0) 抬高 $\omega$ ⇒ $\lambda_{\max}$ 升 ⇒ 迭代升;
+sASM 的单位分解把重数归一 ⇒ $N_c$ 那一因子被抵消 ⇒ $\lambda_{\max}\approx1$。(下界 $\lambda_{\min}\ge \tau_1/\mathcal M_c$
+由稳定分解常数给出,对应 §四的慢全局模 / 需要粗空间。)
+
 三个互补的解释视角(为报告/汇报准备):
 1. **信息传播**:一层 Schwarz 每迭代把边界势推进**一个子域跳**;要传遍全域需 $\sim$(子域直径)步 ⇒ 迭代随 $n_p$ 增长。
    重叠本应加速这个传播,但 BASIC 的过计数把增益抵消还倒赔。
@@ -128,4 +138,18 @@ overlap-1(**时间最优 ≠ 迭代最优**)。③ 一层的两个瓶颈:$\lambd
 **代码入口(`forward_ecg.cpp`,均 skip EP loop)**:`-precond`(ASM vs sASM,iters + tot/solve-only ms)、
 `-sweep`(sASM $L\times O$ 扫描 + 时间最优)、`-fischer`(跨时间)、`-coarse`(Nicolaides 两层)、
 `-soras [-soras_local K]`(强 fine)。交付:`REPORT_SUMMARY_zh.md`、`REPORT_T3_xsys_zh.md`、
-`slides_sim_fakegeo_en.{tex,pdf}`(13 页)、`plot_geom_mesh.py`/`fig_geom.png`/`fig_meshview.png`。
+`slides_sim_fakegeo_en.{tex,pdf}`(13 页)、`plot_geom_mesh.py`/`fig_geom.png`/`fig_meshview.png`、
+`plot_roadmap.py`/`fig_roadmap.png`(本 prompt 配套逻辑路线图)。
+
+---
+
+## 参考文献(诊断部分的理论上界)
+
+- **A. Toselli, O. Widlund**, *Domain Decomposition Methods — Algorithms and Theory*, Springer Series in
+  Computational Mathematics **34**, 2005. —— 抽象 Schwarz 理论:一层加性 Schwarz 的
+  $\lambda_{\max}(M_{\text{ASM}}^{-1}A)\le N_c$(着色数),不精确本地解给出 $\lambda_{\max}\le(N_c{+}1)\,\omega$
+  ($\omega=$ 本地求解器稳定常数),$\lambda_{\min}\ge\tau_1/\mathcal M_c$。**"过计数 × 不精确"上界的权威出处。**
+- **B. Smith, P. Bjørstad, W. Gropp**, *Domain Decomposition: Parallel Multilevel Methods for Elliptic PDEs*,
+  Cambridge Univ. Press, 1996. —— 着色(coloring)论证给出 $\lambda_{\max}\le N_c$ 的经典教科书表述。
+- **M. Dryja, O. Widlund**, *An additive variant of the Schwarz alternating method for the case of many
+  subregions*, Tech. Rep. 339, Courant Institute, 1987. —— 加性 Schwarz 与着色论证的奠基工作。

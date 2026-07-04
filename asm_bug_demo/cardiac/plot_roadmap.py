@@ -47,14 +47,16 @@ def frame(x, y, w, h, fc, ec):
     ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.04,rounding_size=0.10",
                                 fc=fc, ec=ec, lw=2.0))
 
-frame(2.4, 6.30, 9.7, 1.35, "#fef3c7", "#d97706")
-ax.text(7.25, 7.38, "② 诊断:过计数(over-count) × 不精确(inexact ICC(0))",
+frame(2.4, 6.08, 9.7, 1.57, "#fef3c7", "#d97706")
+ax.text(7.25, 7.42, "② 诊断:过计数(over-count) × 不精确(inexact ICC(0))",
         ha="center", va="center", fontsize=13, weight="bold")
-ax.text(7.25, 6.92, "重叠 dof 按重数各加一次 => |M^-1|、λmax 放大;ICC(0) 不精确 => 误差不被吸收 => 迭代升",
-        ha="center", fontsize=9, color="0.15")
-ax.text(7.25, 6.54, "三视角:  信息传播(每迭代一子域跳)  |  Green 函数(Sys1 指数短程 / Sys2,3 代数 1/r 长程)  |  谱桥 iters~½√κ",
-        ha="center", fontsize=8.6, color="#7c2d12")
-arrow(7.25, 6.30, 7.25, 5.72, "对症")
+ax.text(7.25, 7.06, "重叠 dof 按重数各加一次 => |M^-1|、λmax 放大;ICC(0) 不精确 => 误差不被吸收 => 迭代升",
+        ha="center", fontsize=8.8, color="0.15")
+ax.text(7.25, 6.70, "上界 (Toselli & Widlund 2005):  λmax(M^-1 A) ≤ (N_c + 1)·ω    [N_c = 着色数 = 过计数,  ω = 不精确本地解]",
+        ha="center", fontsize=8.6, color="#7c2d12", weight="bold")
+ax.text(7.25, 6.34, "三视角:  信息传播(每迭代一子域跳)  |  Green 函数(Sys1 指数短程 / Sys2,3 代数 1/r 长程)  |  谱桥 iters~½√κ",
+        ha="center", fontsize=8.2, color="#7c2d12")
+arrow(7.25, 6.08, 7.25, 5.72, "对症")
 
 frame(3.4, 4.35, 7.7, 1.30, "#dcfce7", "#16a34a")
 ax.text(7.25, 5.38, "③ 改进:sASM  用单位分解 D^{-1/2}(·)D^{-1/2} 抵消过计数",
@@ -70,9 +72,10 @@ box(2.0, 2.85, 10.5, 0.90, "#dbeafe", "#2563eb",
 ax.text(7.25, 3.06, "λmax(重数)= sASM 已修   |   λmin(慢全局模)= 未修   |   绝对迭代数仍偏高",
         ha="center", fontsize=9.5, color="#1e3a8a", weight="bold")
 
-# --- fan-out downstream ---------------------------------------------------
-ax.text(7.25, 2.55, "顺藤摸瓜:病因暴露瓶颈 => 后续工作都是这条线的自然延伸", ha="center",
-        fontsize=10, style="italic", color="#b45309", weight="bold")
+# --- fan-out downstream:  arrows straight down from box4 (per-box center),
+#     so the central label sits cleanly in the gap between arrows -----------
+ax.text(7.15, 2.62, "顺藤摸瓜:后续工作都是这条线的自然延伸", ha="center",
+        fontsize=9.5, style="italic", color="#b45309", weight="bold")
 ds = [
     (0.35, "#ede9fe", "#7c3aed", "粗空间(coarse)", "修 λmin / 慢全局模\nNicolaides 1.34× 弱扩展平坦"),
     (3.75, "#ffe4e6", "#e11d48", "SORAS 强 fine", "压绝对迭代\n84->20 (np=2, 4.2×)"),
@@ -80,7 +83,8 @@ ds = [
     (10.55, "#fef9c3", "#ca8a04", "迭代 ≠ 墙钟", "SORAS 本地精解贵\n小规模慢 20×,大规模翻正"),
 ]
 for x, fc, ec, t, b in ds:
-    arrow(7.25, 2.85, x+1.7, 2.05, "")
+    cx = x + 1.7
+    arrow(cx, 2.85, cx, 2.02, "")
     box(x, 1.05, 3.4, 0.95, fc, ec, t, b, 11, 8.2)
 
 # --- large scale sink -----------------------------------------------------
