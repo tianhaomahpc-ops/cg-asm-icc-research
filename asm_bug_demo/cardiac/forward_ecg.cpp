@@ -567,7 +567,7 @@ int main(int argc, char *argv[])
     std::vector<Vector> fisch_P, fisch_AP;   // A-orthonormal history + A*history
     Vector ue_prev(nloc); ue_prev = 0.0;     // previous cold u_e (warm-start seed)
     const int FISCH_MAX = 16;
-    long fisch_cold=0, fisch_warm=0, fisch_fis=0;   // cumulative iteration tallies
+    long fisch_cold=0, fisch_warm=0, fisch_fis=0, fisch_phys=0;   // cumulative iteration tallies
     auto ip2 = [&](const Vector&x,const Vector&y){ return InnerProduct(MPI_COMM_WORLD,x,y); };
 
     // ---- accelerated Sys2 solver: strong fine level (SORAS) and/or shared -----
@@ -1705,7 +1705,7 @@ int main(int argc, char *argv[])
             {
                 Vector b2(nloc); Ki->Mult(Vm, b2); b2.Neg();
                 if (!no_meanremove) RemoveGlobalMean(b2, MPI_COMM_WORLD);  // zero-mean anchor
-                int it2_cold=-1, it2_warm=-1, it2_fis=-1;
+                int it2_cold=-1, it2_warm=-1, it2_fis=-1, it2_phys=-1;
                 int it2_base=-1, it2_two=-1;
                 if (do_acc) {
                     // baseline (bjacobi+ICC) -- keep this solve as the field
@@ -1749,6 +1749,16 @@ int main(int argc, char *argv[])
                     for (size_t i=0;i<fisch_P.size();++i) xf.Add(ip2(fisch_P[i],b2), fisch_P[i]);
                     cg2.Mult(b2, xf);
                     it2_fis=cg2.GetNumIterations();
+                    // (d) PHYSICS initial guess (cross-system, current-step Vm):
+                    //   monodomain reduction u_e ~ -c Vm; pick the optimal scalar
+                    //   c* = <b2, w>/<w,w>, w = Kie Vm, minimizing ||b2 - Kie(c Vm)||.
+                    //   One extra matvec + 2 inner products.  Uses THIS step's Vm
+                    //   (fresher than last step's u_e).  Measured only.
+                    Vector wphys(nloc); Kie->Mult(Vm, wphys);
+                    double cst = ip2(b2, wphys) / ip2(wphys, wphys);
+                    Vector xphys(nloc); xphys = 0.0; xphys.Add(cst, Vm);
+                    KSPSetInitialGuessNonzero((KSP)cg2, PETSC_TRUE);
+                    cg2.Mult(b2, xphys); it2_phys=cg2.GetNumIterations();
                     KSPSetInitialGuessNonzero((KSP)cg2, PETSC_FALSE);
                     // grow the history from the CLEAN cold solution (mean-zero copy)
                     Vector w(ue_h); RemoveGlobalMean(w, MPI_COMM_WORLD);
@@ -1767,6 +1777,7 @@ int main(int argc, char *argv[])
                         fisch_P.push_back(w); fisch_AP.push_back(Aw); }
                     ue_prev = ue_h;                   // warm-start seed for next step
                     fisch_cold+=it2_cold; fisch_warm+=it2_warm; fisch_fis+=it2_fis;
+                    fisch_phys+=it2_phys;
                 } else {
                     cg2.Mult(b2, ue_h);               // u_e on heart (PETSc path)
                 }
@@ -1794,7 +1805,8 @@ int main(int argc, char *argv[])
                     if (do_acc)
                         cout << it2_two<<" (baseline="<<it2_base<<" "<<acc_label<<")";
                     else if (do_fischer)
-                        cout << it2_fis<<" (cold="<<it2_cold<<" warm="<<it2_warm<<")";
+                        cout << it2_fis<<" (cold="<<it2_cold<<" warm="<<it2_warm
+                             <<" phys="<<it2_phys<<")";
                     else
                         cout << cg2.GetNumIterations();
                     cout <<"  Sys3(torso)="<<cg3.GetNumIterations()
@@ -1847,12 +1859,15 @@ int main(int argc, char *argv[])
     if (KrobA) MatDestroy(&KrobA);
 
     if (do_fischer && rank==0 && fisch_cold>0) {
-        cout << "\n[FISCHER] Sys2 EP-loop cross-time acceleration (total CG iters over the run):\n"
-             << "  cold (x0=0)          : " << fisch_cold << "\n"
-             << "  warm (prev u_e)      : " << fisch_warm
+        cout << "\n[FISCHER] Sys2 EP-loop acceleration (total CG iters over the run):\n"
+             << "  cold (x0=0)              : " << fisch_cold << "\n"
+             << "  warm (prev-step u_e)     : " << fisch_warm
              << "  (-" << (int)(100.0*(fisch_cold-fisch_warm)/fisch_cold) << "%)\n"
-             << "  Fischer (history)    : " << fisch_fis
-             << "  (-" << (int)(100.0*(fisch_cold-fisch_fis)/fisch_cold) << "%)\n";
+             << "  Fischer (u_e history)    : " << fisch_fis
+             << "  (-" << (int)(100.0*(fisch_cold-fisch_fis)/fisch_cold) << "%)\n"
+             << "  PHYSICS (x0 = c* Vm)     : " << fisch_phys
+             << "  (-" << (int)(100.0*(fisch_cold-fisch_phys)/fisch_cold) << "%)"
+             << "   [cross-system, current-step Vm; monodomain reduction u_e~-c Vm]\n";
     }
 
     // ---- benchmark activation times + conduction velocity -----------------
