@@ -368,6 +368,11 @@ int main(int argc, char *argv[])
                    "(from -transmit) vs sASM(O1,ICC0) -- iterations, avg inner-solve m, "
                    "solve-only ms, and the derived compute & communication ratios "
                    "(skips EP).");
+    bool do_anisocmp = false;
+    opts.AddOption(&do_anisocmp, "-anisocmp", "--anisocmp", "-noanisocmp", "--no-anisocmp",
+                   "ISOTROPIC vs ANISOTROPIC: build Sys1 and Sys2 with sigma_T:=sigma_L "
+                   "(isotropic) vs the real anisotropic tensor, compare sASM(O1,ICC0) "
+                   "iters + condition number -- does anisotropy make it harder? (skips EP).");
     bool do_decay = false;
     opts.AddOption(&do_decay, "-decay", "--decay", "-nodecay", "--no-decay",
                    "RESIDUAL-DECAY + spectrum diagnostic: sASM(O1,ICC0) CG on the 3 "
@@ -1311,6 +1316,74 @@ int main(int argc, char *argv[])
     }
 
     // ====================================================================
+    //  -anisocmp : ISOTROPIC vs ANISOTROPIC.  Rebuild Sys1 (A1=(1/dt)M+(1/2)K)
+    //  and Sys2 (Kie) with sigma_T:=sigma_L (isotropic, ratio 1) vs the real
+    //  anisotropic tensor, and compare sASM(O1,ICC0) iters + cond.  Isotropic K
+    //  = scalar x Laplacian => its cond is the plain-Laplacian cond (scalar
+    //  cancels); anisotropy amplifies it by the fiber ratio => harder or not?
+    // ====================================================================
+    if (do_anisocmp)
+    {
+        const PetscInt NSUB = 8;
+        auto run_spec = [&](Mat A, bool sing, int *itout, double *cond)->void{
+            if (sing) AttachConstNullSpace(A, MPI_COMM_WORLD);
+            Vec xstar,b,x; MatCreateVecs(A,&xstar,&b); VecDuplicate(xstar,&x);
+            PetscInt rs,re; MatGetOwnershipRange(A,&rs,&re); PetscInt N; MatGetSize(A,&N,NULL);
+            { PetscScalar *a; VecGetArray(xstar,&a);
+              for(PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
+              VecRestoreArray(xstar,&a); }
+            if (sing){ PetscScalar s; VecSum(xstar,&s); VecShift(xstar,-s/N); }
+            MatMult(A,xstar,b);
+            if (sing){ PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
+            KSP ksp; KSPCreate(PetscObjectComm((PetscObject)A),&ksp);
+            KSPSetType(ksp,KSPCG); KSPSetNormType(ksp,KSP_NORM_UNPRECONDITIONED);
+            KSPSetOperators(ksp,A,A); KSPSetTolerances(ksp,1e-8,1e-50,PETSC_DEFAULT,500);
+            InstallScaledASM(ksp,A,1,0,NSUB,0); KSPSetComputeSingularValues(ksp,PETSC_TRUE);
+            VecSet(x,0.0); KSPSolve(ksp,b,x);
+            PetscInt it; KSPGetIterationNumber(ksp,&it);
+            PetscReal smax=0,smin=0; KSPComputeExtremeSingularValues(ksp,&smax,&smin);
+            *itout=(int)it; *cond=(smin>0?smax/smin:0);
+            KSPDestroy(&ksp); VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
+        };
+        // ---- Sys1 iso: (1/dt)M + (1/2) K(sigma_L isotropic) ----
+        DenseMatrix D1i = DiagSigma(sLm/chiCm, sLm/chiCm);
+        MatrixConstantCoefficient s1i(D1i);
+        ParBilinearForm k1i(&fes_h); k1i.AddDomainIntegrator(new DiffusionIntegrator(s1i));
+        k1i.Assemble(); k1i.Finalize(); HypreParMatrix *Kd1i=k1i.ParallelAssemble();
+        HypreParMatrix *A1i=Add(1.0/dt,*M,0.5,*Kd1i);
+        PetscParMatrix A1ip; HypreToPetscAIJ(*A1i,A1ip,"S1iso",rank,1,true);
+        // ---- Sys2 iso: K(sigma_i+sigma_e, isotropic at L) ----
+        DenseMatrix D2i = DiagSigma(siL+seL, siL+seL);
+        MatrixConstantCoefficient s2i(D2i);
+        ParBilinearForm k2i(&fes_h); k2i.AddDomainIntegrator(new DiffusionIntegrator(s2i));
+        k2i.Assemble(); k2i.Finalize(); HypreParMatrix *Kie_i=k2i.ParallelAssemble();
+        PetscParMatrix Kie_ip; HypreToPetscAIJ(*Kie_i,Kie_ip,"S2iso",rank,1,true);
+
+        int i1i,i1a,i2i,i2a; double c1i,c1a,c2i,c2a;
+        run_spec((Mat)A1ip,  false,&i1i,&c1i);   // Sys1 iso
+        run_spec((Mat)A1p,   false,&i1a,&c1a);   // Sys1 aniso (real)
+        run_spec((Mat)Kie_ip,true, &i2i,&c2i);   // Sys2 iso
+        run_spec((Mat)Kiep,  true, &i2a,&c2a);   // Sys2 aniso (real)
+        if (rank==0){
+            double r1=sTm/sLm, r2=(siT+seT)/(siL+seL);
+            cout << "\n[ANISOCMP] sASM(O1,ICC0), " << Mpi::WorldSize()
+                 << " subdomains.  iso = sigma_T:=sigma_L (ratio 1); aniso = real tensor\n"
+                 << std::fixed << std::setprecision(2)
+                 << "  Sys1 monodomain (mass-dom): iso " << i1i << " it (cond " << std::setprecision(1) << c1i
+                 << ")  ->  aniso[ratio " << std::setprecision(2) << r1 << "] " << i1a << " it (cond "
+                 << std::setprecision(1) << c1a << ")\n"
+                 << "  Sys2 u_e recover (elliptic): iso " << i2i << " it (cond " << c2i
+                 << ")  ->  aniso[ratio " << std::setprecision(2) << r2 << "] " << i2a << " it (cond "
+                 << std::setprecision(1) << c2a << ")" << std::defaultfloat << "\n";
+            cout << "[ANISOCMP] Sys1 barely moves (mass dominates the stiffness anisotropy); "
+                    "Sys2 iso->aniso ratio: " << std::setprecision(2) << (double)i2a/std::max(i2i,1)
+                 << "x iters, " << std::setprecision(2) << c2a/std::max(c2i,1e-9)
+                 << "x cond -- anisotropy makes the ELLIPTIC recovery harder.\n" << std::defaultfloat;
+        }
+        delete A1i; delete Kd1i; delete Kie_i;
+    }
+
+    // ====================================================================
     //  -tuned : cw-SORAS at each system's OPTIMAL alpha (from -transmit) vs
     //  sASM(O1,ICC0).  Reports, per system:  outer iters (=> #Allreduce, the
     //  communication proxy), avg inner-solve m (=> local-compute driver),
@@ -1660,13 +1733,13 @@ int main(int argc, char *argv[])
     double t_base=0.0, t_acc=0.0;
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
-    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
+    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay && !do_anisocmp && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
     if (fe) fprintf(fe,"# t(ms)  ECG(phi_L-phi_R)  Vm@center  u_e@center  phi_torso@L\n");
 
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
-    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap||do_fair||do_transmiti||do_neumann||do_decay) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
+    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap||do_fair||do_transmiti||do_neumann||do_decay||do_anisocmp) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
     const int sample = std::max(1, (int)(1.0/dt));    // ~ every 1 ms
     for (int s=0;s<nsteps;++s)
     {
@@ -1871,7 +1944,7 @@ int main(int argc, char *argv[])
     }
 
     // ---- benchmark activation times + conduction velocity -----------------
-    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay) {
+    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay && !do_anisocmp) {
     if (rank==0) cout << "\nActivation times (V crosses 0 mV):\n";
     double tP1=-1, tP8=-1;
     for (int q=0;q<8;++q){
