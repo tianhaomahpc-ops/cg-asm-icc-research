@@ -199,11 +199,17 @@ static int SorasPUIters(ParFiniteElementSpace &fes, ParMesh &pmesh,
     if (alpha != 0.0) Krob.Add(alpha, MG); // + alpha M_Gamma  (Robin transmission)
     for (int k=0;k<ess_ld.Size();++k) Krob.EliminateRowCol(ess_ld[k]); // local Dirichlet
     // alpha==0 => PURE Neumann local block: singular for a diffusion operator
-    // (constant nullspace).  Pin ONE local dof (minimal Dirichlet anchor) so the
-    // block is invertible and a cheap ICC0 apply is possible -- the direct
-    // "Neumann subdomain" the -neumann study compares against ASM's Dirichlet.
-    if (alpha == 0.0 && ess_ld.Size() == 0) Krob.EliminateRowCol(0);
+    // (constant nullspace).  loc_mode!=-3: pin ONE local dof (minimal Dirichlet
+    // anchor) so a cheap ICC0 apply is possible.  loc_mode==-3: DON'T pin -- keep
+    // the true singular Neumann block and remove the nullspace via projection
+    // (attach a constant MatNullSpace below => the CG solves the pseudoinverse
+    // K^+ w on range(K); the honest "exclude the nullspace" alternative to pin).
+    if (alpha == 0.0 && ess_ld.Size() == 0 && loc_mode != -3) Krob.EliminateRowCol(0);
     Mat KrobA = ToSeqAIJ(Krob);
+    if (alpha == 0.0 && loc_mode == -3) {          // pseudoinverse: project out constants
+        MatNullSpace nsp; MatNullSpaceCreate(PETSC_COMM_SELF, PETSC_TRUE, 0, NULL, &nsp);
+        MatSetNullSpace(KrobA, nsp); MatNullSpaceDestroy(&nsp);
+    }
 
     const Operator *Ph = fes.GetProlongationMatrix();
     SORASPrec sp(nloc);
@@ -221,7 +227,15 @@ static int SorasPUIters(ParFiniteElementSpace &fes, ParMesh &pmesh,
     sp.rL.SetSize(L); sp.yL.SetSize(L);
     KSPCreate(PETSC_COMM_SELF, &sp.kloc);
     KSPSetOperators(sp.kloc, KrobA, KrobA);
-    if (loc_mode == -2) {                        // DIRECT Cholesky (exact, factor once)
+    if (loc_mode == -3) {                        // ONE ICC0 apply + nullspace projection
+        // The cheap "ICC + remove nullspace" path: KSP projects b/x onto range(K)
+        // (MatSetNullSpace above), but ICC still factors the SINGULAR K -> its
+        // zero pivot needs a positive-definite shift to exist.  Nullspace removal
+        // (a SOLVE-level op) does NOT by itself let the ICC FACTORIZATION survive.
+        KSPSetType(sp.kloc, KSPPREONLY);
+        { PC pc; KSPGetPC(sp.kloc,&pc); PCSetType(pc,PCICC);
+          PCFactorSetShiftType(pc, MAT_SHIFT_POSITIVE_DEFINITE); }  // survive singular ICC
+    } else if (loc_mode == -2) {                 // DIRECT Cholesky (exact, factor once)
         KSPSetType(sp.kloc, KSPPREONLY);
         { PC pc; KSPGetPC(sp.kloc,&pc); PCSetType(pc,PCCHOLESKY); }
     } else if (loc_mode < 0) {                   // near-exact CG+ICC (memory-flat)
@@ -1136,8 +1150,8 @@ int main(int argc, char *argv[])
         if (rank==0){
             cout << "\n[NEUMANN] Neumann-subdomain (alpha=0, 1 dof pinned) vs Dirichlet-subdomain"
                     " (ASM), zero overlap, rtol 1e-8, " << Mpi::WorldSize() << " subdomains\n";
-            cout << "  system                        | Dirichlet(ASM) ICC0  exact | Neumann ICC0  exact"
-                    "   (iters/solve-ms)\n";
+            cout << "  system                     | Dir(ASM) ICC0  exact | Neu-pin ICC0  exact | "
+                    "Neu-nullsp ICC0+shift   (iters/solve-ms)\n";
         }
         ConstantCoefficient inv_dt(1.0/dt);
         DenseMatrix DmonoH = DiagSigma(0.5*sLm/chiCm, 0.5*sTm/chiCm);
@@ -1192,20 +1206,23 @@ int main(int argc, char *argv[])
             MatMult(A, xstar, b);
             if (R[q].sing){ PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
 
-            double dm0=0, dme=0, nm0=0, nme=0;
+            double dm0=0, dme=0, nm0=0, nme=0, nmn=0;
             int di0 = asm_run(A, b, x, false, &dm0);   // Dirichlet, ICC0
             int die = asm_run(A, b, x, true,  &dme);   // Dirichlet, near-exact
             int ni0 = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,0.0,1, 0,
                                    R[q].sing,*R[q].ess,b,nullptr,&nm0);  // Neumann(pin), ICC0
             int nie = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,0.0,1,-1,
                                    R[q].sing,*R[q].ess,b,nullptr,&nme);  // Neumann(pin), near-exact
+            int nin = SorasPUIters(*R[q].fes,*R[q].pm,*R[q].loc,*R[q].A,0.0,1,-3,
+                                   R[q].sing,*R[q].ess,b,nullptr,&nmn);  // Neumann(nullspace K+)
             if (rank==0){
-                cout << "  " << std::left << std::setw(28) << R[q].name << std::right
+                cout << "  " << std::left << std::setw(25) << R[q].name << std::right
                      << " | " << std::fixed << std::setprecision(1)
                      << std::setw(4) << di0 << "/" << std::setw(6) << dm0 << "  "
                      << std::setw(4) << die << "/" << std::setw(6) << dme << " | "
                      << std::setw(4) << ni0 << "/" << std::setw(6) << nm0 << "  "
-                     << std::setw(4) << nie << "/" << std::setw(6) << nme
+                     << std::setw(4) << nie << "/" << std::setw(6) << nme << " | "
+                     << std::setw(4) << nin << "/" << std::setw(6) << nmn
                      << std::defaultfloat << "\n";
             }
             VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);

@@ -271,5 +271,7 @@ $$\boxed{\text{对称加权加性(系数缩放 PU)}\ +\ \text{适度 ICC}(L{=}1)
   1. **Dirichlet 迭代上赢或平、时间全赢**;Sys3 Neumann 迭代略少但时间反而更慢(本地块更大)。
   2. **冒烟证据:Neumann 越精确解越差**——Sys2 Neumann 近精确 114 > 它自己 ICC0 84 > Dirichlet 近精确 51。钉点的 Neumann 块是**病态**预条件:常数模没被正确约束,near-exact 忠实放大坏分量,ICC0 的不精确反而抹平它。
   3. **==> 数值证明:纯 Neumann 子域单层站不住,打不过 Dirichlet-ASM,且"解得越准越糟"。它天生要配粗空间(Neumann-Neumann/FETI),不是一个能独立用的单层法。**
+
+  **补充:"用 ICC + 去 nullspace 便宜解 Neumann 块"行不行?——能跑但极差**(np=8,迭代):Neu 去-nullspace(ICC0+shift)= **87 / 315 / 2000(Sys3 不收敛)**,远差于 Neu 钉点(17/84/57)与 Dirichlet(13/76/63)。原因是**两个层次**:(a) nullspace 投影是"解层"操作,治 RHS 不相容 + 解不唯一;(b) 但 ICC 分解在**常数模零主元处崩溃**是"分解层"问题,nullspace 投影没碰被分解的矩阵 → ICC 照样崩,**必须加 shift**;而 shift 把常数模压到 ~ε → 块条件数 ~1/ε **病态** → ICC0 极差 → 外层爆炸。**反而钉点更好**:它给一个真正良态的块(钉点处 O(1) 特征值),ICC0 质量好。正统挂核伪逆(near-exact CG+nullspace)在病态块上要几百内层迭代直接超时。**结论:去 nullspace 救不了便宜 ICC;纯 Neumann 块无论钉点/挂核单层都不行,归宿是粗空间。**
 - RAS(1.1)= 把 $D_i$ 换成非重叠 0/1 指示、单边放,外层换 flexible-CG/GMRES(仍会因 $A^{(i)}_{jj}$ 问题受限于装配块)。
 - 乘性/着色:另写一个 PCSHELL,按 §2.3 逐色扫;仅建议做 MG-smoother 时用。
