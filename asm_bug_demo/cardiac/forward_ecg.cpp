@@ -368,6 +368,12 @@ int main(int argc, char *argv[])
                    "(from -transmit) vs sASM(O1,ICC0) -- iterations, avg inner-solve m, "
                    "solve-only ms, and the derived compute & communication ratios "
                    "(skips EP).");
+    bool do_decay = false;
+    opts.AddOption(&do_decay, "-decay", "--decay", "-nodecay", "--no-decay",
+                   "RESIDUAL-DECAY + spectrum diagnostic: sASM(O1,ICC0) CG on the 3 "
+                   "systems, dump the residual history and the preconditioned-operator "
+                   "eigenvalue estimates (how many SMALL modes cause the slow tail => "
+                   "the deflation/recycling dimension) (skips EP).");
     bool do_neumann = false;
     opts.AddOption(&do_neumann, "-neumann", "--neumann", "-noneumann", "--no-neumann",
                    "DIRECT Neumann-subdomain vs Dirichlet-subdomain (ASM): local block is "
@@ -1234,6 +1240,77 @@ int main(int argc, char *argv[])
     }
 
     // ====================================================================
+    //  -decay : residual-decay + spectrum diagnostic.  For each system, run
+    //  sASM(O1,ICC0) CG and record (a) the residual history (does it decay
+    //  fast then stall on a slow tail?) and (b) the eigenvalue estimates of the
+    //  PRECONDITIONED operator (a few small eigenvalues => a low-dim slow
+    //  subspace => deflation/recycling of that many vectors collapses the tail,
+    //  the "besides-coarse-space" lever tailored to our repeated Sys2 solves).
+    // ====================================================================
+    if (do_decay)
+    {
+        HypreParMatrix Kt3d; ktf.FormSystemMatrix(ess_tdofs_t, Kt3d);
+        PetscParMatrix Kt3pd; HypreToPetscAIJ(Kt3d, Kt3pd, "Sys3_Kt", rank, 1, true);
+        struct Sd { const char *name; Mat A; bool sing; };
+        Sd S3[3] = { {"Sys1 monodomain", (Mat)A1p, false},
+                     {"Sys2 u_e (hard)",  (Mat)Kiep, true},
+                     {"Sys3 torso",       (Mat)Kt3pd, false} };
+        const PetscInt NSUB = 8;
+        const int MAXIT = 300;
+        if (rank==0) cout << "\n[DECAY] sASM(O1,ICC0) CG residual decay + preconditioned spectrum, "
+                          << Mpi::WorldSize() << " subdomains\n";
+        for (int q=0;q<3;++q){
+            Mat A = S3[q].A;
+            if (S3[q].sing) AttachConstNullSpace(A, MPI_COMM_WORLD);
+            Vec xstar, b, x; MatCreateVecs(A,&xstar,&b); VecDuplicate(xstar,&x);
+            PetscInt rs,re; MatGetOwnershipRange(A,&rs,&re); PetscInt N; MatGetSize(A,&N,NULL);
+            { PetscScalar *a; VecGetArray(xstar,&a);
+              for(PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
+              VecRestoreArray(xstar,&a); }
+            if (S3[q].sing){ PetscScalar s; VecSum(xstar,&s); VecShift(xstar,-s/N); }
+            MatMult(A,xstar,b);
+            if (S3[q].sing){ PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
+            KSP ksp; KSPCreate(PetscObjectComm((PetscObject)A),&ksp);
+            KSPSetType(ksp,KSPCG); KSPSetNormType(ksp,KSP_NORM_UNPRECONDITIONED);
+            KSPSetOperators(ksp,A,A); KSPSetTolerances(ksp,1e-8,1e-50,PETSC_DEFAULT,MAXIT);
+            InstallScaledASM(ksp,A,1,0,NSUB,0);
+            KSPSetComputeEigenvalues(ksp,PETSC_TRUE); KSPSetComputeSingularValues(ksp,PETSC_TRUE);
+            std::vector<PetscReal> hist(MAXIT+2);
+            KSPSetResidualHistory(ksp,hist.data(),MAXIT+2,PETSC_TRUE);
+            VecSet(x,0.0); KSPSolve(ksp,b,x);
+            PetscInt its; KSPGetIterationNumber(ksp,&its);
+            PetscReal smax=0,smin=0; KSPComputeExtremeSingularValues(ksp,&smax,&smin);
+            std::vector<PetscReal> er(its+2,0), ei(its+2,0); PetscInt neig=0;
+            KSPComputeEigenvalues(ksp,its+1,er.data(),ei.data(),&neig);
+            std::sort(er.begin(),er.begin()+neig);
+            if (rank==0){
+                cout << "  " << S3[q].name << ":  iters=" << its
+                     << "  cond(M^-1 A)~" << std::fixed << std::setprecision(1) << (smin>0?smax/smin:0)
+                     << "  lambda_min~" << std::setprecision(4) << smin
+                     << "  lambda_max~" << std::setprecision(2) << smax << std::defaultfloat << "\n";
+                // residual decay at checkpoints (relative to r0)
+                double r0 = hist[0]>0?hist[0]:1.0;
+                cout << "    resid/r0 @ it:";
+                for (int k : {0,5,10,20,40,80,160}) if (k<=its)
+                    { cout << " " << k << ":" << std::scientific << std::setprecision(1) << hist[k]/r0; }
+                cout << std::defaultfloat << " end(" << its << "):" << std::scientific
+                     << std::setprecision(1) << hist[its]/r0 << std::defaultfloat << "\n";
+                // count "small" eigenvalues (< 0.1 lambda_max) = the slow subspace dim
+                int nsmall=0; for (int i=0;i<neig;++i) if (er[i]<0.1*smax) nsmall++;
+                cout << "    smallest eigs:";
+                for (int i=0;i<std::min((int)neig,8);++i)
+                    cout << " " << std::setprecision(3) << er[i];
+                cout << "   #(lambda<0.1 lambda_max)=" << nsmall
+                     << "  => deflation dim ~" << nsmall << "\n";
+            }
+            KSPDestroy(&ksp); VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
+        }
+        if (rank==0) cout << "[DECAY] fast head + slow tail, and a few small eigenvalues, => the "
+                             "tail is a LOW-DIM slow subspace; deflating/recycling ~that many "
+                             "vectors collapses it (our repeated Sys2 solves make recycling free).\n";
+    }
+
+    // ====================================================================
     //  -tuned : cw-SORAS at each system's OPTIMAL alpha (from -transmit) vs
     //  sASM(O1,ICC0).  Reports, per system:  outer iters (=> #Allreduce, the
     //  communication proxy), avg inner-solve m (=> local-compute driver),
@@ -1583,13 +1660,13 @@ int main(int argc, char *argv[])
     double t_base=0.0, t_acc=0.0;
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
-    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
+    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
     if (fe) fprintf(fe,"# t(ms)  ECG(phi_L-phi_R)  Vm@center  u_e@center  phi_torso@L\n");
 
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
-    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap||do_fair||do_transmiti||do_neumann) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
+    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap||do_fair||do_transmiti||do_neumann||do_decay) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
     const int sample = std::max(1, (int)(1.0/dt));    // ~ every 1 ms
     for (int s=0;s<nsteps;++s)
     {
@@ -1779,7 +1856,7 @@ int main(int argc, char *argv[])
     }
 
     // ---- benchmark activation times + conduction velocity -----------------
-    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann) {
+    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay) {
     if (rank==0) cout << "\nActivation times (V crosses 0 mV):\n";
     double tP1=-1, tP8=-1;
     for (int q=0;q<8;++q){
