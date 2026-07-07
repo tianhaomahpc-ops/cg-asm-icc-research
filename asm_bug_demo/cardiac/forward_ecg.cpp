@@ -99,6 +99,61 @@ public:
     }
 };
 
+// ---- general two-level: fine + a coarse space spanned by `nm` local mode-vectors
+//      per subdomain (rank).  Global coarse basis W = { rank k's nm modes },
+//      dim m = nm*np.  M^{-1} r = fine(r) + W E^{-1} W^T r,  E = W^T A W (m x m,
+//      replicated).  nm=1 with mode 0 = indicator reproduces TwoLevelNicolaides;
+//      nm=4 with modes {1, x, y, z} spans the smooth low-frequency slow subspace.
+//      proj_const handles a singular A (constant nullspace = sum of the indicators).
+class TwoLevelCoarse : public Solver
+{
+    Solver &fine_; const Operator &A_; MPI_Comm comm_;
+    int np_, rk_, nm_, m_;
+    std::vector<Vector> modes_;         // nm local modes (nloc each), mode 0 = indicator
+    DenseMatrix Einv_;                  // m x m, replicated
+    Vector nsp_;                        // coarse-coeff nullspace dir (singular A)
+    bool proj_;
+    mutable Vector fz_;
+public:
+    TwoLevelCoarse(Solver &fine, const Operator &A, MPI_Comm comm, int np, int rk,
+                   int nloc, std::vector<Vector> modes, bool proj_const)
+      : Solver(nloc), fine_(fine), A_(A), comm_(comm), np_(np), rk_(rk),
+        nm_((int)modes.size()), m_(np*(int)modes.size()), modes_(std::move(modes)),
+        nsp_(m_), proj_(proj_const), fz_(nloc)
+    {
+        DenseMatrix E(m_); E = 0.0;
+        Vector g(nloc), Ag(nloc); std::vector<double> locdot(nm_), allv(m_);
+        for (int k=0;k<np_;++k) for (int cm=0; cm<nm_; ++cm){
+            g = 0.0; if (rk_==k) g = modes_[cm];
+            A_.Mult(g, Ag);                                   // global matvec
+            for (int cj=0;cj<nm_;++cj) locdot[cj] = (modes_[cj]*Ag);  // rk's local dots
+            MPI_Allgather(locdot.data(), nm_, MPI_DOUBLE, allv.data(), nm_, MPI_DOUBLE, comm_);
+            int jc = k*nm_ + cm; for (int row=0; row<m_; ++row) E(row, jc) = allv[row];
+        }
+        // constant nullspace of a singular A lives in coeff dir nsp = 1 on every
+        // (k, indicator) entry, 0 on coord entries.  Regularise E += s nsp nsp^T.
+        nsp_ = 0.0;
+        if (proj_) { for (int k=0;k<np_;++k) nsp_(k*nm_)=1.0; nsp_ /= nsp_.Norml2();
+            double s=0.0; for(int i=0;i<m_;++i) s+=E(i,i); s/=m_;
+            for(int i=0;i<m_;++i) for(int j=0;j<m_;++j) E(i,j) += s*nsp_(i)*nsp_(j); }
+        Einv_ = E; Einv_.Invert();
+    }
+    void SetOperator(const Operator&) override {}
+    void Mult(const Vector &r, Vector &z) const override
+    {
+        fine_.Mult(r, fz_);
+        std::vector<double> locdot(nm_);
+        for (int cj=0;cj<nm_;++cj) locdot[cj] = (modes_[cj]*r);
+        Vector c(m_), y(m_);
+        MPI_Allgather(locdot.data(), nm_, MPI_DOUBLE, c.GetData(), nm_, MPI_DOUBLE, comm_);
+        if (proj_){ double d=(nsp_*c); c.Add(-d, nsp_); }   // r may carry a bit of const
+        Einv_.Mult(c, y);
+        if (proj_){ double d=(nsp_*y); y.Add(-d, nsp_); }
+        z = fz_;
+        for (int cm=0;cm<nm_;++cm) z.Add(y(rk_*nm_+cm), modes_[cm]);   // prolong local modes
+    }
+};
+
 // ---- SORAS fine level (strong optimized-Schwarz preconditioner for Sys2) -----
 // Ported from soras_par.cpp.  M^{-1} = P^T D (K_loc + alpha M_Gamma)^{-1} D P:
 //   * K_loc = kief.SpMat() -- rank-local element-assembled NEUMANN block (natural
@@ -368,6 +423,12 @@ int main(int argc, char *argv[])
                    "(from -transmit) vs sASM(O1,ICC0) -- iterations, avg inner-solve m, "
                    "solve-only ms, and the derived compute & communication ratios "
                    "(skips EP).");
+    bool do_deflate = false;
+    opts.AddOption(&do_deflate, "-deflate", "--deflate", "-nodeflate", "--no-deflate",
+                   "COARSE-SPACE / deflation on the real Sys2: plain bjacobi+ICC vs "
+                   "two-level with a Nicolaides (1/subdomain) and a richer {1,x,y,z}/"
+                   "subdomain coarse space; report iters -- does deflating the ~12-dim "
+                   "geometric slow subspace collapse the 67-step floor? (skips EP).");
     bool do_anisocmp = false;
     opts.AddOption(&do_anisocmp, "-anisocmp", "--anisocmp", "-noanisocmp", "--no-anisocmp",
                    "ISOTROPIC vs ANISOTROPIC: build Sys1 and Sys2 with sigma_T:=sigma_L "
@@ -1316,6 +1377,70 @@ int main(int argc, char *argv[])
     }
 
     // ====================================================================
+    //  -deflate : COARSE SPACE / deflation on the REAL Sys2 operator.  Does
+    //  deflating the ~12-dim geometric slow subspace collapse the ~67-step floor?
+    //  Compare plain bjacobi+ICC vs two-level (fine bjacobi+ICC + coarse space):
+    //    (a) Nicolaides:  1 indicator per subdomain           (dim = np)
+    //    (b) rich:        {1, x, y, z} per subdomain           (dim = 4 np)
+    //  (b) spans the smooth low-frequency modes -> should reach the -decay
+    //  prediction (~15-20).  Synthetic ||b||-rel test, same as the other studies.
+    // ====================================================================
+    if (do_deflate)
+    {
+        const int NPk = Mpi::WorldSize();
+        Mat A = (Mat)Kiep; AttachConstNullSpace(A, MPI_COMM_WORLD);
+        Vec xstar,b,x; MatCreateVecs(A,&xstar,&b); VecDuplicate(xstar,&x);
+        PetscInt rs,re; MatGetOwnershipRange(A,&rs,&re); PetscInt N; MatGetSize(A,&N,NULL);
+        { PetscScalar *a; VecGetArray(xstar,&a);
+          for(PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
+          VecRestoreArray(xstar,&a); }
+        { PetscScalar s; VecSum(xstar,&s); VecShift(xstar,-s/N); }
+        MatMult(A,xstar,b);
+        { PetscScalar s; VecSum(b,&s); VecShift(b,-s/N); }
+        Vector Bv(nloc); { const PetscScalar *ba; VecGetArrayRead(b,&ba);
+            for(int i=0;i<nloc;++i) Bv(i)=ba[i]; VecRestoreArrayRead(b,&ba); }
+
+        // coarse modes (local, nloc each): indicator, and centered+normalized x,y,z
+        Vector m_ind(nloc); m_ind=1.0;
+        auto centnorm=[&](const Vector &src){ Vector v(src);
+            double mn=v.Sum(); { double g; MPI_Allreduce(&mn,&g,1,MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+              /*per-subdomain mean = local mean here (1 subdomain/rank)*/ }
+            double lm=v.Sum()/std::max(nloc,1); for(int i=0;i<nloc;++i) v(i)-=lm;   // center on subdomain
+            double nn=v.Norml2(); if(nn>0) v/=nn; return v; };
+        Vector m_x=centnorm(tdof_x), m_y=centnorm(tdof_y), m_z=centnorm(tdof_z);
+
+        auto run_pc=[&](Solver *pc)->int{
+            PetscPCGSolver cg(Kiep,"defl_"); cg.SetMaxIter(2000); cg.SetRelTol(1e-8);
+            cg.iterative_mode=false; KSPSetNormType((KSP)cg,KSP_NORM_UNPRECONDITIONED);
+            cg.SetPreconditioner(*pc);
+            Vector Xv(nloc); Xv=0.0; cg.Mult(Bv,Xv); return cg.GetNumIterations();
+        };
+        // fine level = bjacobi + ICC (a PetscPreconditioner)
+        PetscPreconditioner fine(Kiep,"defl_fine_"); { PC pc=(PC)fine; PCSetType(pc,PCBJACOBI); }
+        int it_base = run_pc(&fine);
+        // two-level, Nicolaides (indicator only)
+        { std::vector<Vector> M1{m_ind};
+          TwoLevelCoarse tl(fine,*Kie,MPI_COMM_WORLD,NPk,rank,nloc,M1,true);
+          int it_nic=run_pc(&tl);
+          // two-level, rich {1,x,y,z}
+          std::vector<Vector> M4{m_ind,m_x,m_y,m_z};
+          TwoLevelCoarse tl4(fine,*Kie,MPI_COMM_WORLD,NPk,rank,nloc,M4,true);
+          int it_rich=run_pc(&tl4);
+          if (rank==0){
+            cout << "\n[DEFLATE] Sys2 (real operator), " << NPk << " subdomains, synthetic rtol 1e-8:\n"
+                 << "  fine only (bjacobi+ICC)          : " << it_base << " iters\n"
+                 << "  + Nicolaides coarse (dim=" << NPk << ")       : " << it_nic
+                 << "  (" << (it_base>0?100*(it_base-it_nic)/it_base:0) << "%)\n"
+                 << "  + rich {1,x,y,z} coarse (dim=" << 4*NPk << ")  : " << it_rich
+                 << "  (" << (it_base>0?100*(it_base-it_rich)/it_base:0) << "%)\n"
+                 << "[DEFLATE] richer coarse space spans more of the ~12-dim geometric slow "
+                    "subspace -> deeper floor collapse (the -decay prediction).\n";
+          }
+        }
+        VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
+    }
+
+    // ====================================================================
     //  -anisocmp : ISOTROPIC vs ANISOTROPIC.  Rebuild Sys1 (A1=(1/dt)M+(1/2)K)
     //  and Sys2 (Kie) with sigma_T:=sigma_L (isotropic, ratio 1) vs the real
     //  anisotropic tensor, and compare sASM(O1,ICC0) iters + cond.  Isotropic K
@@ -1733,13 +1858,13 @@ int main(int argc, char *argv[])
     double t_base=0.0, t_acc=0.0;
     // Vm snapshots for the -xsys study (stored at ECG sample times)
     std::vector<Vector> Vm_seq;
-    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay && !do_anisocmp && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
+    FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay && !do_anisocmp && !do_deflate && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
     if (fe) fprintf(fe,"# t(ms)  ECG(phi_L-phi_R)  Vm@center  u_e@center  phi_torso@L\n");
 
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
-    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap||do_fair||do_transmiti||do_neumann||do_decay||do_anisocmp) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
+    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap||do_fair||do_transmiti||do_neumann||do_decay||do_anisocmp||do_deflate) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
     const int sample = std::max(1, (int)(1.0/dt));    // ~ every 1 ms
     for (int s=0;s<nsteps;++s)
     {
@@ -1944,7 +2069,7 @@ int main(int argc, char *argv[])
     }
 
     // ---- benchmark activation times + conduction velocity -----------------
-    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay && !do_anisocmp) {
+    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay && !do_anisocmp && !do_deflate) {
     if (rank==0) cout << "\nActivation times (V crosses 0 mV):\n";
     double tP1=-1, tP8=-1;
     for (int q=0;q<8;++q){
