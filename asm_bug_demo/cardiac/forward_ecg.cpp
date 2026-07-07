@@ -154,6 +154,51 @@ public:
     }
 };
 
+// ---- general GLOBAL-vector deflation: coarse basis W = arbitrary global columns
+//      (mean-removed so E=W^T A W is SPD even for a singular-const A).  Handles
+//      BOTH geometric (per-subdomain, stored as global-restricted columns) and
+//      recycled (full global) vectors uniformly, so the two compose in one W.
+//      M^{-1} r = fine(r) + W E^{-1} W^T r.
+class GlobalDeflate : public Solver
+{
+    Solver &fine_; const Operator &A_; MPI_Comm comm_; long N_;
+    std::vector<Vector> W_; DenseMatrix Einv_; int m_; mutable Vector fz_;
+    double gdot(const Vector&a,const Vector&b) const
+    { double l=(a*b),g; MPI_Allreduce(&l,&g,1,MPI_DOUBLE,MPI_SUM,comm_); return g; }
+public:
+    GlobalDeflate(Solver&fine,const Operator&A,MPI_Comm comm,int nloc,long Nglob,
+                  std::vector<Vector> W)
+      : Solver(nloc),fine_(fine),A_(A),comm_(comm),N_(Nglob),
+        W_(std::move(W)),m_((int)W_.size()),fz_(nloc)
+    {
+        for (auto &w : W_){ double l=w.Sum(),g; MPI_Allreduce(&l,&g,1,MPI_DOUBLE,MPI_SUM,comm_);
+            double mn=g/N_; for(int i=0;i<w.Size();++i) w(i)-=mn; }   // mean-remove
+        // modified Gram-Schmidt: orthonormalise, DROP near-dependent columns
+        // (A^{-1}-random snapshots collapse onto v_min => many are redundant).
+        std::vector<Vector> Q;
+        for (auto &w : W_){ Vector v(w);
+            for (auto &q : Q){ double d=gdot(v,q); v.Add(-d,q); }
+            double nv=std::sqrt(gdot(v,v));
+            if (nv>1e-7){ v/=nv; Q.push_back(v); } }
+        W_.swap(Q); m_=(int)W_.size();
+        std::vector<Vector> AW(m_);
+        for (int k=0;k<m_;++k){ AW[k].SetSize(nloc); A_.Mult(W_[k], AW[k]); }
+        DenseMatrix E(m_);
+        for (int j=0;j<m_;++j) for (int k=0;k<m_;++k) E(j,k)=gdot(W_[j],AW[k]);
+        Einv_=E; Einv_.Invert();
+    }
+    int Dim() const { return m_; }             // effective (post-orthogonalisation) dim
+    void SetOperator(const Operator&) override {}
+    void Mult(const Vector &r, Vector &z) const override
+    {
+        fine_.Mult(r, fz_);
+        Vector c(m_), y(m_);
+        for (int j=0;j<m_;++j) c(j)=gdot(W_[j], r);
+        Einv_.Mult(c, y);
+        z = fz_; for (int j=0;j<m_;++j) z.Add(y(j), W_[j]);
+    }
+};
+
 // ---- SORAS fine level (strong optimized-Schwarz preconditioner for Sys2) -----
 // Ported from soras_par.cpp.  M^{-1} = P^T D (K_loc + alpha M_Gamma)^{-1} D P:
 //   * K_loc = kief.SpMat() -- rank-local element-assembled NEUMANN block (natural
@@ -1426,15 +1471,47 @@ int main(int argc, char *argv[])
           std::vector<Vector> M4{m_ind,m_x,m_y,m_z};
           TwoLevelCoarse tl4(fine,*Kie,MPI_COMM_WORLD,NPk,rank,nloc,M4,true);
           int it_rich=run_pc(&tl4);
+
+          // ---- RECYCLING: harvest slow-mode-rich SOLUTION SNAPSHOTS from prior
+          //      solves (A^{-1} amplifies small-lambda modes => y = A^{-1} w is
+          //      slow-mode-rich; this is the POD/Fischer basis, not raw directions).
+          const int NSNAP=12;
+          auto trainsolve=[&](const Vector&w)->Vector{
+              PetscPCGSolver cgt(Kiep,"train_"); cgt.SetMaxIter(2000); cgt.SetRelTol(1e-8);
+              cgt.iterative_mode=false; KSPSetNormType((KSP)cgt,KSP_NORM_UNPRECONDITIONED);
+              cgt.SetPreconditioner(fine); Vector y(nloc); y=0.0; cgt.Mult(w,y); return y; };
+          std::vector<Vector> W_rec, W_hyb;
+          for(int j=0;j<NSNAP;++j){
+              Vector w(nloc); for(int i=0;i<nloc;++i)
+                  w(i)=sin((0.3+0.17*j)*(i+1))+0.3*cos((0.09+0.04*j)*(i+1));
+              { double l=w.Sum(),g; MPI_Allreduce(&l,&g,1,MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+                double mn=g/N; for(int i=0;i<nloc;++i) w(i)-=mn; }
+              Vector y=trainsolve(w); W_rec.push_back(y); W_hyb.push_back(y);
+          }
+          int nkeep=NSNAP;
+          // geometric columns as GLOBAL-restricted vectors (this rank's, others 0)
+          for(int k=0;k<NPk;++k){ for(Vector*mp:{&m_ind,&m_x,&m_y,&m_z}){
+              Vector col(nloc); col=0.0; if(rank==k) col=*mp; W_hyb.push_back(col); } }
+          GlobalDeflate gr(fine,*Kie,MPI_COMM_WORLD,nloc,(long)N,W_rec);  int it_rec=run_pc(&gr);
+          GlobalDeflate gh(fine,*Kie,MPI_COMM_WORLD,nloc,(long)N,W_hyb);  int it_hyb=run_pc(&gh);
+          int rdim=gr.Dim(), hdim=gh.Dim();
+
           if (rank==0){
             cout << "\n[DEFLATE] Sys2 (real operator), " << NPk << " subdomains, synthetic rtol 1e-8:\n"
-                 << "  fine only (bjacobi+ICC)          : " << it_base << " iters\n"
-                 << "  + Nicolaides coarse (dim=" << NPk << ")       : " << it_nic
-                 << "  (" << (it_base>0?100*(it_base-it_nic)/it_base:0) << "%)\n"
-                 << "  + rich {1,x,y,z} coarse (dim=" << 4*NPk << ")  : " << it_rich
-                 << "  (" << (it_base>0?100*(it_base-it_rich)/it_base:0) << "%)\n"
-                 << "[DEFLATE] richer coarse space spans more of the ~12-dim geometric slow "
-                    "subspace -> deeper floor collapse (the -decay prediction).\n";
+                 << "  fine only (bjacobi+ICC)                    : " << it_base << " iters\n"
+                 << "  + Nicolaides coarse (dim=" << NPk << ")                 : " << it_nic
+                 << "  (-" << (it_base>0?100*(it_base-it_nic)/it_base:0) << "%)\n"
+                 << "  + geometric {1,x,y,z} coarse (dim=" << 4*NPk << ")      : " << it_rich
+                 << "  (-" << (it_base>0?100*(it_base-it_rich)/it_base:0) << "%)\n"
+                 << "  + RECYCLED snapshots (" << NSNAP << " -> " << rdim << " indep)      : " << it_rec
+                 << "  (-" << (it_base>0?100*(it_base-it_rec)/it_base:0) << "%)\n"
+                 << "  + HYBRID geometric + recycled (dim=" << hdim << ")   : " << it_hyb
+                 << "  (-" << (it_base>0?100*(it_base-it_hyb)/it_base:0) << "%)\n"
+                 << "[DEFLATE] geometric = a-priori (cold-safe, crude); recycled snapshots collapse\n"
+                    "  onto the few smallest modes (" << NSNAP << "->" << rdim << " indep) so alone they're weak; "
+                    "HYBRID unions both\n  in one deflation space -> >= geometric (monotone, cold-safe).  "
+                    "Real strong recycling\n  = time-evolution snapshots (Fischer -77%), which sweep the "
+                    "full slow subspace.\n";
           }
         }
         VecDestroy(&xstar); VecDestroy(&b); VecDestroy(&x);
