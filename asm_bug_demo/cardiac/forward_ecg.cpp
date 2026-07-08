@@ -1460,9 +1460,25 @@ int main(int argc, char *argv[])
             cg.SetPreconditioner(*pc);
             Vector Xv(nloc); Xv=0.0; cg.Mult(Bv,Xv); return cg.GetNumIterations();
         };
+        // same solve, but also dump the (unpreconditioned) relative residual
+        // history r_k/r_0 vs iteration k to a file, so we can PLOT with vs
+        // without recycling on the REAL Sys2 operator.
+        auto run_pc_hist=[&](Solver *pc,const char*fname)->int{
+            const int MAXH=2100; std::vector<PetscReal> hist(MAXH,0.0);
+            PetscPCGSolver cg(Kiep,"defl_"); cg.SetMaxIter(2000); cg.SetRelTol(1e-8);
+            cg.iterative_mode=false; KSPSetNormType((KSP)cg,KSP_NORM_UNPRECONDITIONED);
+            cg.SetPreconditioner(*pc);
+            KSPSetResidualHistory((KSP)cg,hist.data(),MAXH,PETSC_TRUE);
+            Vector Xv(nloc); Xv=0.0; cg.Mult(Bv,Xv);
+            const PetscReal *hp; PetscInt hn; KSPGetResidualHistory((KSP)cg,&hp,&hn);
+            if(rank==0 && hn>0){ FILE*f=fopen(fname,"w"); double r0=hp[0]>0?hp[0]:1.0;
+                for(PetscInt k=0;k<hn;++k) fprintf(f,"%d %.8e\n",(int)k,hp[k]/r0);
+                fclose(f); }
+            return cg.GetNumIterations();
+        };
         // fine level = bjacobi + ICC (a PetscPreconditioner)
         PetscPreconditioner fine(Kiep,"defl_fine_"); { PC pc=(PC)fine; PCSetType(pc,PCBJACOBI); }
-        int it_base = run_pc(&fine);
+        int it_base = run_pc_hist(&fine,"deflate_hist_fine.txt");
         // two-level, Nicolaides (indicator only)
         { std::vector<Vector> M1{m_ind};
           TwoLevelCoarse tl(fine,*Kie,MPI_COMM_WORLD,NPk,rank,nloc,M1,true);
@@ -1470,7 +1486,7 @@ int main(int argc, char *argv[])
           // two-level, rich {1,x,y,z}
           std::vector<Vector> M4{m_ind,m_x,m_y,m_z};
           TwoLevelCoarse tl4(fine,*Kie,MPI_COMM_WORLD,NPk,rank,nloc,M4,true);
-          int it_rich=run_pc(&tl4);
+          int it_rich=run_pc_hist(&tl4,"deflate_hist_geometric.txt");
 
           // ---- RECYCLING: harvest slow-mode-rich SOLUTION SNAPSHOTS from prior
           //      solves (A^{-1} amplifies small-lambda modes => y = A^{-1} w is
@@ -1492,8 +1508,8 @@ int main(int argc, char *argv[])
           // geometric columns as GLOBAL-restricted vectors (this rank's, others 0)
           for(int k=0;k<NPk;++k){ for(Vector*mp:{&m_ind,&m_x,&m_y,&m_z}){
               Vector col(nloc); col=0.0; if(rank==k) col=*mp; W_hyb.push_back(col); } }
-          GlobalDeflate gr(fine,*Kie,MPI_COMM_WORLD,nloc,(long)N,W_rec);  int it_rec=run_pc(&gr);
-          GlobalDeflate gh(fine,*Kie,MPI_COMM_WORLD,nloc,(long)N,W_hyb);  int it_hyb=run_pc(&gh);
+          GlobalDeflate gr(fine,*Kie,MPI_COMM_WORLD,nloc,(long)N,W_rec);  int it_rec=run_pc_hist(&gr,"deflate_hist_recycled.txt");
+          GlobalDeflate gh(fine,*Kie,MPI_COMM_WORLD,nloc,(long)N,W_hyb);  int it_hyb=run_pc_hist(&gh,"deflate_hist_hybrid.txt");
           int rdim=gr.Dim(), hdim=gh.Dim();
 
           if (rank==0){
