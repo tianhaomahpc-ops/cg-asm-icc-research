@@ -1,0 +1,277 @@
+# Schwarz 变体:加权(weighting)与乘性(multiplicative)怎么做、权怎么选
+
+> 配套 `PROMPT_project_zh.md` / `fig_roadmap.png` / `precond_asm.hpp`。
+> 目标:把"抵消过计数($\hat N$)"的两条路线——**加权**(我用的)与**乘性/着色**——的**具体算法和权的选取**写清楚。
+> 记号:$A$ SPD;子域 $i$ 的(重叠)限制算子 $R_i$($L\times n$,取出子域 $i$ 的自由度),延拓 $R_i^\top$;
+> 本地块 $A_i=R_iAR_i^\top$(或不精确的 $\tilde A_i$,如 ICC);$m(j)=$ 覆盖 dof $j$ 的子域数(**重数**)。
+
+---
+
+## 0. 加性基准(参照)
+
+$$M_{\text{ASM}}^{-1}=\sum_{i=1}^N R_i^\top A_i^{-1} R_i.$$
+对称、全并行,但**重叠区过计数**:$\lambda_{\max}\le\omega(\hat N+1)$ 随重叠/重数上升。下面两条路线都是为了**把 $\hat N$ 因子拿掉**。
+
+---
+
+## 1. 加权(weighting / 单位分解)—— 怎么做
+
+### 1.1 通用形式
+
+引入对角权 $D_i$(只作用在子域 $i$ 的 dof 上)。三种放法:
+
+| 变体 | 公式 | 对称? | 求解器 |
+|---|---|---|---|
+| **RAS**(单边限制)| $M^{-1}=\sum_i \tilde R_i^\top A_i^{-1} R_i$ | 否 | GMRES / flexible-CG |
+| **ASH**(另一边)| $M^{-1}=\sum_i R_i^\top A_i^{-1} \tilde R_i$ | 否 | GMRES |
+| **对称加权(sASM,我用的)**| $M^{-1}=\sum_i R_i^\top D_i^{1/2} A_i^{-1} D_i^{1/2} R_i$ | **是** | **CG** |
+
+其中 $\tilde R_i=D_i R_i$,$D_i$ 是**非重叠**单位分解(RAS 里 $D_i$ 是 0/1 指示:每个 dof 只归一个子域)。
+
+**我代码里的实现**(`precond_asm.hpp::InstallScaledASM`)用的是**全局对称缩放**版:
+$$M_{\text{sASM}}^{-1}=D^{-1/2}\Big(\sum_i R_i^\top A_i^{-1} R_i\Big)D^{-1/2},\qquad D=\mathrm{diag}\big(m(j)\big).$$
+它与上表对称加权的区别只是把权提到全局对角(数值上都抵消逐点过计数);对 CG 都对称合法。
+
+### 1.2 **单位分解条件(必须满足)**
+
+$$\boxed{\ \sum_{i}R_i^\top D_i R_i=I\ }\quad(\text{每个 dof 上,覆盖它的各子域权重和}=1).$$
+这一条**就是抵消过计数的本质**:重叠区"各加一次"被权重摊回到"合计一次"。满足它 ⟹ $\lambda_{\max}$ 的 $(\hat N+1)$ 因子被中和,$\lambda_{\max}\to$ ~$\omega$(实测 $\approx1$)。
+
+### 1.3 **权 $D_i(j)$ 怎么选(四种,从简到强)**
+
+设 dof $j$ 被子域集合 $\mathcal S(j)$ 覆盖,$m(j)=|\mathcal S(j)|$。
+
+**(a) 重数(算术)权 —— 最简单,我现在用的**
+$$D_i(j)=\frac1{m(j)},\qquad j\in\Omega_i.$$
+自动满足单位分解。零成本,均匀问题上就够。**缺点**:不看系数,强各向异性/高对比时不是最优。
+
+**(b) 系数/对角(stiffness)权 —— 需要"非装配 Neumann 块"才有效**
+$$D_i(j)=\frac{A^{(i)}_{jj}}{\sum_{k\in\mathcal S(j)}A^{(k)}_{jj}},$$
+即按各子域在该 dof 的**刚度对角元** $A^{(i)}_{jj}$ 加权。**⚠ 关键实测发现(`-weightcmp`,已验证)**:在**代数 PCASM**里,本地块 $A_i=R_iAR_i^\top$ 是 $A$ 的**主子阵**,其对角 $A^{(i)}_{jj}\equiv A_{jj}$ **与子域无关**,于是
+$$D_i(j)=\frac{A_{jj}}{m(j)\,A_{jj}}=\frac1{m(j)}\ \Longrightarrow\ \text{与重数权(a)完全相同}.$$
+实测(heart.msh,np=4/8,含各向异性 Sys2):mult 与 coef 的迭代数**逐格相同**(如 Sys2 O=1 都是 73)。**结论:纯代数对角重加权对 ASM 是空操作。** 系数权只有当各子域用**各自装配的 Neumann 块**(共享 dof 处对角 = 该子域元素的**部分**贡献,随 $\sigma$ 变化)时才与重数不同 —— 那是 **SORAS / Neumann–Neumann** 的设置(仓库里已有 SORAS)。所以"各向异性感知加权"要在 SORAS 里做,不在算法 PCASM 里做。
+
+**(c) 光滑/距离权 —— 再降 $\lambda_{\max}$**
+$$D_i(j)=\frac{\phi_i(j)}{\sum_{k\in\mathcal S(j)}\phi_k(j)},\quad \phi_i(j)=\text{dist}\big(j,\ \partial\Omega_i\setminus\Gamma\big),$$
+即权在子域内部 $\approx1$、到重叠外边界**线性/光滑降到 0**。好处:权在重叠区**连续无跳变** ⟹ $\|M^{-1}\|$ 更小 ⟹ $\lambda_{\max}$ 更低(比 RAS 的 0/1 硬指示更平滑)。代价:要算到边界的距离场。
+
+**(d) 调和/最优权 —— 理论最优,最贵**
+在重叠区解**局部调和问题**得最优单位分解(离散调和延拓),或按 GenEO 特征模加权。给最小 $\lambda_{\max}$,但每子域一次局部解,通常不值。
+
+**选取准则(一句话)**:
+- 均匀/各向同性 → **(a) 重数权**(够用、免费)。
+- **各向异性/高对比(你的情况)→ (b) 对角/系数权**(鲁棒,几乎免费)。
+- 想再抠 $\lambda_{\max}$ → **(c) 光滑权**。
+- (d) 一般不用。
+- **对称性**:配 CG 必须用对称加权(表中 sASM);要用 **RAS(常更省迭代)则须 flexible-CG/GMRES**。
+
+---
+
+## 2. 乘性(multiplicative)—— 怎么做
+
+### 2.1 顺序乘性(串行,收敛最好)
+
+残差 $r=b-Ax$,**逐子域、每步用最新残差**(Gauss–Seidel 式):
+```
+for i = 1..N:
+    x <- x + R_i^T A_i^{-1} R_i (b - A x)      # 注意 residual 每步重算
+```
+误差算子是**投影之积**(故名"乘性"):
+$$I-M_{\text{mult}}^{-1}A=\prod_{i=1}^N\big(I-R_i^\top A_i^{-1}R_i A\big).$$
+每个因子(精确解时)是 A-正交投影,乘积 ⟹ 收缩远好于加性的"和";通常 **~2× 少迭代**。**但纯串行。**
+
+### 2.2 对称化乘性(配 CG)
+
+单向乘性非对称。**正扫 $1\!\to\!N$ 再反扫 $N\!\to\!1$**(对称 GS / SSOR 式)⟹ 对称 ⟹ 可做 CG 预条件:
+$$I-M_{\text{sym}}^{-1}A=\Big(\prod_{i=N}^{1}(\cdot)\Big)\Big(\prod_{i=1}^{N}(\cdot)\Big).$$
+代价:每次 apply 两遍($2N$ 个本地解)。
+
+### 2.3 着色乘性(把并行度救回来)
+
+染色使**同色子域互不重叠**(A-正交),需 $N_c$ 色:
+```
+for c = 1..N_c:                          # 颜色之间:串行
+    for all i with color(i)==c:  并行:    # 同色之间:互不重叠 -> 并行
+        x <- x + R_i^T A_i^{-1} R_i (b - A x)
+```
+**同色内加性(并行)、异色间乘性(串行 $N_c$ 遍)** —— 这就是字面意义"**把着色数 $N_c$ 当成串行扫描遍数**"。
+
+### 2.4 并行度代价(诚实)
+
+| | 加性(加权)| 着色乘性 |
+|---|---|---|
+| 每迭代并行步 | 1(P 路)| $N_c$ 个串行子步 |
+| 每子步忙碌核 | 全部 P | 仅该色 ~$P/N_c$(**余核空转**)|
+| 每迭代同步点 | 1 halo + 1 归约 | $N_c$ halo |
+| 迭代数 | 基准 | 更少(~2×)|
+
+**结论**:纯并行外层预条件**不用**着色乘性($N_c$× 同步 + 核空转)。乘性的正确位置:**(a) 多重网格 smoother**;**(b) 混合** —— 层内加性(全并行)、只在层间用乘性。3000 核上:**加性 + 加权 + 粗空间**是对的。
+
+---
+
+## 3. 组合成"最优"
+
+$$\kappa\le \underbrace{C_0^2}_{\text{粗空间}}\cdot\underbrace{\omega}_{\text{本地解精度}}\cdot\underbrace{(\hat N+1)}_{\text{过计数}}.$$
+- **过计数 $(\hat N+1)$**:**对称加权(sASM,权用对角/系数缩放)**抵消 ⟹ $\lambda_{\max}\to$ ~$\omega$。(想更省迭代且肯用 flexible-CG:RAS。)
+- **本地解 $\omega$**:适度 ICC(实测时间最优 $L=1$)。
+- **$C_0$**:粗空间(Nicolaides / **GenEO**)。
+$$\boxed{\text{对称加权加性(系数缩放 PU)}\ +\ \text{适度 ICC}(L{=}1)\ +\ \text{GenEO 粗空间}}$$
+乘性只在 MG-smoother / 混合里出现。
+
+---
+
+## 4. 映射到代码
+
+- `precond_asm.hpp::InstallScaledASM(..., weight_mode)`:`0`=重数权(1.3a),`1`=系数/对角权(1.3b)。
+  `forward_ecg -weightcmp` 对比二者 ⟹ **实测逐格相同**(见 1.3b):代数 PCASM 里对角重加权是空操作。
+- **真正的升级路线 = SORAS**:用**非装配 Neumann 块** + 共享面 Robin,权按子域自身刚度自然不同。
+  `forward_ecg -soras -soras_pu {0=重数,1=系数}`:coef PU = $K_\text{loc}$ 对角 / 装配对角(Neumann 块对角**逐子域不同**,
+  含**局部单元体积 × $\sigma$**)。**实测(各向异性 Sys2,弱扩展,真实 EP RHS):重数 PU → 系数 PU 迭代 np=4 276→260、np=8 324→305,约 −6%,且几乎免费**(只在 setup 换一次 $dL$ 向量)。
+
+- **`-soraspu`:三个系统一次跑完(cardiac-sim-fakegeo 真实参数,合成光滑测试向量,rtol 1e-8,近精确本地 CG+ICC,α=0.2)**。
+  重数 PU → 系数 PU 迭代:
+
+  | 系统 | np=2 | np=4 | np=8 |
+  |---|---|---|---|
+  | **Sys1** 单域(质量主导)| 12→6 **(−50%)** | 16→7 **(−56%)** | 16→7 **(−56%)** |
+  | **Sys2** $u_e$(奇异,各向异性)| 23→22 (−4.3%) | 35→33 (−5.7%) | 40→37 (−7.5%) |
+  | **Sys3** 躯干 Laplace(**各向同性**)| 57→49 (−14%) | 83→60 **(−28%)** | 80→66 (−17%) |
+
+  **关键更正**:系数/对角 PU 在**三个系统上都省迭代**,但收益大小**不是**由电导各向异性主导 —— 而是由**本地非装配对角的不均匀度**(网格分级 × 系数)决定:
+  - **各向同性**的 Sys3 收益(−14~−28%)**大于**各向异性的 Sys2(−4~−8%);
+  - **质量主导**的 Sys1 收益最大(对角 ≈ 集中单元体积,在非结构四面体网格上最不均匀,−50~−56%);
+  - Sys2 的 $K_{\sigma_i+\sigma_e}$ 逐单元常张量、心脏 slab 网格较规则 → 子域间对角较均匀 → 收益反而最小。
+  
+  **本质**:重数权 $1/m$ 在共享 dof 上"一律对半分",忽略两侧单元的体积/刚度差;系数权按各子域**真实非装配对角**分,天然做了"体积 + 系数感知"的单位分解。**验证了整条逻辑:代数 PCASM 里 0%(装配对角逐子域相同),SORAS 里 −4~−56%(非装配对角逐子域不同)** —— 各向异性只是其中一个来源,网格分级是另一个(往往更大)来源。
+
+- **`-soraspu`(改版):等本地成本下 sASM vs cw-SORAS 正面对比**。三个系统,**都用单遍 ICC0 本地解**(等成本),同一 RHS、同一非预条件 $\Vert b\Vert$ 相对判据,迭代数(np=8):
+
+  | 系统 | sASM O0 | **sASM O1** | cwSORAS‑1ICC(mult) | **cwSORAS‑1ICC(coef)** | cwSORAS‑近精确(coef) |
+  |---|---|---|---|---|---|
+  | **Sys1** 质量主导 | 13 | **8** | 17 | 8 | 7 |
+  | **Sys2** 奇异/难 | 76 | **67** | 105 | 79 | **37** |
+  | **Sys3** 躯干 Dirichlet | 63 | **51** | 92 | 65 | 66 |
+
+  **关键结论(诚实、且改写了之前的乐观叙事)**:
+  1. **"直接用 ICC"(单遍)时 cw-SORAS 打不过 sASM。** cwSORAS‑1ICC(coef) vs sASM O1:Sys1 8=8 平、**Sys2 79>67 更差**、**Sys3 65>51 更差**。用重数权更是全线更差(17/105/92)。**系数 PU 只是把便宜档 SORAS 从"远差于 sASM"拉回到"约等于/略差"。**
+  2. **cw-SORAS 的优势只在"近精确本地解"那一档才兑现,而且只在 Sys2 上:** Sys2 近精确 37 vs sASM O1 67,约 **2×**。Sys1(7 vs 8)基本平,**Sys3(66 vs 51)近精确都还更差**——Robin 传输对 Dirichlet 锚定的良态椭圆没好处。
+  3. **sASM 靠 overlap 提升(O0→O1:Sys2 76→67、Sys3 63→51),几乎免费(多点 halo);cw-SORAS 靠近精确本地解提升,贵(m× 本地算力)。** 对 Sys1/Sys3,overlap 就够,SORAS 白搭;只有 Sys2 这种奇异全局难题,近精确 SORAS 才值。
+
+  **==> 这张表正是"cw-SORAS 用计算换通信"的铁证:在 sASM 的本地成本(单遍 ICC)下拿不到 SORAS 的迭代收益;那 ~2× 收益必须花 m× 本地算力买。**
+
+- **`-transmit`:传输敏感性诊断(方法论上应先做的一步)**。固定非重叠子域 + 近精确本地解 + coef PU,**只扫 Robin 参数 α**(0≈Neumann..∞≈Dirichlet),看迭代是否依赖传输条件。np=8:
+
+  | 系统 | α=.001 | α=.01 | α=.05 | α=.2 | α=1 | α=10 | α=1e3 | span |
+  |---|---|---|---|---|---|---|---|---|
+  | **Sys1** 质量主导 | **6** | 6 | 7 | 7 | 8 | 17 | 41 | 6.8× |
+  | **Sys2** 奇异/难 | 53 | 43 | **38** | 37 | 44 | 87 | 221 | 6.0× |
+  | **Sys3** Dirichlet | 48 | **38** | 47 | 66 | 107 | 283 | 1270 | **33×** |
+
+  **结论**:
+  1. **迭代强依赖传输条件(span 6–33×)** → 边界处理不是伪命题。方向:**Dirichlet(α→∞)灾难**(零重叠下经典 Schwarz 每迭代只爬一层),**Neumann 侧(α 小)最好**。
+  2. **最优 α 逐系统不同**:Sys2 有内部极小 α≈0.05–0.2(真正的优化 Robin 甜点);Sys1 单调、α→0 最好;Sys3 极小在 α≈0.01。
+  3. **==> 更正上面 `-soraspu` 的 Sys3 结论**:那里 α=0.2 给 66 > sASM 51、说"Robin 没用",是**坏 α 的假象**;**α=0.01 时 Sys3 SORAS=38 < sASM 51**,SORAS 其实有用,只是要近 Neumann 传输。**先做敏感性再选边界处理,正好抓住这个错——方法论上就该先扫 α 再谈怎么处理边界。**
+  4. **传输只值 ~2× 常数因子**:各系统最优 α 下仍有地板(Sys2≈37、Sys3≈38),这是传输消不掉的**慢全局模**($C_0/\lambda_\min$)。正确顺序:**先确认传输有关 ✓ → 逐系统调 α 拿 ~2× → 再上粗空间**把地板压成 O(1)、随核数不涨。
+
+  生产选型(据此收紧):**Sys1/Sys3 便宜档用 sASM(O1,ICC0);要上 cw-SORAS 必须(a)逐系统调 α(别用固定 0.2)、(b)配近精确本地解、(c)加粗空间治全局模** —— 三者缺一,SORAS 相对 sASM 拿不到稳定优势。
+
+- **`-tuned`:调好 α 后 cw-SORAS vs sASM(O1),迭代 + 计算量 + 通信量实测(np=8)**。α* 取自 `-transmit`(Sys1=0.001、Sys2=0.1、Sys3=0.01):
+
+  | 系统 | α* | sASM_it | SORAS_it | **通信(cw/sASM)** | sASM_ms | SORAS_ms(CG+ICC,m) | **SORAS_ms(直接Chol)** |
+  |---|---|---|---|---|---|---|---|
+  | **Sys1** 质量主导 | 0.001 | 8 | 6 | 0.75× | 2.26 | 7.5 (m=10) | 3.63 |
+  | **Sys2** 奇异/难 | 0.1 | 67 | 36 | **0.54×** | 20.8 | 181.8 (m=45) | **19.70** |
+  | **Sys3** Dirichlet | 0.01 | 51 | 38 | 0.75× | 35.5 | 900 (m=49) | 144 |
+
+  **三维度**:
+  1. **通信**:cw-SORAS 三系统全线更少(0.54–0.75× Allreduce),通信 ∝ 外层迭代数。
+  2. **计算**:前面 `-soraspu`/上文推的 48–74× 计算爆炸是**内层 CG(内存平)的锅,不是 SORAS 固有**。换**直接 Cholesky**(setup 分解一次、每 apply 一遍三角解):同样近精确、同样外层迭代,本地成本塌回——Sys2 181.8→19.7 ms(9×)、Sys3 900→144 ms(6×)。
+  3. **墙钟(np=8 单机,通信≈免费 → ms≈纯计算)**:**Sys2 cw(直接Chol)19.7 已略胜 sASM 20.8**(1.85× 更少迭代追平了直接分解开销,且只用 0.54× Allreduce);Sys1 3.6 vs 2.3、Sys3 144 vs 35,sASM 仍快(系统太易 / 子域太大,fill-in 贵)。
+
+  **外推 3000 核(通信受限)**:$T\approx \text{it}\times(\text{本地 apply}+c\log P)$,Allreduce 延迟不随核数缩小。Sys2 sASM 67 vs cw 36 → **cw 墙钟优势随 P 只增不减**;Sys1/Sys3 迭代优势(0.75×)压不过本地开销。
+
+  **逐系统结论**:**Sys1/Sys3 → sASM(O1)**;**Sys2 → cw-SORAS(α≈0.1 + 直接本地 Cholesky)**,是三样(迭代/通信/墙钟)同时不亏、且随 P 拉大优势的**唯一**系统。`SorasPUIters` 现支持 loc_mode = -2(直接 Chol)/ -1(近精确 CG+ICC)/ 0(单遍 ICC)/ K(Chebyshev)。
+
+- **`-tuned` 补:最优 α 下 cw-SORAS 的三个本地档 vs sASM(np=8,it / solve-ms)**——**关键是加了"单遍 ICC"这个等本地成本档**:
+
+  | 系统 | α* | sASM | **cwSORAS-1ICC**(等成本) | cwSORAS-近精确(m) | cwSORAS-Chol |
+  |---|---|---|---|---|---|
+  | Sys1 | 0.001 | **8**/2.7 | 9/2.3 | 6/12.1(m10) | 6/5.5 |
+  | Sys2 | 0.1 | **67**/25.4 | 80/22.1 | 36/275(m45) | 36/27.1 |
+  | Sys3 | 0.01 | **51**/48.1 | 56/45.4 | 38/1123(m49) | 38/245 |
+
+  **结论(收紧,可能反直觉)**:
+  1. **等本地成本(单遍 ICC)下,即使 α 调到最优,cwSORAS-1ICC 迭代仍全线 > sASM**(9>8、80>67、56>51)。**SORAS 结构本身不省迭代**;67→36 的收益**全来自昂贵的近精确/直接本地解**,与 Robin 结构无关。
+  2. **墙钟有迷惑性**:cwSORAS-1ICC 的 ms 略低(SORAS 本地块是非重叠 Neumann,比 sASM 的 O1 重叠装配块每 apply 更便宜),但它**迭代最多 → Allreduce 最多 → 扩展性最差**。小规模 ms 持平掩盖了这一点。
+  3. **看通信排名**(Sys2 迭代=Allreduce):cwSORAS-1ICC **80** > sASM **67** > cwSORAS-Chol **36**。3000 核 Allreduce 主导时,**cwSORAS-1ICC 反而最不扩展**。
+
+  **==> 便宜档 cw-SORAS(单遍 ICC)没意义:迭代比 sASM 还多、扩展更差。cw-SORAS 的收益是拿"贵本地解"换的,不是拿"Robin 结构"换的——正好印证"省通信必须花贵本地计算买,单遍 ICC 买不到"。**
+
+- **`-overlap`:公平比较(两边都近精确本地解)→ 重要更正:overlapping sASM 打赢零重叠 cw-SORAS**。cw-SORAS 天生零 overlap(Robin 替代重叠);这里在**同等近精确本地解**下扫 sASM overlap 0/1/2,对比零重叠 Robin cw-SORAS(np=8,迭代):
+
+  | 系统 | α* | cwSORAS(δ=0,Robin) | sASM O0 | sASM O1 | sASM O2 | overlap 增益 O0→O2 |
+  |---|---|---|---|---|---|---|
+  | Sys1 | 0.001 | **6** | 12 | 8 | 8 | 0.67× |
+  | Sys2 | 0.1 | 36 | 51 | 31 | **28** | 0.55× |
+  | Sys3 | 0.01 | 38 | 44 | 25 | **24** | 0.55× |
+
+  **结论(纠正前面对 cw-SORAS 的乐观)**:
+  1. **本地解够强时 overlap 是强杠杆(O0→O2≈0.55×,近 1.8×)**;而便宜本地(单遍 ICC)时 overlap 几乎没用(~0.9×)——**overlap 与本地解精度互补**,本地不准,多给重叠也吃不下。
+  2. **一层 overlap 就把 Robin 比下去**:零重叠时 Robin 赢(36<51,符合理论 δ=0 时 Robin>Dirichlet);但 sASM O1 起(Sys2 31<36、Sys3 25<38)就反超,O2(28/24)完胜。
+  3. **纠正 `-tuned` 的印象**:那里 "SORAS 36 vs sASM 67" 是**近精确 SORAS 对便宜 sASM**,不公平。**同等本地解下(便宜端 sASM-O1 67 < cwSORAS-1ICC 80;近精确端 sASM-O1 31 < cwSORAS 36),overlapping sASM 两端都赢 cw-SORAS。**
+  4. **本质仍是"计算/通信折衷"下沉一层**:overlap 迭代少(Allreduce 少)但每迭代本地块更大、halo 更宽(近邻,不随 P 恶化);Robin 迭代多但每迭代更瘦。总 Allreduce ∝ 迭代数 → sASM O2(28)比 SORAS(36)**全局同步还更少**,大规模瓶颈上也不亏。
+  5. **都治不了地板**(sASM O2 仍 24–28)→ 仍需粗空间。
+
+  **==> 修正选型:三系统都用 sASM + overlap(O1–O2)+ 够强本地解,放弃 cw-SORAS(要调 α、装 M_Γ、还打不过);再上粗空间治地板。** 忠实的 overlapping-Robin(Neumann patch + 移位 Robin 界面)需跨 rank 单元重装配,未实现,但既然 overlapping-Dirichlet 已胜零重叠 Robin,它即便更好也是边际收益,不值那复杂度。`InstallScaledASM` 新增 `local_exact` 档(近精确本地 CG+ICC)。
+
+- **`-fair`:多维公平比较,本地解只用 ICC(0/1/2)(不用 Cholesky —— 大规模 Cholesky 慢且吃内存;ICC(L) 单遍是内存平、固定线性、CG 合法的现实本地解)**。sASM(overlap O,mult PU) vs cw-SORAS(δ=0,coef PU,最优 α),iters(np=8):
+
+  | | Sys2(难)L0 | L1 | L2 | | Sys3 L0 | L1 | L2 |
+  |---|---|---|---|---|---|---|---|
+  | sASM O0 | 76 | 59 | 53 | | 63 | 48 | 44 |
+  | sASM O1 | 67 | 43 | **35** | | 51 | 33 | **28** |
+  | sASM O2 | 66 | 41 | **33** | | 50 | 35 | **28** |
+  | cwSORAS δ0 | 80 | 59 | 48 | | 56 | 41 | 36 |
+
+  **ICC-only 下的多维结论**:
+  - **迭代(→Allreduce/通信)**:**sASM O1–O2 + ICC2 最少**(Sys2 33、Sys3 28);cwSORAS δ0 追不上(48/36)。零重叠时 cwSORAS≈sASM O0(Robin 略好过 O0),但 overlap 值 ~1.5×,比 δ0 的 Robin 强。
+  - **ICC level 是便宜杠杆**:L0→L2 约减半(Sys2 sASM O2 66→33),内存平、比 Cholesky 省太多。
+  - **每 apply 计算/内存**:cwSORAS δ0 与 sASM O0 本地块最小(1 遍 ICC);sASM O1/O2 块加 1–2 层 ghost → 每 apply 更贵、ICC(L) fill 更多。cwSORAS δ0 块最瘦但多存 M_Γ+Krob。
+  - **通信 halo 宽**:cwSORAS δ0 = 仅界面(最窄)< sASM O 的 O+1 层;但 halo 是近邻通信,非强扩展瓶颈(瓶颈是 Allreduce ∝ 迭代数,sASM O2 更少)。
+  - **构造难度**:sASM = `PCASMSetOverlap`(1 行)+ ICC level;cwSORAS δ0 = 手装 M_Γ+P+coef-PU(中等);**overlapping cwSORAS = 跨 rank Neumann-patch 装配 + 移位 Robin 界面 + 自定义 gather/scatter(难,未实现)**。
+
+  **多维总账**:在"最少迭代/最少 Allreduce"(3000 核最关键)这维,**sASM+overlap+ICC(1–2) 赢**,且构造上是一行 vs 一大坨。cwSORAS δ0 只在"本地块最瘦/halo 最窄"这两维略优,但被更多迭代抵消。**overlapping cwSORAS 即便建出来,要追的目标(sASM O2+ICC2≈33)overlapping-Dirichlet 的 sASM 已达到,Robin 优化只比 Dirichlet 边际好一点 → 不值那构造成本。** 故推荐仍是 **sASM + overlap(O1–O2)+ ICC(1–2)+ 粗空间**。
+
+- **`-transmiti`:传输条件在【不精确本地解(ICC0)】下的敏感性 + 时间**(而 `-transmit` 用近精确)。np=8,格子=迭代/solve-ms:
+
+  | 系统 | α=.001(Neumann) | α=.2 | α=1 | α=1e3(Dirichlet) |
+  |---|---|---|---|---|
+  | Sys1 | 9/1.6 | 8/1.9 | 9/2.0 | **72/13.5** |
+  | Sys2 | 81/16.2 | 79/15.9 | 74/16.1 | **807/185** |
+  | Sys3 | 57/37.8 | 65/47.4 | 109/68.9 | **2000/1376** |
+
+  **结论**:
+  1. **Neumann 好、Dirichlet 灾难,不精确下更极端**:Neumann→Dirichlet,Sys2 迭代 10×/时间 11×、Sys3 35×/36×、Sys1 8×。迭代与时间几乎同比(每 apply 成本固定)。
+  2. **【关键新发现】不精确本地解把"优化 Robin"甜点抹平了**:Sys2 near-exact 有甜点(α=.001 53 → α=.2 **37**,省 30%);inexact(ICC0)整段 Neumann→Robin 基本平(81/79/74),**调 α 几乎白调**。原因:优化 Robin 收益要靠准确解本地 Robin 才能兑现;ICC0 的 $\omega$(本地不精确)大,主导 $\kappa\le C_0^2\omega(N_c+1)$,把传输优化淹没进噪声。
+  3. **==> 大规模(必用 ICC)下,边界条件的实际教训只剩一条:零重叠时别用 Dirichlet,取 Neumann/小 α 即可,调 α 不值得。** 又一次印证:SORAS 的"精调 Robin"卖点要靠昂贵准确本地解买,大规模用不上。
+
+- **`-neumann`:不调 Robin 参数,直接构造 Neumann 子域 vs Dirichlet 子域(ASM)**。分析先行(见下),再实测。
+
+  **分析——纯 Neumann 子域怎么解**:Dirichlet 块 $R_iAR_i^\top$ 排除外部 dof ≈ 齐次 Dirichlet → **非奇异**;Neumann 块(未装配、自然 BC)对纯扩散**常数在核里 → 奇异**,且局部 RHS $D R_i r$ 一般**不零均值 → 不相容**。四条解法:A 伪逆(投影 RHS+解,贵)、B 钉一点(能配 ICC0,但 hack)、C 正则化 $K+\varepsilon M$(=小 α Robin,即要避免的调参)、D 局部挂核 CG(贵)。**关键:纯 Neumann 子域的常数核合起来正是一组粗空间基 → 它天然要配粗空间(Neumann-Neumann/BDD/FETI)。** 谱直觉:Dirichlet 太硬、Neumann 太软(常数自由)、Robin 居中。
+
+  **实测(用 B 钉一点,零重叠,np=8,迭代/solve-ms)**:
+
+  | 系统 | Dirichlet ICC0 | Dirichlet 近精确 | Neumann ICC0 | Neumann 近精确 |
+  |---|---|---|---|---|
+  | Sys1 | **13/2.0** | 12/12 | 17/3.1 | 14/17.6 |
+  | Sys2 | **76/13.2** | **51/172** | 84/16.7 | **114**/664 |
+  | Sys3 | 63/32.1 | **44/675** | 57/35.3 | 55/1535 |
+
+  **结论**:
+  1. **Dirichlet 迭代上赢或平、时间全赢**;Sys3 Neumann 迭代略少但时间反而更慢(本地块更大)。
+  2. **冒烟证据:Neumann 越精确解越差**——Sys2 Neumann 近精确 114 > 它自己 ICC0 84 > Dirichlet 近精确 51。钉点的 Neumann 块是**病态**预条件:常数模没被正确约束,near-exact 忠实放大坏分量,ICC0 的不精确反而抹平它。
+  3. **==> 数值证明:纯 Neumann 子域单层站不住,打不过 Dirichlet-ASM,且"解得越准越糟"。它天生要配粗空间(Neumann-Neumann/FETI),不是一个能独立用的单层法。**
+
+  **补充:"用 ICC + 去 nullspace 便宜解 Neumann 块"行不行?——能跑但极差**(np=8,迭代):Neu 去-nullspace(ICC0+shift)= **87 / 315 / 2000(Sys3 不收敛)**,远差于 Neu 钉点(17/84/57)与 Dirichlet(13/76/63)。原因是**两个层次**:(a) nullspace 投影是"解层"操作,治 RHS 不相容 + 解不唯一;(b) 但 ICC 分解在**常数模零主元处崩溃**是"分解层"问题,nullspace 投影没碰被分解的矩阵 → ICC 照样崩,**必须加 shift**;而 shift 把常数模压到 ~ε → 块条件数 ~1/ε **病态** → ICC0 极差 → 外层爆炸。**反而钉点更好**:它给一个真正良态的块(钉点处 O(1) 特征值),ICC0 质量好。正统挂核伪逆(near-exact CG+nullspace)在病态块上要几百内层迭代直接超时。**结论:去 nullspace 救不了便宜 ICC;纯 Neumann 块无论钉点/挂核单层都不行,归宿是粗空间。**
+- RAS(1.1)= 把 $D_i$ 换成非重叠 0/1 指示、单边放,外层换 flexible-CG/GMRES(仍会因 $A^{(i)}_{jj}$ 问题受限于装配块)。
+- 乘性/着色:另写一个 PCSHELL,按 §2.3 逐色扫;仅建议做 MG-smoother 时用。
