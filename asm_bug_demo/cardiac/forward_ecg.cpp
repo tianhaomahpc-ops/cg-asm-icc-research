@@ -680,6 +680,21 @@ int main(int argc, char *argv[])
     const int FISCH_MAX = 16;
     long fisch_cold=0, fisch_warm=0, fisch_fis=0, fisch_phys=0;   // cumulative iteration tallies
     auto ip2 = [&](const Vector&x,const Vector&y){ return InnerProduct(MPI_COMM_WORLD,x,y); };
+    // Batched inner products against a whole basis: dots[i] = <V[i],y> for all i
+    // with ONE MPI_Allreduce of an m-vector, instead of m separate Allreduces.
+    // At np=8 this is invisible; at P~3000 (collective-latency dominated) the
+    // unbatched loop costs 10-20x more than the whole projection should.
+    auto ipbatch = [&](const std::vector<Vector>&V, const Vector&y,
+                       std::vector<double>&dots){
+        const size_t m=V.size(); dots.assign(m,0.0);
+        for (size_t i=0;i<m;++i){ const Vector&v=V[i]; double s=0.0;
+            for (int k=0;k<v.Size();++k) s+=v(k)*y(k); dots[i]=s; }
+        if (m) MPI_Allreduce(MPI_IN_PLACE,dots.data(),(int)m,MPI_DOUBLE,MPI_SUM,
+                             MPI_COMM_WORLD);
+    };
+    // Collective-count bookkeeping: what the batched code actually issues vs what
+    // the old unbatched-MGS code would have issued for the same window sizes.
+    long fisch_red_new=0, fisch_red_old=0;
 
     // ---- accelerated Sys2 solver: strong fine level (SORAS) and/or shared -----
     //      Nicolaides coarse space.  Build a SECOND Sys2 solver whose PC is
@@ -2036,8 +2051,12 @@ int main(int argc, char *argv[])
                     Vector xwarm(ue_prev);
                     cg2.Mult(b2, xwarm); it2_warm=cg2.GetNumIterations();
                     // (c) Fischer: x0 = sum_i <p_i,b> p_i (A-orth projection; measure only)
+                    // BATCHED: all <p_i,b> in one Allreduce (was: one per basis vector)
                     Vector xf(nloc); xf=0.0;
-                    for (size_t i=0;i<fisch_P.size();++i) xf.Add(ip2(fisch_P[i],b2), fisch_P[i]);
+                    { std::vector<double> cf; ipbatch(fisch_P, b2, cf);
+                      for (size_t i=0;i<fisch_P.size();++i) xf.Add(cf[i], fisch_P[i]);
+                      fisch_red_new += fisch_P.empty()?0:1;
+                      fisch_red_old += (long)fisch_P.size(); }
                     cg2.Mult(b2, xf);
                     it2_fis=cg2.GetNumIterations();
                     // (d) PHYSICS initial guess (cross-system, current-step Vm):
@@ -2051,12 +2070,21 @@ int main(int argc, char *argv[])
                     KSPSetInitialGuessNonzero((KSP)cg2, PETSC_TRUE);
                     cg2.Mult(b2, xphys); it2_phys=cg2.GetNumIterations();
                     KSPSetInitialGuessNonzero((KSP)cg2, PETSC_FALSE);
-                    // grow the history from the CLEAN cold solution (mean-zero copy)
+                    // grow the history from the CLEAN cold solution (mean-zero copy).
+                    // CGS2 (classical Gram-Schmidt, 2 passes, coefficients batched into
+                    // ONE Allreduce per pass) replaces MGS (one Allreduce per basis
+                    // vector, sequential).  Numerically CGS2 ~ MGS; communication O(1).
                     Vector w(ue_h); RemoveGlobalMean(w, MPI_COMM_WORLD);
                     Vector Aw(nloc); Kie->Mult(w, Aw);
-                    for (size_t i=0;i<fisch_P.size();++i){
-                        double c=ip2(fisch_AP[i],w); w.Add(-c,fisch_P[i]); Aw.Add(-c,fisch_AP[i]); }
+                    for (int pass=0; pass<2 && !fisch_P.empty(); ++pass){
+                        std::vector<double> cf; ipbatch(fisch_AP, w, cf);  // c_i=<A p_i,w>
+                        for (size_t i=0;i<fisch_P.size();++i){
+                            w.Add(-cf[i],fisch_P[i]); Aw.Add(-cf[i],fisch_AP[i]); }
+                        fisch_red_new += 1;
+                    }
+                    fisch_red_old += (long)fisch_P.size();   // MGS: one reduce per vector
                     double nrm=std::sqrt(ip2(w,Aw));
+                    fisch_red_new += 1; fisch_red_old += 1;  // the norm reduce (both)
                     if (nrm>1e-12){
                         w*=1.0/nrm; Aw*=1.0/nrm;
                         // SLIDING WINDOW: evict the oldest so the basis tracks the
@@ -2158,7 +2186,11 @@ int main(int argc, char *argv[])
              << "  (-" << (int)(100.0*(fisch_cold-fisch_fis)/fisch_cold) << "%)\n"
              << "  PHYSICS (x0 = c* Vm)     : " << fisch_phys
              << "  (-" << (int)(100.0*(fisch_cold-fisch_phys)/fisch_cold) << "%)"
-             << "   [cross-system, current-step Vm; monodomain reduction u_e~-c Vm]\n";
+             << "   [cross-system, current-step Vm; monodomain reduction u_e~-c Vm]\n"
+             << "  recycling-maintenance Allreduces: batched(new)=" << fisch_red_new
+             << " vs unbatched-MGS(old-equiv)=" << fisch_red_old
+             << "  (" << (fisch_red_new>0 ? (double)fisch_red_old/fisch_red_new : 0.0)
+             << "x fewer)\n";
     }
 
     // ---- benchmark activation times + conduction velocity -----------------
