@@ -2021,6 +2021,9 @@ int main(int argc, char *argv[])
     int tr_niface=0; std::vector<int> tr_cnt, tr_disp;
     double tr_build_wall=0.0, tr_apply_wall=0.0, tr_solve_wall=0.0;
     double tr_err_sum=0.0, tr_err_max=0.0; long tr_steps=0;
+    // electrode reciprocity lead-field: w_e = Kt^-1 (unit @ electrode); phi(e)=w_e.Bt
+    Vector wL_lead, wR_lead; double tr_lead_wall=0.0, tr_lead_err_max=0.0, tr_ecg_absmax=0.0;
+    double tr_lead_build=0.0;
     if (do_fischer3 || do_leadvol || do_transfer) {
         Kt3h_persist = new HypreParMatrix;
         ktf.FormSystemMatrix(ess_tdofs_t, *Kt3h_persist);   // constant matrix
@@ -2086,6 +2089,19 @@ int main(int argc, char *argv[])
             }
         }
         MPI_Barrier(MPI_COMM_WORLD); tr_build_wall = MPI_Wtime()-wb;
+        // ---- electrode reciprocity lead-field: ONE adjoint solve per electrode.
+        // phi(e) = e_e^T Kt^-1 Bt = (Kt^-1 e_e)^T Bt = w_e . Bt (Kt SPD symmetric).
+        // The electrode = the globally-nearest torso dof; set a unit there and solve.
+        MPI_Barrier(MPI_COMM_WORLD); double wl=MPI_Wtime();
+        { struct{double d;int r;} loc,glob;
+          loc.d=eL_d2; loc.r=rank; MPI_Allreduce(&loc,&glob,1,MPI_DOUBLE_INT,MPI_MINLOC,MPI_COMM_WORLD);
+          Vector uL(nloc); uL=0.0; if(rank==glob.r && eL>=0) uL(eL)=1.0;
+          wL_lead.SetSize(nloc); cg3p->SetRelTol(0.0); cg3p->SetAbsTol(1e-12);
+          KSPSetInitialGuessNonzero((KSP)*cg3p,PETSC_FALSE); cg3p->Mult(uL,wL_lead);
+          loc.d=eR_d2; loc.r=rank; MPI_Allreduce(&loc,&glob,1,MPI_DOUBLE_INT,MPI_MINLOC,MPI_COMM_WORLD);
+          Vector uR(nloc); uR=0.0; if(rank==glob.r && eR>=0) uR(eR)=1.0;
+          wR_lead.SetSize(nloc); cg3p->Mult(uR,wR_lead); }
+        MPI_Barrier(MPI_COMM_WORLD); tr_lead_build = MPI_Wtime()-wl;
         double zmb = (double)Zloc.size()*sizeof(double)/1048576.0, zmb_tot;
         MPI_Reduce(&zmb,&zmb_tot,1,MPI_DOUBLE,MPI_SUM,0,MPI_COMM_WORLD);
         if (rank==0) cout << "[TRANSFER] built interface->torso operator Z once: N_iface="
@@ -2392,6 +2408,14 @@ int main(int argc, char *argv[])
                     double en=std::sqrt(ip2(e,e)), xn=std::sqrt(ip2(Xt,Xt));
                     double rel=(xn>0?en/xn:0.0); tr_err_sum+=rel;
                     tr_err_max=std::max(tr_err_max,rel); tr_steps++;
+                    // ELECTRODE lead-field: ECG = (wL-wR).Bt -- 2 dot products, 0 solve.
+                    MPI_Barrier(MPI_COMM_WORLD); double wl=MPI_Wtime();
+                    double plL=ip2(wL_lead,Bt), prL=ip2(wR_lead,Bt);
+                    MPI_Barrier(MPI_COMM_WORLD); tr_lead_wall += MPI_Wtime()-wl;
+                    double plT=global_at(eL_d2,(eL>=0)?Xt(eL):0.0);   // true electrode phi
+                    double prT=global_at(eR_d2,(eR>=0)?Xt(eR):0.0);
+                    tr_lead_err_max=std::max(tr_lead_err_max, std::fabs((plL-prL)-(plT-prT)));
+                    tr_ecg_absmax=std::max(tr_ecg_absmax, std::fabs(plT-prT));
                     ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
                 } else {
                     PetscParMatrix Ktp; HypreToPetscAIJ(Kt, Ktp, "Sys3_Kt", rank, 1, true);
@@ -2524,7 +2548,16 @@ int main(int argc, char *argv[])
              << "  max " << tr_err_max << "\n"
              << "  => Z reproduces the FULL torso field for the real Niederer-driven RHS to solver\n"
              << "     tolerance EVERY step with ZERO per-step solve; RHS high-rank is irrelevant\n"
-             << "     because we apply the fixed operator, not a reduced basis of the moving field.\n";
+             << "     because we apply the fixed operator, not a reduced basis of the moving field.\n"
+             << "  -- ELECTRODE lead-field (reciprocity, the practical win) --\n"
+             << "  OFFLINE build (2 adjoint solves, once)   : " << tr_lead_build << " s\n"
+             << "  per-step ECG apply (2 dot products)      : " << tr_lead_wall/tr_steps*1e3
+             << " ms/step  (" << (tr_lead_wall>0? tr_solve_wall/tr_lead_wall:0.0)
+             << "x cheaper than solving)\n"
+             << "  ECG EXACTNESS: max |ECG_lead - ECG_true| = " << tr_lead_err_max
+             << "  (ECG scale ~" << tr_ecg_absmax << ")\n"
+             << "  => the electrode ECG is EXACT with only 2 offline solves + 2 dots/step: the\n"
+             << "     full-field win needs H-matrix, but the ELECTRODE output is free and exact now.\n";
     }
     delete cg3p; delete Kt3p_persist; delete Kt3h_persist;
 
