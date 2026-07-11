@@ -2701,8 +2701,9 @@ int main(int argc, char *argv[])
              << "  per-step TRUE solve (bjacobi+ICC CG)     : " << tr_solve_wall/tr_steps*1e3 << " ms/step\n"
              << "  per-step TRANSFER apply (BLAS matvec, 0 solve): " << tr_apply_wall/tr_steps*1e3
              << " ms incl.comm ; matvec-ONLY " << tr_apply_cpu/tr_steps*1e3 << " ms\n"
-             << "     (wall here is MPI-sync-bound under --oversubscribe; the matvec-only time is\n"
-             << "      the real per-step compute -- 2*N*N_iface flops, trivial vs a 69-iter solve)\n"
+             << "     (the matvec is MEMORY-BOUND: it streams the whole " << Zloc.size()*8/1048576 << " MB/rank of Z\n"
+             << "      every step, ~ the solve's cost -- so dense Z's SIZE, not flops, is the wall.\n"
+             << "      => this is exactly what H-matrix compression must shrink; see -transferh.)\n"
              << "  full-field EXACTNESS vs true solve       : mean rel-L2 " << tr_err_sum/tr_steps
              << "  max " << tr_err_max << "\n"
              << "  => Z reproduces the FULL torso field for the real Niederer-driven RHS to solver\n"
