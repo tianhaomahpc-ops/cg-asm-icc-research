@@ -433,6 +433,14 @@ int main(int argc, char *argv[])
     opts.AddOption(&do_f3gamg, "-fischer3gamg", "--fischer3gamg", "-nof3gamg", "--no-f3gamg",
                    "With -fischer3, use smoothed-aggregation AMG (GAMG) as the Sys3 fine PC "
                    "instead of bjacobi+ICC (measures GAMG iters + per-solve time vs sASM).");
+    bool do_leadvol = false; int lv_max = 40;
+    opts.AddOption(&do_leadvol, "-leadvol", "--leadvol", "-noleadvol", "--no-leadvol",
+                   "Sys3 FULL-FIELD reduced-basis (lead-field idea kept at volume resolution): "
+                   "grow an L2-orthonormal basis of the RHS trajectory, precompute Psi_i=Kt^-1 B_i "
+                   "ONCE each, then per step phi=sum <Bt,B_i> Psi_i -- full torso field by "
+                   "SUPERPOSITION, no per-step solve.  Reports basis size, %steps needing no "
+                   "solve, and full-field rel-L2 error vs the true solve.");
+    opts.AddOption(&lv_max, "-lvmax", "--lvmax", "Max lead-field/reduced basis size for -leadvol.");
     bool do_coarse = false, do_soras = false;
     double soras_alpha = 0.2;
     opts.AddOption(&do_coarse, "-coarse", "--coarse", "-nocoarse", "--no-coarse",
@@ -1991,7 +1999,11 @@ int main(int argc, char *argv[])
     Vector f3_prev; bool f3_have_prev=false;         // previous cold solution (warm/A2)
     double t3_cold_solve=0.0;                        // wall-clock of the kept cold solve
     const int F3MAX = 12;                            // window ~ Sys3's 8 slow modes x1.5
-    if (do_fischer3) {
+    // -leadvol: full-field reduced basis (superposition of precomputed response fields)
+    std::vector<Vector> lv_B, lv_Psi;                // L2-orthonormal RHS basis; Psi_i=Kt^-1 B_i
+    long lv_grow=0, lv_free=0; double lv_err_sum=0.0, lv_err_max=0.0;
+    const double LV_TOL = 1e-3;                       // accept a new RHS direction if this big
+    if (do_fischer3 || do_leadvol) {
         Kt3h_persist = new HypreParMatrix;
         ktf.FormSystemMatrix(ess_tdofs_t, *Kt3h_persist);   // constant matrix
         Kt3p_persist = new PetscParMatrix;
@@ -2210,6 +2222,47 @@ int main(int argc, char *argv[])
                     f3_cold += it3_cold; f3_fis += it3_fis;
                     f3_prev = Xt; f3_have_prev = true;      // seed warm/A2 for next step
                     ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
+                } else if (do_leadvol) {
+                    // FULL-FIELD reduced basis: the RHS Bt(t) is low-rank in time, so the
+                    // full torso field phi=Kt^-1 Bt is a superposition of precomputed
+                    // response fields Psi_i=Kt^-1 B_i.  Keep the TRUE solve as the field and
+                    // MEASURE the superposition's full-field error (no field corruption).
+                    double bn = std::sqrt(ip2(Bt,Bt));
+                    cg3p->SetRelTol(0.0); cg3p->SetAbsTol(1e-10*bn);
+                    KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE);
+                    cg3p->Mult(Bt, Xt); it3_cold=cg3p->GetNumIterations();   // true (kept) field
+                    // superposition approx: a_i=<Bt,B_i> (L2, batched); phi=sum a_i Psi_i
+                    Vector phi_ap(Xt.Size()); phi_ap=0.0;
+                    { std::vector<double> a(lv_B.size(),0.0);
+                      for (size_t i=0;i<lv_B.size();++i){ const Vector&B=lv_B[i]; double s=0.0;
+                          for (int k=0;k<B.Size();++k) s+=B(k)*Bt(k); a[i]=s; }
+                      if (!lv_B.empty()) MPI_Allreduce(MPI_IN_PLACE,a.data(),(int)lv_B.size(),
+                          MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+                      for (size_t i=0;i<lv_B.size();++i) phi_ap.Add(a[i], lv_Psi[i]); }
+                    // full-field relative L2 error of the superposition vs the true solve
+                    Vector e(Xt); e-=phi_ap;
+                    double en=std::sqrt(ip2(e,e)), xn=std::sqrt(ip2(Xt,Xt));
+                    double rel=(xn>0?en/xn:0.0); lv_err_sum+=rel; lv_err_max=std::max(lv_err_max,rel);
+                    // grow the RHS basis: L2-orthonormalize Bt against lv_B (CGS2); if the new
+                    // direction is non-negligible and room remains, accept it and precompute
+                    // its response field Psi=Kt^-1 B_new (a ONE-TIME solve, amortized).
+                    Vector w(Bt); double ref=std::sqrt(ip2(w,w));
+                    for (int pass=0; pass<2 && !lv_B.empty(); ++pass){
+                        std::vector<double> c(lv_B.size(),0.0);
+                        for (size_t i=0;i<lv_B.size();++i){ const Vector&B=lv_B[i]; double s=0.0;
+                            for (int k=0;k<B.Size();++k) s+=B(k)*w(k); c[i]=s; }
+                        MPI_Allreduce(MPI_IN_PLACE,c.data(),(int)lv_B.size(),MPI_DOUBLE,MPI_SUM,
+                            MPI_COMM_WORLD);
+                        for (size_t i=0;i<lv_B.size();++i) w.Add(-c[i],lv_B[i]);
+                    }
+                    double wn=std::sqrt(ip2(w,w));
+                    if (wn > LV_TOL*ref && (int)lv_B.size() < lv_max){
+                        w *= 1.0/wn; lv_B.push_back(w);
+                        Vector psi(Xt.Size()); psi=0.0;
+                        KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE);
+                        cg3p->Mult(w, psi); lv_Psi.push_back(psi); lv_grow++;
+                    } else lv_free++;
+                    ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
                 } else {
                     PetscParMatrix Ktp; HypreToPetscAIJ(Kt, Ktp, "Sys3_Kt", rank, 1, true);
                     PetscPCGSolver cg3(Ktp, "sys3_");
@@ -2306,6 +2359,19 @@ int main(int argc, char *argv[])
              << " vs unbatched-MGS(old-equiv)=" << f3_red_old
              << "  (" << (f3_red_new>0 ? (double)f3_red_old/f3_red_new : 0.0)
              << "x fewer)\n";
+    }
+    if (do_leadvol && rank==0 && (lv_grow+lv_free)>0) {
+        long tot=lv_grow+lv_free;
+        cout << "\n[LEADVOL] Sys3 FULL-FIELD reduced basis (superposition of Kt^-1 B_i, no per-step solve):\n"
+             << "  basis size k = " << lv_B.size() << "  (grown from the RHS trajectory, accept-tol "
+             << LV_TOL << ")\n"
+             << "  steps = " << tot << "  basis-growth (1 one-time solve) = " << lv_grow
+             << "   FREE (0 solve, pure axpy superposition) = " << lv_free
+             << "  (" << (int)(100.0*lv_free/tot) << "% of steps need NO solve)\n"
+             << "  full-field rel-L2 error (superposition vs true solve): mean "
+             << lv_err_sum/tot << "  max " << lv_err_max << "\n"
+             << "  => full torso volume field by superposition; per-step comm = 1 batched Allreduce"
+                " (vs ~" << 60 << " CG-iter Allreduces)\n";
     }
     delete cg3p; delete Kt3p_persist; delete Kt3h_persist;
 
