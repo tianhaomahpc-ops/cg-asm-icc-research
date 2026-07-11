@@ -2001,7 +2001,7 @@ int main(int argc, char *argv[])
     PetscPCGSolver *cg3p = nullptr;
     HypreParMatrix *Kt3h_persist = nullptr;
     std::vector<Vector> f3_P, f3_AP;                 // A-orthonormal history + A*history
-    long f3_cold=0, f3_warm=0, f3_fis=0, f3_red_new=0, f3_red_old=0;
+    long f3_cold=0, f3_warm=0, f3_phys=0, f3_fis=0, f3_red_new=0, f3_red_old=0;
     Vector f3_prev; bool f3_have_prev=false;         // previous cold solution (warm/A2)
     double t3_cold_solve=0.0;                        // wall-clock of the kept cold solve
     const int F3MAX = 12;                            // window ~ Sys3's 8 slow modes x1.5
@@ -2226,6 +2226,18 @@ int main(int argc, char *argv[])
                         Vector xw(f3_prev); cg3p->Mult(Bt, xw); it3_warm=cg3p->GetNumIterations();
                         KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE); }
                     if (it3_warm>=0) f3_warm += it3_warm; else f3_warm += it3_cold;
+                    // (a'') PHYSICS DC guess: x0 = constant = interface (Dirichlet) mean.
+                    //   A constant is harmonic + satisfies the body-surface Neumann BC, so it
+                    //   is the EXACT solution's DC component; leftover = interface variation.
+                    //   Uses the current interface u_e (cross-system).  Measure only.
+                    { double s=0.0; for (int k=0;k<ess_tdofs_t.Size();++k) s+=phi_tv(ess_tdofs_t[k]);
+                      double loc[2]={s,(double)ess_tdofs_t.Size()}, glob[2];
+                      MPI_Allreduce(loc,glob,2,MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+                      double ifmean = glob[1]>0? glob[0]/glob[1] : 0.0;
+                      Vector xp(Xt.Size()); xp = ifmean;
+                      KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_TRUE);
+                      cg3p->Mult(Bt, xp); f3_phys += cg3p->GetNumIterations();
+                      KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE); }
                     // (b) Fischer guess x0 = sum <p_i,Bt> p_i (batched; measure only)
                     Vector xf3(Xt.Size()); xf3=0.0;
                     { std::vector<double> cf(f3_P.size(),0.0);
@@ -2392,6 +2404,8 @@ int main(int argc, char *argv[])
              << "   (cold-solve wall = " << t3_cold_solve << " s)\n"
              << "  warm (prev phi)          : " << f3_warm
              << "  (-" << (int)(100.0*(f3_cold-f3_warm)/f3_cold) << "%)\n"
+             << "  physics (x0=iface-mean)  : " << f3_phys
+             << "  (-" << (int)(100.0*(f3_cold-f3_phys)/f3_cold) << "%)\n"
              << "  Fischer (u_e-BC history) : " << f3_fis
              << "  (-" << (int)(100.0*(f3_cold-f3_fis)/f3_cold) << "%)\n"
              << "  recycling-maintenance Allreduces: batched(new)=" << f3_red_new
