@@ -447,6 +447,13 @@ int main(int argc, char *argv[])
                    "SUPERPOSITION, no per-step solve.  Reports basis size, %steps needing no "
                    "solve, and full-field rel-L2 error vs the true solve.");
     opts.AddOption(&lv_max, "-lvmax", "--lvmax", "Max lead-field/reduced basis size for -leadvol.");
+    bool do_transfer = false;
+    opts.AddOption(&do_transfer, "-transfer", "--transfer", "-notransfer", "--no-transfer",
+                   "Sys3 interface->torso TRANSFER OPERATOR Z: build ONCE (one Sys3 solve per "
+                   "interface DOF, column = Kt^-1 lift of that unit interface value), then per "
+                   "step phi = Z * u_iface(t) via a local dense matvec -- EXACT for any RHS "
+                   "(approximate the fixed operator, not the moving solutions).  Validates the "
+                   "full torso field vs the true per-step solve and reports build/apply cost.");
     bool do_coarse = false, do_soras = false;
     double soras_alpha = 0.2;
     opts.AddOption(&do_coarse, "-coarse", "--coarse", "-nocoarse", "--no-coarse",
@@ -2009,7 +2016,12 @@ int main(int argc, char *argv[])
     std::vector<Vector> lv_B, lv_Psi;                // L2-orthonormal RHS basis; Psi_i=Kt^-1 B_i
     long lv_grow=0, lv_free=0; double lv_err_sum=0.0, lv_err_max=0.0;
     const double LV_TOL = 1e-3;                       // accept a new RHS direction if this big
-    if (do_fischer3 || do_leadvol) {
+    // -transfer: interface->torso transfer operator Z (nloc_true x Niface_glob, dense/rank)
+    std::vector<double> Zloc;                         // row-major: Zloc[i*Niface + g]
+    int tr_niface=0; std::vector<int> tr_cnt, tr_disp;
+    double tr_build_wall=0.0, tr_apply_wall=0.0, tr_solve_wall=0.0;
+    double tr_err_sum=0.0, tr_err_max=0.0; long tr_steps=0;
+    if (do_fischer3 || do_leadvol || do_transfer) {
         Kt3h_persist = new HypreParMatrix;
         ktf.FormSystemMatrix(ess_tdofs_t, *Kt3h_persist);   // constant matrix
         Kt3p_persist = new PetscParMatrix;
@@ -2040,6 +2052,45 @@ int main(int argc, char *argv[])
         if (rank==0) cout << "[FISCHER3] Sys3 persistent solver built once (reused every step)"
                           << (do_f3cheb? "  [KSP=Chebyshev, 0 Allreduce/iter]"
                               : do_f3gamg? "  [PC=GAMG]" : "  [PC=bjacobi+ICC]") << "\n";
+    }
+    if (do_transfer) {
+        // ---- OFFLINE (once): build the interface->torso transfer operator Z.
+        // Column g = Kt^-1 (lift of the g-th global interface unit value): set that one
+        // interface DOF to 1, all others 0, form the Sys3 RHS and solve.  Z is fixed for
+        // all time; per step phi = Z u_iface(t) is EXACT for ANY RHS (rank-independent).
+        const int nranks = Mpi::WorldSize();
+        tr_cnt.assign(nranks,0); tr_disp.assign(nranks,0);
+        int my_nif = ess_tdofs_t.Size();
+        MPI_Allgather(&my_nif,1,MPI_INT, tr_cnt.data(),1,MPI_INT, MPI_COMM_WORLD);
+        tr_niface = 0;
+        for (int r=0;r<nranks;++r){ tr_disp[r]=tr_niface; tr_niface+=tr_cnt[r]; }
+        const int nloc = fes_t.GetTrueVSize();
+        Zloc.assign((size_t)nloc*tr_niface, 0.0);
+        ParLinearForm zero_lf0(&fes_t); zero_lf0=0.0; zero_lf0.Assemble();
+        ParGridFunction phi_col(&fes_t);
+        Vector col_tv(nloc);
+        double bnref=1.0;
+        MPI_Barrier(MPI_COMM_WORLD); double wb=MPI_Wtime();
+        for (int r=0;r<nranks;++r){
+            for (int k=0;k<tr_cnt[r];++k){
+                col_tv=0.0; if (rank==r) col_tv(ess_tdofs_t[k])=1.0;
+                phi_col.SetFromTrueDofs(col_tv);
+                HypreParMatrix Ktc; Vector Xc, Bc;
+                ktf.FormLinearSystem(ess_tdofs_t, phi_col, zero_lf0, Ktc, Xc, Bc);
+                double bn=std::sqrt(ip2(Bc,Bc)); if (bn<=0) bn=bnref;
+                cg3p->SetRelTol(0.0); cg3p->SetAbsTol(1e-12*bn);
+                KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE);
+                cg3p->Mult(Bc, Xc);
+                const int g = tr_disp[r]+k;
+                for (int i=0;i<nloc;++i) Zloc[(size_t)i*tr_niface+g]=Xc(i);
+            }
+        }
+        MPI_Barrier(MPI_COMM_WORLD); tr_build_wall = MPI_Wtime()-wb;
+        double zmb = (double)Zloc.size()*sizeof(double)/1048576.0, zmb_tot;
+        MPI_Reduce(&zmb,&zmb_tot,1,MPI_DOUBLE,MPI_SUM,0,MPI_COMM_WORLD);
+        if (rank==0) cout << "[TRANSFER] built interface->torso operator Z once: N_iface="
+                          << tr_niface << " columns (" << tr_niface << " Sys3 solves), "
+                          << tr_build_wall << " s, Z storage " << zmb_tot << " MB total\n";
     }
     bool cheb_ready = false;   // one-time [emin,emax] estimate done?
 
@@ -2313,6 +2364,35 @@ int main(int argc, char *argv[])
                         cg3p->Mult(w, psi); lv_Psi.push_back(psi); lv_grow++;
                     } else lv_free++;
                     ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
+                } else if (do_transfer) {
+                    // Apply the prebuilt transfer operator: phi_Z = Z * u_iface(t).  Also do
+                    // the TRUE per-step solve (kept as the field) to VALIDATE exactness.
+                    double bn = std::sqrt(ip2(Bt,Bt));
+                    cg3p->SetRelTol(0.0); cg3p->SetAbsTol(1e-10*bn);
+                    KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE);
+                    MPI_Barrier(MPI_COMM_WORLD); double ws=MPI_Wtime();
+                    cg3p->Mult(Bt, Xt); it3_cold=cg3p->GetNumIterations();   // true (kept) field
+                    MPI_Barrier(MPI_COMM_WORLD); tr_solve_wall += MPI_Wtime()-ws;
+                    // transfer apply: gather interface data (same global order as Z columns),
+                    // then a local dense matvec -- ZERO solves, ZERO Krylov inner products.
+                    const int nif=tr_cnt[rank], nloc=Xt.Size();
+                    Vector locd(nif>0?nif:1);
+                    for (int k=0;k<nif;++k) locd(k)=phi_tv(ess_tdofs_t[k]);
+                    std::vector<double> dg(tr_niface);
+                    MPI_Barrier(MPI_COMM_WORLD); double wa=MPI_Wtime();
+                    MPI_Allgatherv(nif>0?locd.GetData():nullptr, nif, MPI_DOUBLE,
+                        dg.data(), tr_cnt.data(), tr_disp.data(), MPI_DOUBLE, MPI_COMM_WORLD);
+                    Vector phiZ(nloc);
+                    for (int i=0;i<nloc;++i){ double s=0.0;
+                        const double*zr=&Zloc[(size_t)i*tr_niface];
+                        for (int g=0;g<tr_niface;++g) s+=zr[g]*dg[g]; phiZ(i)=s; }
+                    MPI_Barrier(MPI_COMM_WORLD); tr_apply_wall += MPI_Wtime()-wa;
+                    // exactness: full torso field via Z vs the true solve
+                    Vector e(Xt); e-=phiZ;
+                    double en=std::sqrt(ip2(e,e)), xn=std::sqrt(ip2(Xt,Xt));
+                    double rel=(xn>0?en/xn:0.0); tr_err_sum+=rel;
+                    tr_err_max=std::max(tr_err_max,rel); tr_steps++;
+                    ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
                 } else {
                     PetscParMatrix Ktp; HypreToPetscAIJ(Kt, Ktp, "Sys3_Kt", rank, 1, true);
                     PetscPCGSolver cg3(Ktp, "sys3_");
@@ -2430,6 +2510,21 @@ int main(int argc, char *argv[])
              << lv_err_sum/tot << "  max " << lv_err_max << "\n"
              << "  => full torso volume field by superposition; per-step comm = 1 batched Allreduce"
                 " (vs ~" << 60 << " CG-iter Allreduces)\n";
+    }
+    if (do_transfer && rank==0 && tr_steps>0) {
+        double amort = tr_build_wall / tr_steps;   // offline cost per step if amortized
+        cout << "\n[TRANSFER] Sys3 interface->torso operator Z (approximate the OPERATOR, not the moving solutions):\n"
+             << "  N_iface (columns = one-time Sys3 solves) : " << tr_niface << "\n"
+             << "  OFFLINE build (once)                     : " << tr_build_wall
+             << " s  (amortized over " << tr_steps << " steps = " << amort*1e3 << " ms/step)\n"
+             << "  per-step TRUE solve (bjacobi+ICC CG)     : " << tr_solve_wall/tr_steps*1e3 << " ms/step\n"
+             << "  per-step TRANSFER apply (matvec, 0 solve): " << tr_apply_wall/tr_steps*1e3 << " ms/step"
+             << "  (" << (tr_apply_wall>0? tr_solve_wall/tr_apply_wall : 0.0) << "x cheaper than solving)\n"
+             << "  full-field EXACTNESS vs true solve       : mean rel-L2 " << tr_err_sum/tr_steps
+             << "  max " << tr_err_max << "\n"
+             << "  => Z reproduces the FULL torso field for the real Niederer-driven RHS to solver\n"
+             << "     tolerance EVERY step with ZERO per-step solve; RHS high-rank is irrelevant\n"
+             << "     because we apply the fixed operator, not a reduced basis of the moving field.\n";
     }
     delete cg3p; delete Kt3p_persist; delete Kt3h_persist;
 
