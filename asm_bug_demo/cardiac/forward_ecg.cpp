@@ -424,6 +424,12 @@ int main(int argc, char *argv[])
                    "Cross-time accel for the Sys2 EP-loop solve: MFEM-CG (||b||-relative "
                    "tol) + Fischer A-orthonormal projection of the previous u_e history "
                    "as the initial guess.  Reports cold/warm/Fischer iteration counts.");
+    bool do_fischer3 = false;
+    opts.AddOption(&do_fischer3, "-fischer3", "--fischer3", "-nofischer3", "--no-fischer3",
+                   "Sys3 torso Laplace: PERSISTENT operator+solver (built once, reused "
+                   "every step -- avoids per-step PETSc convert + ICC factorization) plus "
+                   "cb-Fischer recycling.  Non-singular, so no mean-removal.  Reports "
+                   "Sys3 cold vs Fischer iterations and batched-Allreduce counts.");
     bool do_coarse = false, do_soras = false;
     double soras_alpha = 0.2;
     opts.AddOption(&do_coarse, "-coarse", "--coarse", "-nocoarse", "--no-coarse",
@@ -1969,6 +1975,29 @@ int main(int argc, char *argv[])
     FILE *fe = (!do_precond && !do_prop && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay && !do_anisocmp && !do_deflate && rank==0) ? fopen("fwd_ecg.txt","w") : nullptr;
     if (fe) fprintf(fe,"# t(ms)  ECG(phi_L-phi_R)  Vm@center  u_e@center  phi_torso@L\n");
 
+    // ---- Sys3 (-fischer3): PERSISTENT torso operator + solver + recycling ----
+    // The torso stiffness K_t is time-invariant (only the interface Dirichlet data
+    // from u_e(t) drifts), so assemble + convert + factor it ONCE and reuse the
+    // solver every step.  Sys3 is SPD/non-singular (Dirichlet-anchored) so the
+    // Fischer basis needs NO mean-removal (unlike singular Sys2).
+    PetscParMatrix *Kt3p_persist = nullptr;
+    PetscPCGSolver *cg3p = nullptr;
+    HypreParMatrix *Kt3h_persist = nullptr;
+    std::vector<Vector> f3_P, f3_AP;                 // A-orthonormal history + A*history
+    long f3_cold=0, f3_fis=0, f3_red_new=0, f3_red_old=0;
+    const int F3MAX = 12;                            // window ~ Sys3's 8 slow modes x1.5
+    if (do_fischer3) {
+        Kt3h_persist = new HypreParMatrix;
+        ktf.FormSystemMatrix(ess_tdofs_t, *Kt3h_persist);   // constant matrix
+        Kt3p_persist = new PetscParMatrix;
+        HypreToPetscAIJ(*Kt3h_persist, *Kt3p_persist, "Sys3_Kt", rank, 1, true);
+        cg3p = new PetscPCGSolver(*Kt3p_persist, "sys3_");   // sys3_ => bjacobi+ICC (clobbered)
+        cg3p->SetMaxIter(3000); cg3p->iterative_mode=false;
+        { PC pc; KSPGetPC((KSP)*cg3p,&pc); PCSetType(pc,PCBJACOBI); }
+        KSPSetNormType((KSP)*cg3p, KSP_NORM_UNPRECONDITIONED);  // guess quality shows
+        if (rank==0) cout << "[FISCHER3] Sys3 persistent solver built once (reused every step)\n";
+    }
+
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
@@ -2112,12 +2141,55 @@ int main(int argc, char *argv[])
                 HypreParMatrix Kt; Vector Xt, Bt;
                 ParLinearForm zero_lf(&fes_t); zero_lf=0.0; zero_lf.Assemble();
                 ktf.FormLinearSystem(ess_tdofs_t, phi_t, zero_lf, Kt, Xt, Bt);
-                PetscParMatrix Ktp; HypreToPetscAIJ(Kt, Ktp, "Sys3_Kt", rank, 1, true);
-                PetscPCGSolver cg3(Ktp, "sys3_");
-                cg3.SetRelTol(1e-8); cg3.SetMaxIter(3000); cg3.iterative_mode=false;
-                { PC pc; KSPGetPC((KSP)cg3,&pc); PCSetType(pc,PCBJACOBI); }
-                cg3.Mult(Bt, Xt);
-                ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
+                int it3_cold=-1, it3_fis=-1;
+                if (do_fischer3) {
+                    // PERSISTENT solver (no per-step convert/factorization) + recycling.
+                    double bn = std::sqrt(ip2(Bt,Bt));
+                    cg3p->SetRelTol(0.0); cg3p->SetAbsTol(1e-8*bn);
+                    // (a) cold (x0=0) -- THIS is the kept field
+                    KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE);
+                    cg3p->Mult(Bt, Xt); it3_cold=cg3p->GetNumIterations();
+                    // (b) Fischer guess x0 = sum <p_i,Bt> p_i (batched; measure only)
+                    Vector xf3(Xt.Size()); xf3=0.0;
+                    { std::vector<double> cf(f3_P.size(),0.0);
+                      for (size_t i=0;i<f3_P.size();++i){ const Vector&p=f3_P[i]; double s=0.0;
+                          for (int k=0;k<p.Size();++k) s+=p(k)*Bt(k); cf[i]=s; }
+                      if (!f3_P.empty()) MPI_Allreduce(MPI_IN_PLACE,cf.data(),(int)f3_P.size(),
+                          MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+                      for (size_t i=0;i<f3_P.size();++i) xf3.Add(cf[i], f3_P[i]);
+                      f3_red_new += f3_P.empty()?0:1; f3_red_old += (long)f3_P.size(); }
+                    KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_TRUE);
+                    Vector xfs(xf3); cg3p->Mult(Bt, xfs); it3_fis=cg3p->GetNumIterations();
+                    KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE);
+                    // (c) grow basis from cold solution Xt (non-singular: NO mean removal),
+                    //     CGS2 A-orthonormalize (batched), relative drop, sliding window
+                    Vector w(Xt); Vector Aw(w.Size()); Kt.Mult(w, Aw);
+                    double ref = std::sqrt(ip2(w,Aw));
+                    for (int pass=0; pass<2 && !f3_P.empty(); ++pass){
+                        std::vector<double> cf(f3_P.size(),0.0);
+                        for (size_t i=0;i<f3_P.size();++i){ const Vector&ap=f3_AP[i]; double s=0.0;
+                            for (int k=0;k<ap.Size();++k) s+=ap(k)*w(k); cf[i]=s; }
+                        MPI_Allreduce(MPI_IN_PLACE,cf.data(),(int)f3_P.size(),MPI_DOUBLE,MPI_SUM,
+                            MPI_COMM_WORLD);
+                        for (size_t i=0;i<f3_P.size();++i){ w.Add(-cf[i],f3_P[i]); Aw.Add(-cf[i],f3_AP[i]); }
+                        f3_red_new += 1;
+                    }
+                    f3_red_old += (long)f3_P.size();
+                    double nrm = std::sqrt(ip2(w,Aw));
+                    f3_red_new += 1; f3_red_old += 1;
+                    if (nrm > 1e-3*ref){ w*=1.0/nrm; Aw*=1.0/nrm;
+                        if ((int)f3_P.size()>=F3MAX){ f3_P.erase(f3_P.begin()); f3_AP.erase(f3_AP.begin()); }
+                        f3_P.push_back(w); f3_AP.push_back(Aw); }
+                    f3_cold += it3_cold; f3_fis += it3_fis;
+                    ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
+                } else {
+                    PetscParMatrix Ktp; HypreToPetscAIJ(Kt, Ktp, "Sys3_Kt", rank, 1, true);
+                    PetscPCGSolver cg3(Ktp, "sys3_");
+                    cg3.SetRelTol(1e-8); cg3.SetMaxIter(3000); cg3.iterative_mode=false;
+                    { PC pc; KSPGetPC((KSP)cg3,&pc); PCSetType(pc,PCBJACOBI); }
+                    cg3.Mult(Bt, Xt); it3_cold=cg3.GetNumIterations();
+                    ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
+                }
                 if (rank==0) {
                     cout << "[ITERS] t="<<(int)(t+dt+0.5)<<"ms  Sys1(CG+bj-ICC)="
                          <<cg1.GetNumIterations()<<"  Sys2(singular)=";
@@ -2128,8 +2200,9 @@ int main(int argc, char *argv[])
                              <<" phys="<<it2_phys<<")";
                     else
                         cout << cg2.GetNumIterations();
-                    cout <<"  Sys3(torso)="<<cg3.GetNumIterations()
-                         <<"  ue_mean="<<std::scientific<<std::setprecision(2)<<ue_mean
+                    cout <<"  Sys3(torso)="<<it3_cold;
+                    if (do_fischer3) cout << " (Fischer="<<it3_fis<<")";
+                    cout <<"  ue_mean="<<std::scientific<<std::setprecision(2)<<ue_mean
                          <<std::defaultfloat<<"\n";
                 }
             }
@@ -2192,6 +2265,19 @@ int main(int argc, char *argv[])
              << "  (" << (fisch_red_new>0 ? (double)fisch_red_old/fisch_red_new : 0.0)
              << "x fewer)\n";
     }
+    if (do_fischer3 && rank==0 && f3_cold>0) {
+        cout << "\n[FISCHER3] Sys3 torso EP-loop (persistent solver + cb-Fischer recycling):\n"
+             << "  cold (x0=0)              : " << f3_cold << "\n"
+             << "  Fischer (u_e-BC history) : " << f3_fis
+             << "  (-" << (int)(100.0*(f3_cold-f3_fis)/f3_cold) << "%)\n"
+             << "  recycling-maintenance Allreduces: batched(new)=" << f3_red_new
+             << " vs unbatched-MGS(old-equiv)=" << f3_red_old
+             << "  (" << (f3_red_new>0 ? (double)f3_red_old/f3_red_new : 0.0)
+             << "x fewer)\n"
+             << "  (operator+solver built ONCE, reused every step; Sys3 non-singular"
+                " => no mean-removal)\n";
+    }
+    delete cg3p; delete Kt3p_persist; delete Kt3h_persist;
 
     // ---- benchmark activation times + conduction velocity -----------------
     if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay && !do_anisocmp && !do_deflate) {

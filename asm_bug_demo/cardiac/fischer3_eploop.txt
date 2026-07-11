@@ -1,0 +1,136 @@
+Options used:
+   --mesh heart_torso.msh
+   --dt 0.02
+   --t-final 80
+   --refine 0
+   --no-xsys
+   --no-precond
+   --no-sweep
+   --no-weightcmp
+   --no-dump
+   --no-prop
+   --prop-maxit 4
+   --prop-prefix prop
+   --cold
+   --no-fischer
+   --fischer3
+   --no-coarse
+   --no-soras
+   --soras-alpha 0.2
+   --soras-local -1
+   --soras-pu 0
+   --no-soraspu
+   --no-fair
+   --no-overlap
+   --no-tuned
+   --no-deflate
+   --no-anisocmp
+   --no-decay
+   --no-neumann
+   --no-transmiti
+   --no-transmit
+   --meanremove
+[FES] heart dofs=10085  torso dofs=36229
+[CONFORM] interface transfer matched 4757 / 4757 torso interface dofs to heart
+[CONVERT] Sys1_A1 global=10085x10085 fix_level=1
+[CONVERT] Sys2_Kie global=10085x10085 fix_level=1
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[FISCHER3] Sys3 persistent solver built once (reused every step)
+[ITERS] t=0ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=88  Sys3(torso)=68 (Fischer=68)  ue_mean=-4.23e-18
+[ITERS] t=1ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=90  Sys3(torso)=68 (Fischer=60)  ue_mean=-2.93e-16
+[ITERS] t=2ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=91  Sys3(torso)=69 (Fischer=62)  ue_mean=0.00e+00
+[ITERS] t=3ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=91  Sys3(torso)=69 (Fischer=63)  ue_mean=-2.71e-16
+[ITERS] t=4ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=91  Sys3(torso)=69 (Fischer=63)  ue_mean=5.41e-16
+[ITERS] t=5ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92  Sys3(torso)=70 (Fischer=64)  ue_mean=3.61e-16
+[ITERS] t=6ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92  Sys3(torso)=70 (Fischer=63)  ue_mean=-6.31e-16
+[ITERS] t=7ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93  Sys3(torso)=70 (Fischer=63)  ue_mean=1.62e-15
+[ITERS] t=8ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93  Sys3(torso)=70 (Fischer=63)  ue_mean=-1.08e-15
+[ITERS] t=9ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93  Sys3(torso)=70 (Fischer=62)  ue_mean=-3.61e-16
+[ITERS] t=10ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92  Sys3(torso)=70 (Fischer=62)  ue_mean=3.61e-15
+[ITERS] t=11ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=90  Sys3(torso)=70 (Fischer=61)  ue_mean=2.16e-15
+[ITERS] t=12ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=90  Sys3(torso)=70 (Fischer=62)  ue_mean=1.44e-15
+[ITERS] t=13ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92  Sys3(torso)=70 (Fischer=64)  ue_mean=7.21e-16
+[ITERS] t=14ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93  Sys3(torso)=69 (Fischer=61)  ue_mean=3.61e-15
+[ITERS] t=15ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93  Sys3(torso)=69 (Fischer=63)  ue_mean=2.16e-15
+[ITERS] t=16ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93  Sys3(torso)=69 (Fischer=63)  ue_mean=0.00e+00
+[ITERS] t=17ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93  Sys3(torso)=68 (Fischer=63)  ue_mean=0.00e+00
+[ITERS] t=18ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93  Sys3(torso)=68 (Fischer=63)  ue_mean=-2.16e-15
+[ITERS] t=19ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93  Sys3(torso)=68 (Fischer=62)  ue_mean=-1.44e-15
+[ITERS] t=20ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93  Sys3(torso)=68 (Fischer=62)  ue_mean=-3.61e-15
+[ITERS] t=21ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92  Sys3(torso)=69 (Fischer=60)  ue_mean=2.89e-15
+[ITERS] t=22ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92  Sys3(torso)=69 (Fischer=62)  ue_mean=1.44e-15
+[ITERS] t=23ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92  Sys3(torso)=69 (Fischer=62)  ue_mean=-4.33e-15
+[ITERS] t=24ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=91  Sys3(torso)=70 (Fischer=62)  ue_mean=-2.89e-15
+[ITERS] t=25ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92  Sys3(torso)=70 (Fischer=62)  ue_mean=1.44e-15
+[ITERS] t=26ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92  Sys3(torso)=70 (Fischer=63)  ue_mean=-5.05e-15
+[ITERS] t=27ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=91  Sys3(torso)=70 (Fischer=62)  ue_mean=-2.89e-15
+[ITERS] t=28ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=91  Sys3(torso)=70 (Fischer=62)  ue_mean=7.21e-16
+[ITERS] t=29ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=90  Sys3(torso)=70 (Fischer=62)  ue_mean=-2.53e-15
+[ITERS] t=30ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=90  Sys3(torso)=70 (Fischer=62)  ue_mean=-1.44e-15
+[ITERS] t=31ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=91  Sys3(torso)=69 (Fischer=62)  ue_mean=0.00e+00
+[ITERS] t=32ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92  Sys3(torso)=70 (Fischer=65)  ue_mean=7.21e-16
+[ITERS] t=33ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92  Sys3(torso)=69 (Fischer=62)  ue_mean=3.61e-16
+[ITERS] t=34ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92  Sys3(torso)=69 (Fischer=62)  ue_mean=-1.35e-15
+[ITERS] t=35ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=90  Sys3(torso)=69 (Fischer=63)  ue_mean=1.44e-15
+[ITERS] t=36ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=89  Sys3(torso)=68 (Fischer=62)  ue_mean=4.51e-16
+[ITERS] t=37ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=89  Sys3(torso)=68 (Fischer=63)  ue_mean=-7.21e-16
+[ITERS] t=38ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=87  Sys3(torso)=68 (Fischer=64)  ue_mean=2.48e-16
+[ITERS] t=39ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=87  Sys3(torso)=69 (Fischer=68)  ue_mean=-4.51e-17
+[ITERS] t=40ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93  Sys3(torso)=68 (Fischer=68)  ue_mean=-6.76e-17
+[ITERS] t=41ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=68 (Fischer=61)  ue_mean=-1.35e-16
+[ITERS] t=42ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=94  Sys3(torso)=67 (Fischer=58)  ue_mean=-3.16e-16
+[ITERS] t=43ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=94  Sys3(torso)=68 (Fischer=58)  ue_mean=1.80e-16
+[ITERS] t=44ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=68 (Fischer=58)  ue_mean=4.51e-17
+[ITERS] t=45ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=68 (Fischer=59)  ue_mean=1.35e-16
+[ITERS] t=46ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=69 (Fischer=58)  ue_mean=1.35e-16
+[ITERS] t=47ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=69 (Fischer=56)  ue_mean=1.35e-16
+[ITERS] t=48ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=70 (Fischer=56)  ue_mean=2.25e-16
+[ITERS] t=49ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=70 (Fischer=56)  ue_mean=-2.93e-16
+[ITERS] t=50ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=70 (Fischer=55)  ue_mean=-2.03e-16
+[ITERS] t=51ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=94  Sys3(torso)=70 (Fischer=60)  ue_mean=0.00e+00
+[ITERS] t=52ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93  Sys3(torso)=70 (Fischer=65)  ue_mean=1.13e-16
+[ITERS] t=53ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=94  Sys3(torso)=70 (Fischer=67)  ue_mean=9.02e-17
+[ITERS] t=54ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=94  Sys3(torso)=70 (Fischer=64)  ue_mean=2.25e-17
+[ITERS] t=55ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=70 (Fischer=61)  ue_mean=1.13e-16
+[ITERS] t=56ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=70 (Fischer=59)  ue_mean=1.13e-16
+[ITERS] t=57ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=70 (Fischer=60)  ue_mean=1.35e-16
+[ITERS] t=58ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=96  Sys3(torso)=70 (Fischer=61)  ue_mean=0.00e+00
+[ITERS] t=59ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=96  Sys3(torso)=70 (Fischer=59)  ue_mean=-4.51e-17
+[ITERS] t=60ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=96  Sys3(torso)=70 (Fischer=58)  ue_mean=6.76e-17
+[ITERS] t=61ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=96  Sys3(torso)=70 (Fischer=57)  ue_mean=-4.51e-17
+[ITERS] t=62ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=96  Sys3(torso)=70 (Fischer=57)  ue_mean=-2.25e-17
+[ITERS] t=63ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=96  Sys3(torso)=70 (Fischer=56)  ue_mean=5.64e-17
+[ITERS] t=64ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=96  Sys3(torso)=70 (Fischer=58)  ue_mean=-1.92e-16
+[ITERS] t=65ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=96  Sys3(torso)=70 (Fischer=64)  ue_mean=6.76e-17
+[ITERS] t=66ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=96  Sys3(torso)=70 (Fischer=66)  ue_mean=5.64e-18
+[ITERS] t=67ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=96  Sys3(torso)=70 (Fischer=65)  ue_mean=-1.13e-17
+[ITERS] t=68ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=96  Sys3(torso)=70 (Fischer=62)  ue_mean=5.92e-17
+[ITERS] t=69ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=96  Sys3(torso)=70 (Fischer=61)  ue_mean=-3.66e-17
+[ITERS] t=70ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=96  Sys3(torso)=69 (Fischer=61)  ue_mean=-5.35e-17
+[ITERS] t=71ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=68 (Fischer=61)  ue_mean=7.05e-18
+[ITERS] t=72ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=67 (Fischer=62)  ue_mean=-1.06e-17
+[ITERS] t=73ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=68 (Fischer=62)  ue_mean=-3.52e-18
+[ITERS] t=74ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=69 (Fischer=60)  ue_mean=1.41e-18
+[ITERS] t=75ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=70 (Fischer=59)  ue_mean=0.00e+00
+[ITERS] t=76ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=70 (Fischer=58)  ue_mean=1.41e-17
+[ITERS] t=77ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92  Sys3(torso)=70 (Fischer=57)  ue_mean=-2.54e-17
+[ITERS] t=78ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=70 (Fischer=65)  ue_mean=5.64e-18
+[ITERS] t=79ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95  Sys3(torso)=70 (Fischer=67)  ue_mean=-1.41e-17
+
+[FISCHER3] Sys3 torso EP-loop (persistent solver + cb-Fischer recycling):
+  cold (x0=0)              : 5544
+  Fischer (u_e-BC history) : 4922  (-11%)
+  recycling-maintenance Allreduces: batched(new)=317 vs unbatched-MGS(old-equiv)=1844  (5.8x fewer)
+  (operator+solver built ONCE, reused every step; Sys3 non-singular => no mean-removal)
+
+Activation times (V crosses 0 mV):
+  P1 (-10,-3.5,-1.5) : 0.7 ms
+  P2 (-10,3.5,-1.5) : 20 ms
+  P3 (10,-3.5,-1.5) : 31 ms
+  P4 (10,3.5,-1.5) : 39 ms
+  P5 (-10,-3.5,1.5) : 6.2 ms
+  P6 (-10,3.5,1.5) : 22 ms
+  P7 (10,-3.5,1.5) : 32 ms
+  P8 (10,3.5,1.5) : 40 ms
+P1->P8: dt_act=39 ms over 21 mm => CV~0.55 m/s (Niederer ~0.6-0.7; P8 -> ~43 ms under refinement)
+FWD_ECG_DONE
