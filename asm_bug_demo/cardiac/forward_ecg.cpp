@@ -434,6 +434,12 @@ int main(int argc, char *argv[])
                    "With -fischer3, use smoothed-aggregation AMG (GAMG) as the Sys3 fine PC "
                    "instead of bjacobi+ICC (measures GAMG iters + per-solve time vs sASM).");
     bool do_leadvol = false; int lv_max = 40;
+    bool do_f3cheb = false;
+    opts.AddOption(&do_f3cheb, "-f3cheb", "--f3cheb", "-nof3cheb", "--no-f3cheb",
+                   "With -fischer3, solve Sys3 by CHEBYSHEV iteration (bjacobi+ICC PC) with "
+                   "eigenvalues [emin,emax] estimated ONCE (constant operator) via a one-shot "
+                   "CG -- thereafter every step's iterations do ZERO inner products / ZERO "
+                   "Allreduce (fixed-coefficient polynomial).  Reports Chebyshev iters vs CG.");
     opts.AddOption(&do_leadvol, "-leadvol", "--leadvol", "-noleadvol", "--no-leadvol",
                    "Sys3 FULL-FIELD reduced-basis (lead-field idea kept at volume resolution): "
                    "grow an L2-orthonormal basis of the RHS trajectory, precompute Psi_i=Kt^-1 B_i "
@@ -2024,9 +2030,18 @@ int main(int argc, char *argv[])
         cg3p = new PetscPCGSolver(*Kt3p_persist, "sys3f_");
         cg3p->SetMaxIter(3000); cg3p->iterative_mode=false;
         KSPSetNormType((KSP)*cg3p, KSP_NORM_UNPRECONDITIONED);  // guess quality shows
+        if (do_f3cheb) {
+            // Chebyshev iteration: fixed-coefficient polynomial in M^-1 A, so its
+            // per-iteration work has ZERO inner products / ZERO Allreduce.  It needs
+            // [emin,emax] of the preconditioned operator, estimated ONCE below (the
+            // operator is constant) and then reused for all 10^4 steps.
+            KSPSetType((KSP)*cg3p, KSPCHEBYSHEV);
+        }
         if (rank==0) cout << "[FISCHER3] Sys3 persistent solver built once (reused every step)"
-                          << (do_f3gamg? "  [PC=GAMG]" : "  [PC=bjacobi+ICC]") << "\n";
+                          << (do_f3cheb? "  [KSP=Chebyshev, 0 Allreduce/iter]"
+                              : do_f3gamg? "  [PC=GAMG]" : "  [PC=bjacobi+ICC]") << "\n";
     }
+    bool cheb_ready = false;   // one-time [emin,emax] estimate done?
 
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
@@ -2175,6 +2190,29 @@ int main(int argc, char *argv[])
                 if (do_fischer3) {
                     // PERSISTENT solver (no per-step convert/factorization) + recycling.
                     double bn = std::sqrt(ip2(Bt,Bt));
+                    // ONE-TIME Chebyshev eigenvalue estimate (constant operator): run a
+                    // short CG with singular-value tracking on the first RHS, then hand
+                    // [emax,emin] of the preconditioned operator to the persistent Cheby KSP.
+                    if (do_f3cheb && !cheb_ready) {
+                        KSP eig; KSPCreate(MPI_COMM_WORLD,&eig);
+                        KSPSetOperators(eig,(Mat)*Kt3p_persist,(Mat)*Kt3p_persist);
+                        KSPSetType(eig,KSPCG); KSPSetComputeSingularValues(eig,PETSC_TRUE);
+                        KSPSetOptionsPrefix(eig,"sys3eig_");
+                        PetscOptionsSetValue(NULL,"-sys3eig_pc_type","bjacobi");
+                        PetscOptionsSetValue(NULL,"-sys3eig_sub_pc_type","icc");
+                        KSPSetFromOptions(eig);
+                        KSPSetTolerances(eig,1e-6,PETSC_DEFAULT,PETSC_DEFAULT,200);
+                        Vec ex,eb; MatCreateVecs((Mat)*Kt3p_persist,&ex,&eb);
+                        { PetscScalar *ea; VecGetArray(eb,&ea);
+                          for(int i=0;i<Bt.Size();++i) ea[i]=Bt(i); VecRestoreArray(eb,&ea); }
+                        VecZeroEntries(ex); KSPSolve(eig,eb,ex);
+                        PetscReal emax=0,emin=0; KSPComputeExtremeSingularValues(eig,&emax,&emin);
+                        if (emin<=0) emin=emax/1e3;
+                        KSPChebyshevSetEigenvalues((KSP)*cg3p,emax,emin);
+                        if (rank==0) cout<<"[F3CHEB] one-time eig estimate: emin="<<emin
+                                         <<" emax="<<emax<<" (cond "<<emax/emin<<")\n";
+                        VecDestroy(&ex); VecDestroy(&eb); KSPDestroy(&eig); cheb_ready=true;
+                    }
                     cg3p->SetRelTol(0.0); cg3p->SetAbsTol(1e-8*bn);
                     // (a) cold (x0=0) -- THIS is the kept field (also timed)
                     KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE);
@@ -2347,8 +2385,9 @@ int main(int argc, char *argv[])
              << "x fewer)\n";
     }
     if (do_fischer3 && rank==0 && f3_cold>0) {
-        cout << "\n[FISCHER3] Sys3 torso EP-loop  [PC=" << (do_f3gamg?"GAMG":"bjacobi+ICC")
-             << ", persistent solver]:\n"
+        const char* pclabel = do_f3cheb? "Chebyshev(bjacobi+ICC)" : do_f3gamg? "GAMG":"bjacobi+ICC";
+        cout << "\n[FISCHER3] Sys3 torso EP-loop  [solver=" << pclabel
+             << ", persistent]:\n"
              << "  cold (x0=0)              : " << f3_cold
              << "   (cold-solve wall = " << t3_cold_solve << " s)\n"
              << "  warm (prev phi)          : " << f3_warm
@@ -2359,6 +2398,11 @@ int main(int argc, char *argv[])
              << " vs unbatched-MGS(old-equiv)=" << f3_red_old
              << "  (" << (f3_red_new>0 ? (double)f3_red_old/f3_red_new : 0.0)
              << "x fewer)\n";
+        if (do_f3cheb)
+            cout << "  [F3CHEB] Chebyshev iters/step measured with a norm test; PRODUCTION runs a\n"
+                    "  FIXED k with -ksp_norm_type none => ZERO inner products/Allreduce per iter\n"
+                    "  (vs CG's 2/iter). At 3000 cores (latency-bound) this trades more local iters\n"
+                    "  for no synchronization -- the point is 0 collectives, not fewer iters.\n";
     }
     if (do_leadvol && rank==0 && (lv_grow+lv_free)>0) {
         long tot=lv_grow+lv_free;
