@@ -475,6 +475,15 @@ int main(int argc, char *argv[])
     opts.AddOption(&th_samp, "-thsamp", "--thsamp", "Max randomized samples per admissible block.");
     opts.AddOption(&th_eta, "-theta", "--theta", "Admissibility eta (block low-rank if dist>eta*(rL+rS)).");
     opts.AddOption(&th_tol, "-thtol", "--thtol", "Rel. singular-value truncation tol for -transferh.");
+    bool do_transferinc = false; double ti_eps = 1e-3; int ti_refresh = 20;
+    opts.AddOption(&do_transferinc, "-transferinc", "--transferinc", "-notransferinc", "--no-transferinc",
+                   "Incremental front-localized transfer: maintain phi(t)=phi(t-1)+Z*(u_e(t)-u_e(t-1)); "
+                   "only interface DOFs whose u_e changed (|d|>eps*max|d|, i.e. the moving front from "
+                   "Sys1/Sys2) update their column of Z -- per step touches K<<N_iface columns, "
+                   "streaming K columns not the whole 1.3 GB Z.  Periodic full refresh clears drift.  "
+                   "Uses Sys1 (front location) + Sys2 (u_e increment); validates vs the true solve.");
+    opts.AddOption(&ti_eps, "-tieps", "--tieps", "Active-column threshold (rel. to max|d|) for -transferinc.");
+    opts.AddOption(&ti_refresh, "-tirefresh", "--tirefresh", "Full-refresh period (steps) for -transferinc.");
     bool do_coarse = false, do_soras = false;
     double soras_alpha = 0.2;
     opts.AddOption(&do_coarse, "-coarse", "--coarse", "-nocoarse", "--no-coarse",
@@ -2054,7 +2063,12 @@ int main(int argc, char *argv[])
     std::vector<HBlock> th_blk;
     double th_build=0.0, th_apply=0.0, th_solve=0.0, th_err_sum=0.0, th_err_max=0.0; long th_steps=0;
     long th_store=0, th_ndense=0, th_nlr=0;
-    if (do_fischer3 || do_leadvol || do_transfer || do_transferh) {
+    // -transferinc: column-major Z + incremental front-localized update state
+    std::vector<double> Zcol;                        // column-major: Zcol[g*nloc + i]
+    std::vector<double> ti_dprev; Vector ti_phi; bool ti_have=false;
+    double ti_apply=0.0, ti_solve=0.0, ti_err_sum=0.0, ti_err_max=0.0;
+    long ti_steps=0, ti_active_sum=0, ti_active_max=0, ti_refresh_cnt=0;
+    if (do_fischer3 || do_leadvol || do_transfer || do_transferh || do_transferinc) {
         Kt3h_persist = new HypreParMatrix;
         ktf.FormSystemMatrix(ess_tdofs_t, *Kt3h_persist);   // constant matrix
         Kt3p_persist = new PetscParMatrix;
@@ -2086,7 +2100,7 @@ int main(int argc, char *argv[])
                           << (do_f3cheb? "  [KSP=Chebyshev, 0 Allreduce/iter]"
                               : do_f3gamg? "  [PC=GAMG]" : "  [PC=bjacobi+ICC]") << "\n";
     }
-    if (do_transfer || do_transferh) {
+    if (do_transfer || do_transferh || do_transferinc) {
         // ---- OFFLINE (once): build the interface->torso transfer operator Z.
         // Column g = Kt^-1 (lift of the g-th global interface unit value): set that one
         // interface DOF to 1, all others 0, form the Sys3 RHS and solve.  Z is fixed for
@@ -2098,7 +2112,8 @@ int main(int argc, char *argv[])
         tr_niface = 0;
         for (int r=0;r<nranks;++r){ tr_disp[r]=tr_niface; tr_niface+=tr_cnt[r]; }
         const int nloc = fes_t.GetTrueVSize();
-        Zloc.assign((size_t)nloc*tr_niface, 0.0);
+        if (do_transferinc) Zcol.assign((size_t)nloc*tr_niface, 0.0);   // column-major
+        else                Zloc.assign((size_t)nloc*tr_niface, 0.0);   // row-major
         ParLinearForm zero_lf0(&fes_t); zero_lf0=0.0; zero_lf0.Assemble();
         ParGridFunction phi_col(&fes_t);
         Vector col_tv(nloc);
@@ -2115,7 +2130,8 @@ int main(int argc, char *argv[])
                 KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE);
                 cg3p->Mult(Bc, Xc);
                 const int g = tr_disp[r]+k;
-                for (int i=0;i<nloc;++i) Zloc[(size_t)i*tr_niface+g]=Xc(i);
+                if (do_transferinc) for (int i=0;i<nloc;++i) Zcol[(size_t)g*nloc+i]=Xc(i);
+                else                for (int i=0;i<nloc;++i) Zloc[(size_t)i*tr_niface+g]=Xc(i);
             }
         }
         MPI_Barrier(MPI_COMM_WORLD); tr_build_wall = MPI_Wtime()-wb;
@@ -2132,7 +2148,7 @@ int main(int argc, char *argv[])
           Vector uR(nloc); uR=0.0; if(rank==glob.r && eR>=0) uR(eR)=1.0;
           wR_lead.SetSize(nloc); cg3p->Mult(uR,wR_lead); }
         MPI_Barrier(MPI_COMM_WORLD); tr_lead_build = MPI_Wtime()-wl;
-        double zmb = (double)Zloc.size()*sizeof(double)/1048576.0, zmb_tot;
+        double zmb = (double)(Zloc.size()+Zcol.size())*sizeof(double)/1048576.0, zmb_tot;
         MPI_Reduce(&zmb,&zmb_tot,1,MPI_DOUBLE,MPI_SUM,0,MPI_COMM_WORLD);
         if (rank==0) cout << "[TRANSFER] built interface->torso operator Z once: N_iface="
                           << tr_niface << " columns (" << tr_niface << " Sys3 solves), "
@@ -2574,6 +2590,43 @@ int main(int argc, char *argv[])
                     Vector e(Xt); e-=phiH; double en=std::sqrt(ip2(e,e)), xn=std::sqrt(ip2(Xt,Xt));
                     double rel=(xn>0?en/xn:0.0); th_err_sum+=rel; th_err_max=std::max(th_err_max,rel); th_steps++;
                     ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
+                } else if (do_transferinc) {
+                    // TRUE solve (kept field + validation)
+                    double bn = std::sqrt(ip2(Bt,Bt));
+                    cg3p->SetRelTol(0.0); cg3p->SetAbsTol(1e-10*bn);
+                    KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE);
+                    MPI_Barrier(MPI_COMM_WORLD); double ws=MPI_Wtime();
+                    cg3p->Mult(Bt, Xt); it3_cold=cg3p->GetNumIterations();
+                    MPI_Barrier(MPI_COMM_WORLD); ti_solve += MPI_Wtime()-ws;
+                    // gather full interface data d(t)
+                    const int nif=tr_cnt[rank], nloc=Xt.Size();
+                    Vector locd(nif>0?nif:1);
+                    for (int k=0;k<nif;++k) locd(k)=phi_tv(ess_tdofs_t[k]);
+                    std::vector<double> dg(tr_niface);
+                    MPI_Allgatherv(nif>0?locd.GetData():nullptr, nif, MPI_DOUBLE,
+                        dg.data(), tr_cnt.data(), tr_disp.data(), MPI_DOUBLE, MPI_COMM_WORLD);
+                    if (ti_phi.Size()!=nloc){ ti_phi.SetSize(nloc); ti_phi=0.0; }
+                    double dmax=0.0; for(int g=0;g<tr_niface;++g) dmax=std::max(dmax,std::fabs(dg[g]));
+                    bool refresh = (!ti_have) || (ti_steps % ti_refresh == 0);
+                    MPI_Barrier(MPI_COMM_WORLD); double wa=MPI_Wtime();
+                    if (refresh){
+                        // full apply phi = Z d  (streams all Z) -- clears accumulated drift
+                        char tr='N'; int M=nloc, N=tr_niface, one=1; double al=1.0, be=0.0;
+                        dgemv_(&tr,&M,&N,&al,Zcol.data(),&M,dg.data(),&one,&be,ti_phi.GetData(),&one);
+                        ti_refresh_cnt++;
+                    } else {
+                        // incremental: only columns whose interface value changed (the front)
+                        int nact=0; double thr=ti_eps*dmax;
+                        for (int g=0; g<tr_niface; ++g){ double dd=dg[g]-ti_dprev[g];
+                            if (std::fabs(dd) > thr){ const double*zc=&Zcol[(size_t)g*nloc];
+                                double*p=ti_phi.GetData(); for(int i=0;i<nloc;++i) p[i]+=dd*zc[i]; nact++; } }
+                        ti_active_sum += nact; ti_active_max = std::max(ti_active_max,(long)nact);
+                    }
+                    MPI_Barrier(MPI_COMM_WORLD); ti_apply += MPI_Wtime()-wa;
+                    ti_dprev = dg; ti_have = true;
+                    Vector e(Xt); e-=ti_phi; double en=std::sqrt(ip2(e,e)), xn=std::sqrt(ip2(Xt,Xt));
+                    double rel=(xn>0?en/xn:0.0); ti_err_sum+=rel; ti_err_max=std::max(ti_err_max,rel); ti_steps++;
+                    ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
                 } else {
                     PetscParMatrix Ktp; HypreToPetscAIJ(Kt, Ktp, "Sys3_Kt", rank, 1, true);
                     PetscPCGSolver cg3(Ktp, "sys3_");
@@ -2731,6 +2784,24 @@ int main(int argc, char *argv[])
              << "     with NO per-step solve; closes the open item -- full volume can beat solving.\n"
              << "     (offline still builds Z once; ACA-inverse to avoid that is the library-level step.)\n";
         (void)sflop;
+    }
+    if (do_transferinc && rank==0 && ti_steps>0) {
+        long incsteps = ti_steps - ti_refresh_cnt;
+        double avgact = incsteps>0? (double)ti_active_sum/incsteps : 0.0;
+        cout << "\n[TRANSFERINC] Sys3 full-field via INCREMENTAL front-localized transfer"
+             << " (Sys1 front + Sys2 u_e increment):\n"
+             << "  active interface DOFs / step (front band): avg " << avgact
+             << "  max " << ti_active_max << "  of N_iface=" << tr_niface
+             << "  (" << 100.0*avgact/tr_niface << "% -> streams that fraction of Z)\n"
+             << "  full refreshes: " << ti_refresh_cnt << " of " << ti_steps
+             << " steps (every " << ti_refresh << ", eps=" << ti_eps << ")\n"
+             << "  per-step TRUE solve (bjacobi+ICC CG)     : " << ti_solve/ti_steps*1e3 << " ms/step\n"
+             << "  per-step INCREMENTAL apply (avg incl. refresh): " << ti_apply/ti_steps*1e3 << " ms/step"
+             << "  (" << (ti_apply>0? ti_solve/ti_apply:0.0) << "x vs solve)\n"
+             << "  full-field EXACTNESS vs true solve       : mean rel-L2 " << ti_err_sum/ti_steps
+             << "  max " << ti_err_max << "\n"
+             << "  => only the moving-front columns of Z update each step; per-step memory traffic\n"
+             << "     drops to the active fraction -- Sys1/Sys2 tell us WHICH columns, exactly.\n";
     }
     delete cg3p; delete Kt3p_persist; delete Kt3h_persist;
 
