@@ -49,6 +49,8 @@ using namespace std;
 // LAPACK symmetric eigensolver (MFEM here is built without LAPACK, but -llapack is
 // linked for PETSc, so call dsyev directly for the small K x K Gram matrices).
 extern "C" void dsyev_(char*, char*, int*, double*, int*, double*, double*, int*, int*);
+extern "C" void dgemv_(char*, int*, int*, double*, const double*, int*, const double*,
+                       int*, double*, double*, int*);
 
 static const int HEART_ATTR = 1;   // Gmsh Physical Volume("heart",1)
 static const int TORSO_ATTR = 2;   // Gmsh Physical Volume("torso",2)
@@ -2038,7 +2040,7 @@ int main(int argc, char *argv[])
     // -transfer: interface->torso transfer operator Z (nloc_true x Niface_glob, dense/rank)
     std::vector<double> Zloc;                         // row-major: Zloc[i*Niface + g]
     int tr_niface=0; std::vector<int> tr_cnt, tr_disp;
-    double tr_build_wall=0.0, tr_apply_wall=0.0, tr_solve_wall=0.0;
+    double tr_build_wall=0.0, tr_apply_wall=0.0, tr_solve_wall=0.0, tr_apply_cpu=0.0;
     double tr_err_sum=0.0, tr_err_max=0.0; long tr_steps=0;
     // electrode reciprocity lead-field: w_e = Kt^-1 (unit @ electrode); phi(e)=w_e.Bt
     Vector wL_lead, wR_lead; double tr_lead_wall=0.0, tr_lead_err_max=0.0, tr_ecg_absmax=0.0;
@@ -2520,9 +2522,12 @@ int main(int argc, char *argv[])
                     MPI_Allgatherv(nif>0?locd.GetData():nullptr, nif, MPI_DOUBLE,
                         dg.data(), tr_cnt.data(), tr_disp.data(), MPI_DOUBLE, MPI_COMM_WORLD);
                     Vector phiZ(nloc);
-                    for (int i=0;i<nloc;++i){ double s=0.0;
-                        const double*zr=&Zloc[(size_t)i*tr_niface];
-                        for (int g=0;g<tr_niface;++g) s+=zr[g]*dg[g]; phiZ(i)=s; }
+                    // y = Z d via BLAS dgemv.  Zloc is row-major (nloc x niface) = column-major
+                    // (niface x nloc), so y = (that)^T d: trans='T', m=niface, n=nloc, lda=niface.
+                    double wcpu=MPI_Wtime();
+                    { char tr='T'; int M=tr_niface, N=nloc, one=1; double al=1.0, be=0.0;
+                      dgemv_(&tr,&M,&N,&al,Zloc.data(),&M,dg.data(),&one,&be,phiZ.GetData(),&one); }
+                    tr_apply_cpu += MPI_Wtime()-wcpu;   // matvec-only (no comm/barrier)
                     MPI_Barrier(MPI_COMM_WORLD); tr_apply_wall += MPI_Wtime()-wa;
                     // exactness: full torso field via Z vs the true solve
                     Vector e(Xt); e-=phiZ;
@@ -2694,8 +2699,10 @@ int main(int argc, char *argv[])
              << "  OFFLINE build (once)                     : " << tr_build_wall
              << " s  (amortized over " << tr_steps << " steps = " << amort*1e3 << " ms/step)\n"
              << "  per-step TRUE solve (bjacobi+ICC CG)     : " << tr_solve_wall/tr_steps*1e3 << " ms/step\n"
-             << "  per-step TRANSFER apply (matvec, 0 solve): " << tr_apply_wall/tr_steps*1e3 << " ms/step"
-             << "  (" << (tr_apply_wall>0? tr_solve_wall/tr_apply_wall : 0.0) << "x cheaper than solving)\n"
+             << "  per-step TRANSFER apply (BLAS matvec, 0 solve): " << tr_apply_wall/tr_steps*1e3
+             << " ms incl.comm ; matvec-ONLY " << tr_apply_cpu/tr_steps*1e3 << " ms\n"
+             << "     (wall here is MPI-sync-bound under --oversubscribe; the matvec-only time is\n"
+             << "      the real per-step compute -- 2*N*N_iface flops, trivial vs a 69-iter solve)\n"
              << "  full-field EXACTNESS vs true solve       : mean rel-L2 " << tr_err_sum/tr_steps
              << "  max " << tr_err_max << "\n"
              << "  => Z reproduces the FULL torso field for the real Niederer-driven RHS to solver\n"
