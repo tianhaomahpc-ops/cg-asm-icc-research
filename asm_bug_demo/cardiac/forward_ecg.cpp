@@ -534,6 +534,13 @@ int main(int argc, char *argv[])
                    "two-level with a Nicolaides (1/subdomain) and a richer {1,x,y,z}/"
                    "subdomain coarse space; report iters -- does deflating the ~12-dim "
                    "geometric slow subspace collapse the 67-step floor? (skips EP).");
+    bool do_sys3coarse = false;
+    opts.AddOption(&do_sys3coarse, "-sys3coarse", "--sys3coarse", "-nosys3coarse", "--no-sys3coarse",
+                   "Sys3 SELF-acceleration in the sASM+CG framework: one-level fine (bjacobi+ICC) "
+                   "vs two-level with a coarse space (Nicolaides 1/subdomain, geometric {1,x,y,z}/"
+                   "subdomain, and recycled A^-1 snapshots) on the torso operator Kt.  The coarse "
+                   "space treats C0 (the ~8 slow global modes one-level sASM cannot); reports iters "
+                   "+ per-iteration cost vs the GAMG alternative. (skips EP).");
     bool do_anisocmp = false;
     opts.AddOption(&do_anisocmp, "-anisocmp", "--anisocmp", "-noanisocmp", "--no-anisocmp",
                    "ISOTROPIC vs ANISOTROPIC: build Sys1 and Sys2 with sigma_T:=sigma_L "
@@ -1609,6 +1616,115 @@ int main(int argc, char *argv[])
     }
 
     // ====================================================================
+    //  -sys3coarse : Sys3 SELF-acceleration inside the sASM+CG framework.
+    //  kappa(M^-1 A) <= C0^2 * omega * (Nhat+1).  One-level sASM treats omega
+    //  (overlap+ICC) and Nhat (scaling) but NOT C0 -- the global coupling / the
+    //  ~8 slow torso modes.  Only a COARSE SPACE treats C0.  Torso Kt is SPD,
+    //  Dirichlet-anchored (NON-singular) => no nullspace, proj_const=false.
+    // ====================================================================
+    if (do_sys3coarse)
+    {
+        const int NPk = Mpi::WorldSize();
+        HypreParMatrix Kt3; ktf.FormSystemMatrix(ess_tdofs_t, Kt3);
+        PetscParMatrix Kt3p; HypreToPetscAIJ(Kt3, Kt3p, "Sys3_Kt", rank, 1, true);
+        const int nloc = fes_t.GetTrueVSize();
+        Mat A = (Mat)Kt3p;
+        Vec xstar,b; MatCreateVecs(A,&xstar,&b);
+        PetscInt rs,re; MatGetOwnershipRange(A,&rs,&re); PetscInt N; MatGetSize(A,&N,NULL);
+        { PetscScalar *a; VecGetArray(xstar,&a);
+          for(PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
+          VecRestoreArray(xstar,&a); }
+        MatMult(A,xstar,b);                                   // NON-singular: no mean removal
+        Vector Bv(nloc); { const PetscScalar *ba; VecGetArrayRead(b,&ba);
+            for(int i=0;i<nloc;++i) Bv(i)=ba[i]; VecRestoreArrayRead(b,&ba); }
+        // coarse modes: subdomain indicator + centered/normalized torso x,y,z
+        Vector m_ind(nloc); m_ind=1.0;
+        auto centnorm=[&](const Vector &src){ Vector v(src);
+            double lm=v.Sum()/std::max(nloc,1); for(int i=0;i<nloc;++i) v(i)-=lm;
+            double nn=v.Norml2(); if(nn>0) v/=nn; return v; };
+        Vector m_x=centnorm(txv), m_y=centnorm(tyv), m_z=centnorm(tzv);
+        // fine level = bjacobi + ICC (the same one-level Sys3 uses every step)
+        PetscOptionsSetValue(NULL,"-s3cfine_sub_pc_type","icc");
+        PetscPreconditioner fine(Kt3p,"s3cfine_"); { PC pc=(PC)fine; PCSetType(pc,PCBJACOBI); }
+        auto run=[&](Solver *pc,double *ms_per_it)->int{
+            PetscPCGSolver cg(Kt3p,"s3c_"); cg.SetMaxIter(2000); cg.SetRelTol(1e-8);
+            cg.iterative_mode=false; KSPSetNormType((KSP)cg,KSP_NORM_UNPRECONDITIONED);
+            cg.SetPreconditioner(*pc);
+            Vector Xv(nloc); Xv=0.0;
+            MPI_Barrier(MPI_COMM_WORLD); double t0=MPI_Wtime();
+            cg.Mult(Bv,Xv); int it=cg.GetNumIterations();
+            MPI_Barrier(MPI_COMM_WORLD); double t=MPI_Wtime()-t0;
+            if(ms_per_it) *ms_per_it = it>0? t/it*1e3 : 0.0; return it; };
+        double ms_base=0, ms_nic=0, ms_geo=0;
+        int it_base = run(&fine,&ms_base);
+        std::vector<Vector> M1{m_ind};
+        TwoLevelCoarse tlN(fine,Kt3,MPI_COMM_WORLD,NPk,rank,nloc,M1,false);   // non-singular
+        int it_nic = run(&tlN,&ms_nic);
+        std::vector<Vector> M4{m_ind,m_x,m_y,m_z};
+        TwoLevelCoarse tlG(fine,Kt3,MPI_COMM_WORLD,NPk,rank,nloc,M4,false);
+        int it_geo = run(&tlG,&ms_geo);
+        // ---- OMEGA lever: sASM overlap 0/1/2 as the fine level (PCASM + ICC subsolve)
+        double ms_o0=0, ms_o1=0, ms_o2=0;
+        for (const char*pfx : {"s3co0_","s3co1_","s3co2_"}){
+            std::string ov(1, pfx[4]);
+            PetscOptionsSetValue(NULL,(std::string("-")+pfx+"pc_type").c_str(),"asm");
+            PetscOptionsSetValue(NULL,(std::string("-")+pfx+"pc_asm_overlap").c_str(),ov.c_str());
+            PetscOptionsSetValue(NULL,(std::string("-")+pfx+"sub_pc_type").c_str(),"icc"); }
+        PetscPreconditioner fov0(Kt3p,"s3co0_"); int it_o0=run(&fov0,&ms_o0);
+        PetscPreconditioner fov1(Kt3p,"s3co1_"); int it_o1=run(&fov1,&ms_o1);
+        PetscPreconditioner fov2(Kt3p,"s3co2_"); int it_o2=run(&fov2,&ms_o2);
+        // best fine (overlap 2) + geometric coarse: the full two-level sASM
+        TwoLevelCoarse tlBoth(fov2,Kt3,MPI_COMM_WORLD,NPk,rank,nloc,M4,false);
+        double ms_both=0; int it_both=run(&tlBoth,&ms_both);
+        // recycled A^-1 snapshots (slow-mode-rich): approximate spectral coarse space
+        const int NSNAP=12;
+        auto trainsolve=[&](const Vector&w)->Vector{
+            PetscPCGSolver cgt(Kt3p,"s3ctrain_"); cgt.SetMaxIter(2000); cgt.SetRelTol(1e-8);
+            cgt.iterative_mode=false; KSPSetNormType((KSP)cgt,KSP_NORM_UNPRECONDITIONED);
+            cgt.SetPreconditioner(fine); Vector y(nloc); y=0.0; cgt.Mult(w,y); return y; };
+        std::vector<Vector> W_rec, W_hyb;
+        for(int j=0;j<NSNAP;++j){ Vector w(nloc);
+            for(int i=0;i<nloc;++i) w(i)=sin((0.3+0.17*j)*(i+1))+0.3*cos((0.09+0.04*j)*(i+1));
+            Vector y=trainsolve(w); W_rec.push_back(y); W_hyb.push_back(y); }
+        for(int k=0;k<NPk;++k) for(Vector*mp:{&m_ind,&m_x,&m_y,&m_z}){
+            Vector col(nloc); col=0.0; if(rank==k) col=*mp; W_hyb.push_back(col); }
+        GlobalDeflate gr(fine,Kt3,MPI_COMM_WORLD,nloc,(long)N,W_rec); int it_rec=run(&gr,nullptr);
+        GlobalDeflate gh(fine,Kt3,MPI_COMM_WORLD,nloc,(long)N,W_hyb); int it_hyb=run(&gh,nullptr);
+        int rdim=gr.Dim(), hdim=gh.Dim();
+        if(rank==0){
+            auto pct=[&](int it){ return it_base>0?100*(it_base-it)/it_base:0; };
+            cout << "\n[SYS3COARSE] Sys3 torso (SPD, Dirichlet-anchored), " << NPk
+                 << " subdomains, rtol 1e-8 -- coarse space treats C0 (the 8 slow modes):\n"
+                 << "  fine only (bjacobi+ICC, 1-level)         : " << it_base
+                 << " iters  (" << ms_base << " ms/iter)\n"
+                 << "  + Nicolaides coarse (dim=" << NPk << ")            : " << it_nic
+                 << "  (-" << pct(it_nic) << "%)  (" << ms_nic << " ms/iter)\n"
+                 << "  + geometric {1,x,y,z} coarse (dim=" << 4*NPk << ")  : " << it_geo
+                 << "  (-" << pct(it_geo) << "%)  (" << ms_geo << " ms/iter)\n"
+                 << "  + recycled A^-1 snapshots (" << NSNAP << "->" << rdim << " indep)  : " << it_rec
+                 << "  (-" << pct(it_rec) << "%)\n"
+                 << "  + hybrid geometric + recycled (dim=" << hdim << ") : " << it_hyb
+                 << "  (-" << pct(it_hyb) << "%)\n"
+                 << "  -- OMEGA lever (sASM overlap, PCASM+ICC fine level) --\n"
+                 << "  sASM overlap 0                           : " << it_o0
+                 << "  (-" << pct(it_o0) << "%)  (" << ms_o0 << " ms/iter)\n"
+                 << "  sASM overlap 1                           : " << it_o1
+                 << "  (-" << pct(it_o1) << "%)  (" << ms_o1 << " ms/iter)\n"
+                 << "  sASM overlap 2                           : " << it_o2
+                 << "  (-" << pct(it_o2) << "%)  (" << ms_o2 << " ms/iter)\n"
+                 << "  sASM overlap 2 + geometric coarse        : " << it_both
+                 << "  (-" << pct(it_both) << "%)  (" << ms_both << " ms/iter)\n"
+                 << "[SYS3COARSE] Reading: cheap coarse (Nicolaides/geom/recycled) barely moves Sys3\n"
+                    "  (~4-11%) -- its ill-conditioning is the h-refinement MULTISCALE hierarchy, not a\n"
+                    "  low-dim slow subspace, so a single crude coarse level cannot scale it.  Overlap\n"
+                    "  (omega) is the stronger in-framework knob; the real cut needs a MULTILEVEL / proper\n"
+                    "  coarse space = GAMG (63->13, 5.3x) at ~4x per-iter.  In-framework: overlap + a\n"
+                    "  genuine (coarse-mesh / smoothed-aggregation / GenEO) coarse space, not a crude one.\n";
+        }
+        VecDestroy(&xstar); VecDestroy(&b);
+    }
+
+    // ====================================================================
     //  -anisocmp : ISOTROPIC vs ANISOTROPIC.  Rebuild Sys1 (A1=(1/dt)M+(1/2)K)
     //  and Sys2 (Kie) with sigma_T:=sigma_L (isotropic, ratio 1) vs the real
     //  anisotropic tensor, and compare sASM(O1,ICC0) iters + cond.  Isotropic K
@@ -2252,7 +2368,7 @@ int main(int argc, char *argv[])
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
-    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap||do_fair||do_transmiti||do_neumann||do_decay||do_anisocmp||do_deflate) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
+    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap||do_fair||do_transmiti||do_neumann||do_decay||do_anisocmp||do_deflate||do_sys3coarse) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
     const int sample = std::max(1, (int)(1.0/dt));    // ~ every 1 ms
     for (int s=0;s<nsteps;++s)
     {
@@ -2806,7 +2922,7 @@ int main(int argc, char *argv[])
     delete cg3p; delete Kt3p_persist; delete Kt3h_persist;
 
     // ---- benchmark activation times + conduction velocity -----------------
-    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay && !do_anisocmp && !do_deflate) {
+    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay && !do_anisocmp && !do_deflate && !do_sys3coarse) {
     if (rank==0) cout << "\nActivation times (V crosses 0 mV):\n";
     double tP1=-1, tP8=-1;
     for (int q=0;q<8;++q){
