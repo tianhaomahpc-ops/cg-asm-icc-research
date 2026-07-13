@@ -1,0 +1,230 @@
+Options used:
+   --mesh heart_torso.msh
+   --dt 0.02
+   --t-final 80
+   --refine 0
+   --no-xsys
+   --no-precond
+   --no-sweep
+   --no-weightcmp
+   --no-dump
+   --no-prop
+   --prop-maxit 4
+   --prop-prefix prop
+   --cold
+   --fischer
+   --no-fischer3
+   --no-f3gamg
+   --no-f3cheb
+   --no-leadvol
+   --lvmax 40
+   --no-transfer
+   --no-transferh
+   --thnleaf 4
+   --thngrp 3
+   --thsamp 80
+   --theta 1.5
+   --thtol 1e-06
+   --no-transferinc
+   --tieps 0.001
+   --tirefresh 20
+   --no-coarse
+   --no-soras
+   --soras-alpha 0.2
+   --soras-local -1
+   --soras-pu 0
+   --no-soraspu
+   --no-fair
+   --no-overlap
+   --no-tuned
+   --no-deflate
+   --no-sys3coarse
+   --no-anisocmp
+   --no-decay
+   --no-neumann
+   --no-transmiti
+   --no-transmit
+   --meanremove
+[FES] heart dofs=10085  torso dofs=36229
+[CONFORM] interface transfer matched 4757 / 4757 torso interface dofs to heart
+[CONVERT] Sys1_A1 global=10085x10085 fix_level=1
+[CONVERT] Sys2_Kie global=10085x10085 fix_level=1
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=0ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=88 (cold=88 warm=88 phys=86)  Sys3(torso)=69  ue_mean=-4.23e-18
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=1ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=90 (cold=90 warm=90 phys=89)  Sys3(torso)=69  ue_mean=-2.93e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=2ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=91 (cold=92 warm=90 phys=91)  Sys3(torso)=69  ue_mean=-5.41e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=3ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=91 warm=87 phys=91)  Sys3(torso)=69  ue_mean=-2.71e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=4ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=92 warm=87 phys=90)  Sys3(torso)=70  ue_mean=3.61e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=5ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=92 warm=89 phys=91)  Sys3(torso)=70  ue_mean=3.61e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=6ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=92 warm=88 phys=91)  Sys3(torso)=70  ue_mean=-6.31e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=7ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=93 warm=90 phys=90)  Sys3(torso)=71  ue_mean=1.62e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=8ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93 (cold=93 warm=89 phys=90)  Sys3(torso)=71  ue_mean=-1.08e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=9ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=93 warm=90 phys=90)  Sys3(torso)=71  ue_mean=-3.61e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=10ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=92 warm=90 phys=89)  Sys3(torso)=71  ue_mean=3.61e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=11ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=90 warm=91 phys=88)  Sys3(torso)=70  ue_mean=2.16e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=12ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=90 warm=91 phys=88)  Sys3(torso)=70  ue_mean=1.44e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=13ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=92 warm=91 phys=89)  Sys3(torso)=70  ue_mean=7.21e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=14ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=93 warm=91 phys=90)  Sys3(torso)=70  ue_mean=3.61e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=15ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=93 warm=90 phys=91)  Sys3(torso)=70  ue_mean=2.16e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=16ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=93 warm=90 phys=91)  Sys3(torso)=69  ue_mean=0.00e+00
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=17ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=93 warm=90 phys=90)  Sys3(torso)=69  ue_mean=0.00e+00
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=18ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=93 warm=89 phys=90)  Sys3(torso)=68  ue_mean=-2.16e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=19ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=93 warm=89 phys=90)  Sys3(torso)=68  ue_mean=-1.44e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=20ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=93 warm=89 phys=90)  Sys3(torso)=68  ue_mean=-3.61e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=21ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=92 warm=90 phys=90)  Sys3(torso)=69  ue_mean=2.89e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=22ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=92 warm=90 phys=90)  Sys3(torso)=69  ue_mean=1.44e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=23ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=92 warm=91 phys=88)  Sys3(torso)=70  ue_mean=-4.33e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=24ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=91 warm=92 phys=87)  Sys3(torso)=70  ue_mean=-2.89e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=25ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=92 warm=91 phys=89)  Sys3(torso)=71  ue_mean=1.44e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=26ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=92 warm=90 phys=87)  Sys3(torso)=71  ue_mean=-5.05e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=27ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=91 warm=90 phys=89)  Sys3(torso)=71  ue_mean=-2.89e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=28ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=91 warm=90 phys=89)  Sys3(torso)=71  ue_mean=7.21e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=29ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=90 warm=89 phys=89)  Sys3(torso)=70  ue_mean=-2.53e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=30ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=91 warm=89 phys=89)  Sys3(torso)=70  ue_mean=7.21e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=31ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=91 warm=89 phys=89)  Sys3(torso)=70  ue_mean=0.00e+00
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=32ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92 (cold=92 warm=89 phys=89)  Sys3(torso)=70  ue_mean=7.21e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=33ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92 (cold=93 warm=88 phys=89)  Sys3(torso)=70  ue_mean=5.41e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=34ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=91 (cold=92 warm=90 phys=90)  Sys3(torso)=70  ue_mean=-1.35e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=35ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=89 (cold=90 warm=91 phys=89)  Sys3(torso)=69  ue_mean=1.44e-15
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=36ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=90 warm=88 phys=88)  Sys3(torso)=69  ue_mean=-6.76e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=37ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=89 warm=89 phys=86)  Sys3(torso)=68  ue_mean=-7.21e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=38ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=87 warm=89 phys=87)  Sys3(torso)=68  ue_mean=2.48e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=39ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=89 warm=90 phys=86)  Sys3(torso)=69  ue_mean=-2.03e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=40ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=96 warm=95 phys=91)  Sys3(torso)=69  ue_mean=9.02e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=41ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93 (cold=97 warm=94 phys=94)  Sys3(torso)=68  ue_mean=-2.25e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=42ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=96 warm=94 phys=94)  Sys3(torso)=68  ue_mean=-2.25e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=43ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=96 warm=94 phys=94)  Sys3(torso)=68  ue_mean=9.02e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=44ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=96 (cold=96 warm=94 phys=94)  Sys3(torso)=69  ue_mean=-1.35e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=45ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=96 warm=93 phys=94)  Sys3(torso)=69  ue_mean=1.80e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=46ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=96 warm=92 phys=94)  Sys3(torso)=70  ue_mean=-9.02e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=47ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=96 (cold=97 warm=90 phys=94)  Sys3(torso)=70  ue_mean=-3.61e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=48ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=97 warm=91 phys=94)  Sys3(torso)=70  ue_mean=-4.51e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=49ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=97 warm=90 phys=95)  Sys3(torso)=70  ue_mean=4.51e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=50ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=97 warm=89 phys=95)  Sys3(torso)=70  ue_mean=1.80e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=51ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95 (cold=96 warm=89 phys=95)  Sys3(torso)=70  ue_mean=0.00e+00
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=52ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=95 (cold=95 warm=88 phys=94)  Sys3(torso)=71  ue_mean=-2.25e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=53ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=94 (cold=95 warm=87 phys=93)  Sys3(torso)=71  ue_mean=-2.25e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=54ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=97 warm=89 phys=92)  Sys3(torso)=71  ue_mean=9.02e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=55ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=85 (cold=97 warm=89 phys=94)  Sys3(torso)=71  ue_mean=-2.25e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=56ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93 (cold=97 warm=89 phys=95)  Sys3(torso)=71  ue_mean=9.02e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=57ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=97 warm=89 phys=95)  Sys3(torso)=71  ue_mean=-4.51e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=58ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=97 warm=89 phys=95)  Sys3(torso)=71  ue_mean=1.80e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=59ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93 (cold=97 warm=89 phys=95)  Sys3(torso)=71  ue_mean=-2.03e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=60ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=94 (cold=97 warm=89 phys=95)  Sys3(torso)=71  ue_mean=-2.25e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=61ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=94 (cold=98 warm=89 phys=95)  Sys3(torso)=71  ue_mean=-5.64e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=62ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=98 warm=88 phys=95)  Sys3(torso)=71  ue_mean=0.00e+00
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=63ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=98 warm=89 phys=95)  Sys3(torso)=71  ue_mean=-6.76e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=64ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=86 (cold=98 warm=89 phys=95)  Sys3(torso)=71  ue_mean=-1.35e-16
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=65ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=80 (cold=98 warm=90 phys=95)  Sys3(torso)=71  ue_mean=-2.25e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=66ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=98 warm=90 phys=95)  Sys3(torso)=71  ue_mean=5.64e-18
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=67ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=97 warm=90 phys=95)  Sys3(torso)=71  ue_mean=-3.95e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=68ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=97 warm=90 phys=95)  Sys3(torso)=71  ue_mean=2.82e-18
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=69ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=97 warm=90 phys=95)  Sys3(torso)=70  ue_mean=5.64e-18
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=70ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=97 warm=90 phys=95)  Sys3(torso)=70  ue_mean=-1.13e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=71ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=97 warm=90 phys=95)  Sys3(torso)=69  ue_mean=-2.25e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=72ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=97 warm=90 phys=95)  Sys3(torso)=68  ue_mean=-2.25e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=73ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=97 warm=90 phys=95)  Sys3(torso)=68  ue_mean=2.40e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=74ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=97 warm=90 phys=95)  Sys3(torso)=69  ue_mean=-6.34e-18
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=75ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=0 (cold=97 warm=90 phys=95)  Sys3(torso)=70  ue_mean=1.13e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=76ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=93 (cold=97 warm=90 phys=94)  Sys3(torso)=71  ue_mean=2.82e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=77ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=84 (cold=94 warm=90 phys=91)  Sys3(torso)=71  ue_mean=-2.25e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=78ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=84 (cold=97 warm=89 phys=93)  Sys3(torso)=71  ue_mean=-2.54e-17
+[CONVERT] Sys3_Kt global=36229x36229 fix_level=1
+[ITERS] t=79ms  Sys1(CG+bj-ICC)=15  Sys2(singular)=92 (cold=97 warm=89 phys=94)  Sys3(torso)=70  ue_mean=2.25e-17
+
+[FISCHER] Sys2 EP-loop acceleration (total CG iters over the run):
+  cold (x0=0)              : 7530
+  warm (prev-step u_e)     : 7190  (-4%)
+  Fischer (u_e history)    : 2273  (-69%)
+  PHYSICS (x0 = c* Vm)     : 7338  (-2%)   [cross-system, current-step Vm; monodomain reduction u_e~-c Vm]
+  recycling-maintenance Allreduces: batched(new)=314 vs unbatched-MGS(old-equiv)=2128  (6.8x fewer)
+
+Activation times (V crosses 0 mV):
+  P1 (-10,-3.5,-1.5) : 0.7 ms
+  P2 (-10,3.5,-1.5) : 20 ms
+  P3 (10,-3.5,-1.5) : 31 ms
+  P4 (10,3.5,-1.5) : 39 ms
+  P5 (-10,-3.5,1.5) : 6.2 ms
+  P6 (-10,3.5,1.5) : 22 ms
+  P7 (10,-3.5,1.5) : 32 ms
+  P8 (10,3.5,1.5) : 40 ms
+P1->P8: dt_act=39 ms over 21 mm => CV~0.55 m/s (Niederer ~0.6-0.7; P8 -> ~43 ms under refinement)
+FWD_ECG_DONE
