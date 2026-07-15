@@ -491,6 +491,13 @@ int main(int argc, char *argv[])
                    "phi_surface = Z_surf * u_iface(t) -- the full surface potential map, EXACT for "
                    "any RHS, no per-step solve.  Reports surface exactness + per-step apply vs the "
                    "full torso solve (the speedup for the complete surface, not just electrodes).");
+    bool do_leaddir = false;
+    opts.AddOption(&do_leaddir, "-leaddirichlet", "--leaddirichlet", "-noleaddirichlet", "--no-leaddirichlet",
+                   "Lead-field + pin-both interior solve: (1) lead-field gives the body-surface phi, "
+                   "(2) re-solve the interior as a PURE-DIRICHLET Laplace with BOTH surfaces pinned "
+                   "(interface=u_e, body=lead-field) -- pinning the outer boundary removes the loose "
+                   "Neumann low modes, so it should need fewer CG iters than the original mixed-BC "
+                   "solve.  Reports mixed vs pin-both iterations, interior exactness, and wall time.");
     bool do_coarse = false, do_soras = false;
     double soras_alpha = 0.2;
     opts.AddOption(&do_coarse, "-coarse", "--coarse", "-nocoarse", "--no-coarse",
@@ -2198,7 +2205,12 @@ int main(int argc, char *argv[])
     // -leadsurf: transfer operator restricted to the complete body surface (Z_surf: nsurf x niface)
     std::vector<double> Zsurf; int nsurf_loc=0, nsurf_glob=0;
     double ls_apply=0.0, ls_solve=0.0, ls_err_sum=0.0, ls_err_max=0.0; long ls_steps=0;
-    if (do_fischer3 || do_leadvol || do_transfer || do_transferh || do_transferinc || do_leadsurf) {
+    // -leaddirichlet: pin-both (interface + body-surface Dirichlet) interior solve
+    ParBilinearForm *ktf_dir=nullptr; HypreParMatrix *Ktdir_h=nullptr;
+    PetscParMatrix *Ktdir_p=nullptr; PetscPCGSolver *cg_dir=nullptr; Array<int> ess_both;
+    long ld_it_mixed=0, ld_it_dir=0, ld_steps=0;
+    double ld_solve_mixed=0.0, ld_solve_dir=0.0, ld_lead=0.0, ld_err_sum=0.0, ld_err_max=0.0;
+    if (do_fischer3 || do_leadvol || do_transfer || do_transferh || do_transferinc || do_leadsurf || do_leaddir) {
         Kt3h_persist = new HypreParMatrix;
         ktf.FormSystemMatrix(ess_tdofs_t, *Kt3h_persist);   // constant matrix
         Kt3p_persist = new PetscParMatrix;
@@ -2230,7 +2242,7 @@ int main(int argc, char *argv[])
                           << (do_f3cheb? "  [KSP=Chebyshev, 0 Allreduce/iter]"
                               : do_f3gamg? "  [PC=GAMG]" : "  [PC=bjacobi+ICC]") << "\n";
     }
-    if (do_transfer || do_transferh || do_transferinc || do_leadsurf) {
+    if (do_transfer || do_transferh || do_transferinc || do_leadsurf || do_leaddir) {
         // ---- OFFLINE (once): build the interface->torso transfer operator Z.
         // Column g = Kt^-1 (lift of the g-th global interface unit value): set that one
         // interface DOF to 1, all others 0, form the Sys3 RHS and solve.  Z is fixed for
@@ -2242,7 +2254,7 @@ int main(int argc, char *argv[])
         tr_niface = 0;
         for (int r=0;r<nranks;++r){ tr_disp[r]=tr_niface; tr_niface+=tr_cnt[r]; }
         const int nloc = fes_t.GetTrueVSize();
-        if (do_leadsurf){ nsurf_loc=surf_tdofs.Size(); MPI_Allreduce(&nsurf_loc,&nsurf_glob,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
+        if (do_leadsurf||do_leaddir){ nsurf_loc=surf_tdofs.Size(); MPI_Allreduce(&nsurf_loc,&nsurf_glob,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
             Zsurf.assign((size_t)nsurf_loc*tr_niface, 0.0); }       // surface rows only
         else if (do_transferinc) Zcol.assign((size_t)nloc*tr_niface, 0.0);   // column-major
         else                Zloc.assign((size_t)nloc*tr_niface, 0.0);   // row-major
@@ -2262,7 +2274,7 @@ int main(int argc, char *argv[])
                 KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE);
                 cg3p->Mult(Bc, Xc);
                 const int g = tr_disp[r]+k;
-                if (do_leadsurf) for (int p=0;p<nsurf_loc;++p) Zsurf[(size_t)p*tr_niface+g]=Xc(surf_tdofs[p]);
+                if (do_leadsurf||do_leaddir) for (int p=0;p<nsurf_loc;++p) Zsurf[(size_t)p*tr_niface+g]=Xc(surf_tdofs[p]);
                 else if (do_transferinc) for (int i=0;i<nloc;++i) Zcol[(size_t)g*nloc+i]=Xc(i);
                 else                for (int i=0;i<nloc;++i) Zloc[(size_t)i*tr_niface+g]=Xc(i);
             }
@@ -2286,6 +2298,25 @@ int main(int argc, char *argv[])
         if (rank==0) cout << "[TRANSFER] built interface->torso operator Z once: N_iface="
                           << tr_niface << " columns (" << tr_niface << " Sys3 solves), "
                           << tr_build_wall << " s, Z storage " << zmb_tot << " MB total\n";
+        if (do_leaddir) {
+            // build the PIN-BOTH operator: Dirichlet on interface (attr 2) AND body surface (attr 1).
+            // Separate bilinear form (fresh assemble) to avoid two-BC-set state on ktf.
+            Array<int> both_mark(torso.bdr_attributes.Max()); both_mark=0;
+            both_mark[IFACE_BDR-1]=1; if(torso.bdr_attributes.Max()>=BODY_BDR) both_mark[BODY_BDR-1]=1;
+            fes_t.GetEssentialTrueDofs(both_mark, ess_both);
+            ktf_dir = new ParBilinearForm(&fes_t);
+            ktf_dir->AddDomainIntegrator(new DiffusionIntegrator(sig_o));
+            ktf_dir->Assemble();
+            Ktdir_h = new HypreParMatrix; ktf_dir->FormSystemMatrix(ess_both, *Ktdir_h);
+            Ktdir_p = new PetscParMatrix; HypreToPetscAIJ(*Ktdir_h, *Ktdir_p, "Sys3_Ktdir", rank,1,true);
+            PetscOptionsSetValue(NULL,"-sys3dir_pc_type","bjacobi");
+            PetscOptionsSetValue(NULL,"-sys3dir_sub_pc_type","icc");
+            cg_dir = new PetscPCGSolver(*Ktdir_p,"sys3dir_");
+            cg_dir->SetMaxIter(3000); cg_dir->iterative_mode=false;
+            KSPSetNormType((KSP)*cg_dir, KSP_NORM_UNPRECONDITIONED);
+            if(rank==0) cout << "[LEADDIR] pin-both Dirichlet operator built (interface + body surface Dirichlet); "
+                             << "free dofs reduced by " << nsurf_glob << " (the body-surface set)\n";
+        }
         if (do_transferh) {
             // ---- 2-sided H-matrix compression (purely LOCAL: each rank owns Zloc[localrow, allcols]).
             MPI_Barrier(MPI_COMM_WORLD); double wc=MPI_Wtime();
@@ -2791,6 +2822,44 @@ int main(int argc, char *argv[])
                     double rel=(gr2[1]>0? std::sqrt(gr2[0]/gr2[1]):0.0);
                     ls_err_sum+=rel; ls_err_max=std::max(ls_err_max,rel); ls_steps++;
                     ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
+                } else if (do_leaddir) {
+                    // (1) baseline: original MIXED-BC solve (interface Dirichlet, body Neumann) = truth
+                    double bn=std::sqrt(ip2(Bt,Bt));
+                    cg3p->SetRelTol(0.0); cg3p->SetAbsTol(1e-8*bn);
+                    KSPSetInitialGuessNonzero((KSP)*cg3p,PETSC_FALSE);
+                    MPI_Barrier(MPI_COMM_WORLD); double wm=MPI_Wtime();
+                    cg3p->Mult(Bt,Xt); int it_mixed=cg3p->GetNumIterations();
+                    MPI_Barrier(MPI_COMM_WORLD); ld_solve_mixed += MPI_Wtime()-wm;
+                    // (2) lead-field: body-surface values phi_surf = Z_surf * u_iface
+                    const int nif=tr_cnt[rank], nloc=Xt.Size();
+                    Vector locd(nif>0?nif:1); for(int k=0;k<nif;++k) locd(k)=phi_tv(ess_tdofs_t[k]);
+                    std::vector<double> dg(tr_niface);
+                    MPI_Barrier(MPI_COMM_WORLD); double wl=MPI_Wtime();
+                    MPI_Allgatherv(nif>0?locd.GetData():nullptr,nif,MPI_DOUBLE,
+                        dg.data(),tr_cnt.data(),tr_disp.data(),MPI_DOUBLE,MPI_COMM_WORLD);
+                    Vector phis(nsurf_loc>0?nsurf_loc:1);
+                    for(int p=0;p<nsurf_loc;++p){ const double*zr=&Zsurf[(size_t)p*tr_niface]; double s=0.0;
+                        for(int g=0;g<tr_niface;++g) s+=zr[g]*dg[g]; phis(p)=s; }
+                    MPI_Barrier(MPI_COMM_WORLD); ld_lead += MPI_Wtime()-wl;
+                    // (3) pin-both interior solve: Dirichlet interface=u_e AND body=lead-field
+                    ParGridFunction phidir(&fes_t); Vector tvd(nloc); tvd=0.0;
+                    for(int k=0;k<nif;++k) tvd(ess_tdofs_t[k])=phi_tv(ess_tdofs_t[k]);
+                    for(int p=0;p<nsurf_loc;++p) tvd(surf_tdofs[p])=phis(p);
+                    phidir.SetFromTrueDofs(tvd);
+                    HypreParMatrix Ktd; Vector Xd, Bd;
+                    ktf_dir->FormLinearSystem(ess_both, phidir, zero_lf, Ktd, Xd, Bd);
+                    double bnd=std::sqrt(ip2(Bd,Bd));
+                    cg_dir->SetRelTol(0.0); cg_dir->SetAbsTol(1e-8*bnd);
+                    KSPSetInitialGuessNonzero((KSP)*cg_dir,PETSC_FALSE);
+                    MPI_Barrier(MPI_COMM_WORLD); double wd=MPI_Wtime();
+                    cg_dir->Mult(Bd,Xd); int it_dir=cg_dir->GetNumIterations();
+                    MPI_Barrier(MPI_COMM_WORLD); ld_solve_dir += MPI_Wtime()-wd;
+                    // (4) interior exactness: pin-both vs mixed truth
+                    Vector e(Xt); e-=Xd; double en=std::sqrt(ip2(e,e)), xnn=std::sqrt(ip2(Xt,Xt));
+                    double rel=(xnn>0?en/xnn:0.0); ld_err_sum+=rel; ld_err_max=std::max(ld_err_max,rel);
+                    ld_it_mixed+=it_mixed; ld_it_dir+=it_dir; ld_steps++;
+                    it3_cold=it_mixed;
+                    ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
                 } else {
                     PetscParMatrix Ktp; HypreToPetscAIJ(Kt, Ktp, "Sys3_Kt", rank, 1, true);
                     PetscPCGSolver cg3(Ktp, "sys3_");
@@ -2982,6 +3051,23 @@ int main(int argc, char *argv[])
              << "     per-step solve.  Surface is the far field of the interface (low rank) so Z_surf\n"
              << "     is far smaller than the full-volume Z and can be H-matrix/SVD-compressed further.\n";
     }
+    if (do_leaddir && rank==0 && ld_steps>0) {
+        double mms=ld_solve_mixed/ld_steps*1e3, dms=ld_solve_dir/ld_steps*1e3, lms=ld_lead/ld_steps*1e3;
+        cout << "\n[LEADDIR] lead-field body surface -> pin-both (pure-Dirichlet) interior solve:\n"
+             << "  original MIXED-BC solve (interface Dir, body Neumann): " << (double)ld_it_mixed/ld_steps
+             << " iters/step,  " << mms << " ms\n"
+             << "  pin-both DIRICHLET solve (both surfaces pinned)      : " << (double)ld_it_dir/ld_steps
+             << " iters/step,  " << dms << " ms   (iters " << (ld_it_dir>0?(double)ld_it_mixed/ld_it_dir:0.0)
+             << "x fewer)\n"
+             << "  + lead-field body-surface apply                      : " << lms << " ms/step\n"
+             << "  combined (lead-field + pin-both) vs original solve   : "
+             << (dms+lms>0? mms/(dms+lms):0.0) << "x  (" << mms << " vs " << (dms+lms) << " ms)\n"
+             << "  interior EXACTNESS (pin-both vs mixed truth)         : mean rel-L2 " << ld_err_sum/ld_steps
+             << "  max " << ld_err_max << "\n"
+             << "  => pinning the outer (body) boundary with the lead-field values removes the loose\n"
+             << "     Neumann low modes -> better-conditioned interior Dirichlet solve, fewer iters.\n";
+    }
+    delete cg_dir; delete Ktdir_p; delete Ktdir_h; delete ktf_dir;
     delete cg3p; delete Kt3p_persist; delete Kt3h_persist;
 
     // ---- benchmark activation times + conduction velocity -----------------
