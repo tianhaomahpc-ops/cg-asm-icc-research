@@ -484,6 +484,13 @@ int main(int argc, char *argv[])
                    "Uses Sys1 (front location) + Sys2 (u_e increment); validates vs the true solve.");
     opts.AddOption(&ti_eps, "-tieps", "--tieps", "Active-column threshold (rel. to max|d|) for -transferinc.");
     opts.AddOption(&ti_refresh, "-tirefresh", "--tirefresh", "Full-refresh period (steps) for -transferinc.");
+    bool do_leadsurf = false;
+    opts.AddOption(&do_leadsurf, "-leadsurf", "--leadsurf", "-noleadsurf", "--no-leadsurf",
+                   "COMPLETE body-surface lead-field: build the transfer operator restricted to ALL "
+                   "body-surface DOFs (Z_surf = surface rows of Kt^-1 lift), then per step "
+                   "phi_surface = Z_surf * u_iface(t) -- the full surface potential map, EXACT for "
+                   "any RHS, no per-step solve.  Reports surface exactness + per-step apply vs the "
+                   "full torso solve (the speedup for the complete surface, not just electrodes).");
     bool do_coarse = false, do_soras = false;
     double soras_alpha = 0.2;
     opts.AddOption(&do_coarse, "-coarse", "--coarse", "-nocoarse", "--no-coarse",
@@ -868,6 +875,10 @@ int main(int argc, char *argv[])
     Array<int> ess_iface(torso.bdr_attributes.Max()); ess_iface = 0;
     if (torso.bdr_attributes.Max() >= IFACE_BDR) ess_iface[IFACE_BDR-1] = 1; // interface Dirichlet
     Array<int> ess_tdofs_t;  fes_t.GetEssentialTrueDofs(ess_iface, ess_tdofs_t);
+    // body-surface (bdr attr 1) true dofs = the COMPLETE ECG output surface (for -leadsurf)
+    Array<int> body_bmark(torso.bdr_attributes.Max()); body_bmark = 0;
+    if (torso.bdr_attributes.Max() >= BODY_BDR) body_bmark[BODY_BDR-1] = 1;
+    Array<int> surf_tdofs; fes_t.GetEssentialTrueDofs(body_bmark, surf_tdofs);
 
     // Read a field value at the GLOBALLY-nearest dof to a point: each rank
     // offers (dist^2, local value); MINLOC picks the owner, masked SUM returns
@@ -2184,7 +2195,10 @@ int main(int argc, char *argv[])
     std::vector<double> ti_dprev; Vector ti_phi; bool ti_have=false;
     double ti_apply=0.0, ti_solve=0.0, ti_err_sum=0.0, ti_err_max=0.0;
     long ti_steps=0, ti_active_sum=0, ti_active_max=0, ti_refresh_cnt=0;
-    if (do_fischer3 || do_leadvol || do_transfer || do_transferh || do_transferinc) {
+    // -leadsurf: transfer operator restricted to the complete body surface (Z_surf: nsurf x niface)
+    std::vector<double> Zsurf; int nsurf_loc=0, nsurf_glob=0;
+    double ls_apply=0.0, ls_solve=0.0, ls_err_sum=0.0, ls_err_max=0.0; long ls_steps=0;
+    if (do_fischer3 || do_leadvol || do_transfer || do_transferh || do_transferinc || do_leadsurf) {
         Kt3h_persist = new HypreParMatrix;
         ktf.FormSystemMatrix(ess_tdofs_t, *Kt3h_persist);   // constant matrix
         Kt3p_persist = new PetscParMatrix;
@@ -2216,7 +2230,7 @@ int main(int argc, char *argv[])
                           << (do_f3cheb? "  [KSP=Chebyshev, 0 Allreduce/iter]"
                               : do_f3gamg? "  [PC=GAMG]" : "  [PC=bjacobi+ICC]") << "\n";
     }
-    if (do_transfer || do_transferh || do_transferinc) {
+    if (do_transfer || do_transferh || do_transferinc || do_leadsurf) {
         // ---- OFFLINE (once): build the interface->torso transfer operator Z.
         // Column g = Kt^-1 (lift of the g-th global interface unit value): set that one
         // interface DOF to 1, all others 0, form the Sys3 RHS and solve.  Z is fixed for
@@ -2228,7 +2242,9 @@ int main(int argc, char *argv[])
         tr_niface = 0;
         for (int r=0;r<nranks;++r){ tr_disp[r]=tr_niface; tr_niface+=tr_cnt[r]; }
         const int nloc = fes_t.GetTrueVSize();
-        if (do_transferinc) Zcol.assign((size_t)nloc*tr_niface, 0.0);   // column-major
+        if (do_leadsurf){ nsurf_loc=surf_tdofs.Size(); MPI_Allreduce(&nsurf_loc,&nsurf_glob,1,MPI_INT,MPI_SUM,MPI_COMM_WORLD);
+            Zsurf.assign((size_t)nsurf_loc*tr_niface, 0.0); }       // surface rows only
+        else if (do_transferinc) Zcol.assign((size_t)nloc*tr_niface, 0.0);   // column-major
         else                Zloc.assign((size_t)nloc*tr_niface, 0.0);   // row-major
         ParLinearForm zero_lf0(&fes_t); zero_lf0=0.0; zero_lf0.Assemble();
         ParGridFunction phi_col(&fes_t);
@@ -2246,7 +2262,8 @@ int main(int argc, char *argv[])
                 KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE);
                 cg3p->Mult(Bc, Xc);
                 const int g = tr_disp[r]+k;
-                if (do_transferinc) for (int i=0;i<nloc;++i) Zcol[(size_t)g*nloc+i]=Xc(i);
+                if (do_leadsurf) for (int p=0;p<nsurf_loc;++p) Zsurf[(size_t)p*tr_niface+g]=Xc(surf_tdofs[p]);
+                else if (do_transferinc) for (int i=0;i<nloc;++i) Zcol[(size_t)g*nloc+i]=Xc(i);
                 else                for (int i=0;i<nloc;++i) Zloc[(size_t)i*tr_niface+g]=Xc(i);
             }
         }
@@ -2743,6 +2760,37 @@ int main(int argc, char *argv[])
                     Vector e(Xt); e-=ti_phi; double en=std::sqrt(ip2(e,e)), xn=std::sqrt(ip2(Xt,Xt));
                     double rel=(xn>0?en/xn:0.0); ti_err_sum+=rel; ti_err_max=std::max(ti_err_max,rel); ti_steps++;
                     ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
+                } else if (do_leadsurf) {
+                    // TRUE solve (kept field + validation), timed
+                    double bn = std::sqrt(ip2(Bt,Bt));
+                    cg3p->SetRelTol(0.0); cg3p->SetAbsTol(1e-10*bn);
+                    KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE);
+                    MPI_Barrier(MPI_COMM_WORLD); double ws=MPI_Wtime();
+                    cg3p->Mult(Bt, Xt); it3_cold=cg3p->GetNumIterations();
+                    MPI_Barrier(MPI_COMM_WORLD); ls_solve += MPI_Wtime()-ws;
+                    // COMPLETE surface map via lead-field: phi_surf = Z_surf * u_iface(t)
+                    const int nif=tr_cnt[rank];
+                    Vector locd(nif>0?nif:1);
+                    for (int k=0;k<nif;++k) locd(k)=phi_tv(ess_tdofs_t[k]);
+                    std::vector<double> dg(tr_niface);
+                    MPI_Barrier(MPI_COMM_WORLD); double wa=MPI_Wtime();
+                    MPI_Allgatherv(nif>0?locd.GetData():nullptr, nif, MPI_DOUBLE,
+                        dg.data(), tr_cnt.data(), tr_disp.data(), MPI_DOUBLE, MPI_COMM_WORLD);
+                    Vector phis(nsurf_loc>0?nsurf_loc:1);
+                    if (nsurf_loc>0){ char tr='T'; int M=tr_niface, N=nsurf_loc, one=1; double al=1.0, be=0.0;
+                        // Zsurf is row-major (nsurf x niface) = col-major (niface x nsurf): phis = Zsurf_rows . dg
+                        // do a plain loop (rows independent) to avoid layout confusion:
+                        for (int p=0;p<nsurf_loc;++p){ const double*zr=&Zsurf[(size_t)p*tr_niface]; double s=0.0;
+                            for (int g=0;g<tr_niface;++g) s+=zr[g]*dg[g]; phis(p)=s; }
+                        (void)tr;(void)M;(void)N;(void)one;(void)al;(void)be; }
+                    MPI_Barrier(MPI_COMM_WORLD); ls_apply += MPI_Wtime()-wa;
+                    // surface exactness vs the true solve at the surface dofs
+                    double en2=0.0, xn2=0.0;
+                    for (int p=0;p<nsurf_loc;++p){ double e=phis(p)-Xt(surf_tdofs[p]); en2+=e*e; xn2+=Xt(surf_tdofs[p])*Xt(surf_tdofs[p]); }
+                    double gg[2]={en2,xn2}, gr2[2]; MPI_Allreduce(gg,gr2,2,MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+                    double rel=(gr2[1]>0? std::sqrt(gr2[0]/gr2[1]):0.0);
+                    ls_err_sum+=rel; ls_err_max=std::max(ls_err_max,rel); ls_steps++;
+                    ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
                 } else {
                     PetscParMatrix Ktp; HypreToPetscAIJ(Kt, Ktp, "Sys3_Kt", rank, 1, true);
                     PetscPCGSolver cg3(Ktp, "sys3_");
@@ -2918,6 +2966,21 @@ int main(int argc, char *argv[])
              << "  max " << ti_err_max << "\n"
              << "  => only the moving-front columns of Z update each step; per-step memory traffic\n"
              << "     drops to the active fraction -- Sys1/Sys2 tell us WHICH columns, exactly.\n";
+    }
+    if (do_leadsurf && rank==0 && ls_steps>0) {
+        double sms=ls_solve/ls_steps*1e3, ams=ls_apply/ls_steps*1e3;
+        double zmb=(double)nsurf_glob*tr_niface*8.0/1048576.0;
+        cout << "\n[LEADSURF] COMPLETE body-surface potential map via lead-field (Z_surf * u_iface):\n"
+             << "  surface DOFs (complete map) = " << nsurf_glob
+             << "  (N_iface=" << tr_niface << ");  Z_surf storage " << zmb << " MB (vs full-volume Z ~1.3 GB)\n"
+             << "  per-step FULL torso solve (bjacobi+ICC CG) : " << sms << " ms/step\n"
+             << "  per-step surface lead-field (matvec, 0 solve): " << ams << " ms/step"
+             << "  (" << (ls_apply>0? ls_solve/ls_apply:0.0) << "x faster than the torso solve)\n"
+             << "  surface EXACTNESS vs true solve            : mean rel-L2 " << ls_err_sum/ls_steps
+             << "  max " << ls_err_max << "\n"
+             << "  => the ENTIRE body-surface solution (every surface node), EXACT for any RHS, no\n"
+             << "     per-step solve.  Surface is the far field of the interface (low rank) so Z_surf\n"
+             << "     is far smaller than the full-volume Z and can be H-matrix/SVD-compressed further.\n";
     }
     delete cg3p; delete Kt3p_persist; delete Kt3h_persist;
 
