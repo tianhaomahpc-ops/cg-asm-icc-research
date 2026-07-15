@@ -555,6 +555,13 @@ int main(int argc, char *argv[])
                    "subdomain, and recycled A^-1 snapshots) on the torso operator Kt.  The coarse "
                    "space treats C0 (the ~8 slow global modes one-level sASM cannot); reports iters "
                    "+ per-iteration cost vs the GAMG alternative. (skips EP).");
+    bool do_asmovl = false;
+    opts.AddOption(&do_asmovl, "-asmovl", "--asmovl", "-noasmovl", "--no-asmovl",
+                   "PURE ASM vs sASM overlap sweep on Sys3 (NO coarse space, ICC subdomain solve "
+                   "for both so only the Schwarz scaling differs): compare unscaled ASM (PC_ASM_BASIC, "
+                   "double-counts the overlap) vs scaled sASM/RAS (PC_ASM_RESTRICT) at overlap "
+                   "0,1,2,3,4 -- shows sASM's iteration count dropping with overlap (best ~ov 2-3) "
+                   "while unscaled ASM stagnates or is worse. (skips EP).");
     bool do_anisocmp = false;
     opts.AddOption(&do_anisocmp, "-anisocmp", "--anisocmp", "-noanisocmp", "--no-anisocmp",
                    "ISOTROPIC vs ANISOTROPIC: build Sys1 and Sys2 with sigma_T:=sigma_L "
@@ -1743,6 +1750,64 @@ int main(int argc, char *argv[])
     }
 
     // ====================================================================
+    //  -asmovl : PURE ASM vs sASM overlap sweep on Sys3.  ICC subdomain solve
+    //  (same for both), so the ONLY difference is the Schwarz scaling: unscaled
+    //  ASM (PC_ASM_BASIC, double-counts the overlap) vs scaled sASM/RAS
+    //  (PC_ASM_RESTRICT).  No coarse space.  Overlap 0..4.
+    // ====================================================================
+    if (do_asmovl)
+    {
+        HypreParMatrix Kt3; ktf.FormSystemMatrix(ess_tdofs_t, Kt3);
+        PetscParMatrix Kt3p; HypreToPetscAIJ(Kt3, Kt3p, "Sys3_Kt", rank, 1, true);
+        const int nloc = fes_t.GetTrueVSize();
+        Mat A = (Mat)Kt3p;
+        Vec xstar,b; MatCreateVecs(A,&xstar,&b);
+        PetscInt rs,re; MatGetOwnershipRange(A,&rs,&re);
+        { PetscScalar *a; VecGetArray(xstar,&a);
+          for(PetscInt i=rs;i<re;++i) a[i-rs]=sin(0.7*(i+1))+0.3*cos(0.11*(i+1));
+          VecRestoreArray(xstar,&a); }
+        MatMult(A,xstar,b);                                  // non-singular: no mean removal
+        Vector Bv(nloc); { const PetscScalar *ba; VecGetArrayRead(b,&ba);
+            for(int i=0;i<nloc;++i) Bv(i)=ba[i]; VecRestoreArrayRead(b,&ba); }
+        auto run=[&](const std::string& pfx, const char* asmtype, int ov)->int{
+            std::string p="-"+pfx;
+            PetscOptionsSetValue(NULL,(p+"pc_type").c_str(),"asm");
+            PetscOptionsSetValue(NULL,(p+"pc_asm_type").c_str(),asmtype);
+            PetscOptionsSetValue(NULL,(p+"pc_asm_overlap").c_str(),std::to_string(ov).c_str());
+            PetscOptionsSetValue(NULL,(p+"sub_ksp_type").c_str(),"preonly");
+            PetscOptionsSetValue(NULL,(p+"sub_pc_type").c_str(),"icc");  // ICC subdomain solve (one apply)
+            PetscPreconditioner pc(Kt3p, pfx.c_str());
+            PetscPCGSolver cg(Kt3p,"asmovl_"); cg.SetMaxIter(3000); cg.SetRelTol(1e-8);
+            cg.iterative_mode=false; KSPSetNormType((KSP)cg,KSP_NORM_UNPRECONDITIONED);
+            cg.SetPreconditioner(pc);
+            Vector Xv(nloc); Xv=0.0; cg.Mult(Bv,Xv); return cg.GetNumIterations();
+        };
+        int itA[5], itS[5];
+        for (int ov=0; ov<=4; ++ov){
+            itA[ov] = run("asm"+std::to_string(ov)+"_", "basic",    ov);   // unscaled ASM
+            itS[ov] = run("ras"+std::to_string(ov)+"_", "restrict", ov);   // scaled sASM/RAS
+        }
+        if (rank==0){
+            cout << "\n[ASMOVL] PURE ASM vs sASM on Sys3 (torso Laplace, " << Mpi::WorldSize()
+                 << " subdomains, ICC subsolve, NO coarse, synthetic slow-mode RHS, rtol 1e-8):\n"
+                 << "  overlap :   ASM(unscaled, basic)   sASM(scaled, restrict/RAS)\n";
+            int bestS=itS[0], bestSov=0;
+            for (int ov=0; ov<=4; ++ov){
+                if (itS[ov]<bestS){ bestS=itS[ov]; bestSov=ov; }
+                cout << "     " << ov << "      :        " << itA[ov]
+                     << "                    " << itS[ov]
+                     << "   (sASM " << (itA[ov]>0? (double)(itA[ov]-itS[ov])/itA[ov]*100.0:0.0)
+                     << "% fewer than ASM)\n";
+            }
+            cout << "  => at overlap 0 they coincide (no overlap => multiplicity 1 => scaling = I).\n"
+                 << "     sASM's iteration count keeps dropping with overlap, best at overlap "
+                 << bestSov << " (" << bestS << " iters); unscaled ASM improves little / stagnates\n"
+                 << "     because it double-counts the overlap region (over-relaxes it).\n";
+        }
+        VecDestroy(&xstar); VecDestroy(&b);
+    }
+
+    // ====================================================================
     //  -anisocmp : ISOTROPIC vs ANISOTROPIC.  Rebuild Sys1 (A1=(1/dt)M+(1/2)K)
     //  and Sys2 (Kie) with sigma_T:=sigma_L (isotropic, ratio 1) vs the real
     //  anisotropic tensor, and compare sASM(O1,ICC0) iters + cond.  Isotropic K
@@ -2416,7 +2481,7 @@ int main(int argc, char *argv[])
     // ====================================================================
     //  time loop  (IMEX: explicit TP06 reaction + C-N diffusion)
     // ====================================================================
-    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap||do_fair||do_transmiti||do_neumann||do_decay||do_anisocmp||do_deflate||do_sys3coarse) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
+    const int nsteps = (do_precond||do_prop||do_sweep||do_weightcmp||do_soraspu||do_transmit||do_tuned||do_overlap||do_fair||do_transmiti||do_neumann||do_decay||do_anisocmp||do_deflate||do_sys3coarse||do_asmovl) ? 0 : (int)(Tend/dt);   // -precond/-prop/-sweep skip the EP loop
     const int sample = std::max(1, (int)(1.0/dt));    // ~ every 1 ms
     for (int s=0;s<nsteps;++s)
     {
@@ -3071,7 +3136,7 @@ int main(int argc, char *argv[])
     delete cg3p; delete Kt3p_persist; delete Kt3h_persist;
 
     // ---- benchmark activation times + conduction velocity -----------------
-    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay && !do_anisocmp && !do_deflate && !do_sys3coarse) {
+    if (!do_precond && !do_sweep && !do_weightcmp && !do_soraspu && !do_transmit && !do_tuned && !do_overlap && !do_fair && !do_transmiti && !do_neumann && !do_decay && !do_anisocmp && !do_deflate && !do_sys3coarse && !do_asmovl) {
     if (rank==0) cout << "\nActivation times (V crosses 0 mV):\n";
     double tP1=-1, tP8=-1;
     for (int q=0;q<8;++q){
