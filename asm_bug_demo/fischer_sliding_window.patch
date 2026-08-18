@@ -1,0 +1,145 @@
+# Sliding-window fix for the Sys2 Fischer recycler in forward_ecg.cpp.
+# Apply on branch cardiac-sim-fakegeo:   git apply asm_bug_demo/fischer_sliding_window.patch
+# Rationale + measurements: asm_bug_demo/REPORT_fischer_vm_zh.md
+diff --git a/asm_bug_demo/cardiac/forward_ecg.cpp b/asm_bug_demo/cardiac/forward_ecg.cpp
+index 81a933c..5bc6e2f 100644
+--- a/asm_bug_demo/cardiac/forward_ecg.cpp
++++ b/asm_bug_demo/cardiac/forward_ecg.cpp
+@@ -763,7 +763,19 @@ int main(int argc, char *argv[])
+     // the last solution to an A-orthonormal span of the whole history.  (Scoped to
+     // -fischer so the default EP path keeps its original preconditioned-norm test.)
+     if (do_fischer) KSPSetNormType((KSP)cg2, KSP_NORM_UNPRECONDITIONED);
+-    std::vector<Vector> fisch_P, fisch_AP;   // A-orthonormal history + A*history
++    // SLIDING WINDOW over the last FISCH_MAX SOLUTIONS.  Keeping an A-orthonormal
++    // basis and evicting its OLDEST VECTOR is NOT the same thing: every kept
++    // vector was orthogonalised against the evicted one, so erase(begin())
++    // deletes a direction that all the remaining solutions still contain, and
++    // the window stops representing the recent history.  (Measured in
++    // asm_bug_demo/fischer_vm_test.c: with no eviction the two are identical
++    // step for step; once eviction starts, evict-oldest-orthonormal collapses to
++    // about cold while the raw window keeps its full gain.)  So keep the
++    // snapshots RAW and take the A-optimal coefficients from their Gram matrix:
++    // same projection, exact window, and two Allreduces per step instead of four
++    // (no Gram-Schmidt at all, hence no acceptance threshold to tune either).
++    std::vector<Vector> fisch_U, fisch_AU;   // raw mean-zero snapshots + A*them
++    std::vector<double> fisch_G;             // row-major m x m, G_kl=<u^k,A u^l>
+     Vector ue_prev(nloc); ue_prev = 0.0;     // previous cold u_e (warm-start seed)
+     const int FISCH_MAX = 16;
+     long fisch_cold=0, fisch_warm=0, fisch_fis=0, fisch_phys=0;   // cumulative iteration tallies
+@@ -780,6 +792,28 @@ int main(int argc, char *argv[])
+         if (m) MPI_Allreduce(MPI_IN_PLACE,dots.data(),(int)m,MPI_DOUBLE,MPI_SUM,
+                              MPI_COMM_WORLD);
+     };
++    // c = G^+ f : the A-optimal coefficients over span{u^k}.  The snapshot Gram
++    // is numerically singular once consecutive solutions become nearly collinear
++    // (the plateau), so use a truncated symmetric pseudo-inverse.  m <= FISCH_MAX
++    // and G is replicated, so this is a purely local O(m^3) LAPACK call.
++    auto gram_solve = [&](const std::vector<double>&G, const std::vector<double>&f,
++                          std::vector<double>&c){
++        const int m=(int)f.size(); c.assign(m,0.0); if (!m) return;
++        std::vector<double> Q(G), ev(m);
++        char jz='V', up='U'; int NN=m, info=0, lw=-1; double wq=0;
++        dsyev_(&jz,&up,&NN,Q.data(),&NN,ev.data(),&wq,&lw,&info);
++        lw=(int)wq; std::vector<double> work(std::max(1,lw));
++        dsyev_(&jz,&up,&NN,Q.data(),&NN,ev.data(),work.data(),&lw,&info);
++        if (info) return;
++        const double emax = ev[m-1];
++        for (int e=0;e<m;++e){
++            if (ev[e] <= 1e-12*emax || ev[e] <= 0) continue;
++            const double *v = &Q[(size_t)e*m];          // eigenvector e (col-major)
++            double vf=0; for (int i=0;i<m;++i) vf += v[i]*f[i];
++            const double sc = vf/ev[e];
++            for (int i=0;i<m;++i) c[i] += sc*v[i];
++        }
++    };
+     // Collective-count bookkeeping: what the batched code actually issues vs what
+     // the old unbatched-MGS code would have issued for the same window sizes.
+     long fisch_red_new=0, fisch_red_old=0;
+@@ -2559,13 +2593,18 @@ int main(int argc, char *argv[])
+                     KSPSetInitialGuessNonzero((KSP)cg2, PETSC_TRUE);
+                     Vector xwarm(ue_prev);
+                     cg2.Mult(b2, xwarm); it2_warm=cg2.GetNumIterations();
+-                    // (c) Fischer: x0 = sum_i <p_i,b> p_i (A-orth projection; measure only)
+-                    // BATCHED: all <p_i,b> in one Allreduce (was: one per basis vector)
++                    // (c) Fischer: the A-optimal element of span{last m solutions},
++                    //     x0 = sum_k c_k u^k with G c = f, f_k = <u^k, b>.  This is
++                    //     exactly the A-orthogonal projection of the exact solution
++                    //     onto the window -- identical to the orthonormal-basis form
++                    //     when nothing has been evicted, but correct afterwards too.
++                    //     BATCHED: all <u^k,b> in one Allreduce.
+                     Vector xf(nloc); xf=0.0;
+-                    { std::vector<double> cf; ipbatch(fisch_P, b2, cf);
+-                      for (size_t i=0;i<fisch_P.size();++i) xf.Add(cf[i], fisch_P[i]);
+-                      fisch_red_new += fisch_P.empty()?0:1;
+-                      fisch_red_old += (long)fisch_P.size(); }
++                    { std::vector<double> f, cf; ipbatch(fisch_U, b2, f);
++                      gram_solve(fisch_G, f, cf);
++                      for (size_t i=0;i<fisch_U.size();++i) xf.Add(cf[i], fisch_U[i]);
++                      fisch_red_new += fisch_U.empty()?0:1;
++                      fisch_red_old += (long)fisch_U.size(); }
+                     cg2.Mult(b2, xf);
+                     it2_fis=cg2.GetNumIterations();
+                     // (d) PHYSICS initial guess (cross-system, current-step Vm):
+@@ -2579,30 +2618,41 @@ int main(int argc, char *argv[])
+                     KSPSetInitialGuessNonzero((KSP)cg2, PETSC_TRUE);
+                     cg2.Mult(b2, xphys); it2_phys=cg2.GetNumIterations();
+                     KSPSetInitialGuessNonzero((KSP)cg2, PETSC_FALSE);
+-                    // grow the history from the CLEAN cold solution (mean-zero copy).
+-                    // CGS2 (classical Gram-Schmidt, 2 passes, coefficients batched into
+-                    // ONE Allreduce per pass) replaces MGS (one Allreduce per basis
+-                    // vector, sequential).  Numerically CGS2 ~ MGS; communication O(1).
++                    // grow the window from the CLEAN cold solution (mean-zero copy).
++                    // One Kie matvec + ONE Allreduce (the new Gram row, with <u,Au>
++                    // folded into the same reduction).  No Gram-Schmidt: nothing to
++                    // lose orthogonality, and eviction now drops the oldest SNAPSHOT,
++                    // which is what "sliding window" is supposed to mean.
+                     Vector w(ue_h); RemoveGlobalMean(w, MPI_COMM_WORLD);
+                     Vector Aw(nloc); Kie->Mult(w, Aw);
+-                    for (int pass=0; pass<2 && !fisch_P.empty(); ++pass){
+-                        std::vector<double> cf; ipbatch(fisch_AP, w, cf);  // c_i=<A p_i,w>
+-                        for (size_t i=0;i<fisch_P.size();++i){
+-                            w.Add(-cf[i],fisch_P[i]); Aw.Add(-cf[i],fisch_AP[i]); }
+-                        fisch_red_new += 1;
++                    {   int m = (int)fisch_U.size();
++                        std::vector<double> gnew(m+1, 0.0);
++                        for (int i=0;i<m;++i){ const Vector&v=fisch_U[i]; double s=0.0;
++                            for (int k=0;k<v.Size();++k) s += v(k)*Aw(k); gnew[i]=s; }
++                        { double s=0.0; for (int k=0;k<w.Size();++k) s += w(k)*Aw(k);
++                          gnew[m]=s; }
++                        MPI_Allreduce(MPI_IN_PLACE,gnew.data(),m+1,MPI_DOUBLE,MPI_SUM,
++                                      MPI_COMM_WORLD);
++                        fisch_red_new += 1; fisch_red_old += (long)m + 1;
++                        if (m >= FISCH_MAX){          // slide: drop the OLDEST SNAPSHOT
++                            fisch_U.erase(fisch_U.begin());
++                            fisch_AU.erase(fisch_AU.begin());
++                            gnew.erase(gnew.begin());
++                            std::vector<double> Gs((size_t)(m-1)*(m-1));
++                            for (int i=1;i<m;++i) for (int j=1;j<m;++j)
++                                Gs[(size_t)(i-1)*(m-1)+(j-1)] = fisch_G[(size_t)i*m+j];
++                            fisch_G.swap(Gs); m--;
++                        }
++                        std::vector<double> Gn((size_t)(m+1)*(m+1));
++                        for (int i=0;i<m;++i) for (int j=0;j<m;++j)
++                            Gn[(size_t)i*(m+1)+j] = fisch_G[(size_t)i*m+j];
++                        for (int i=0;i<m;++i){
++                            Gn[(size_t)i*(m+1)+m] = gnew[i];
++                            Gn[(size_t)m*(m+1)+i] = gnew[i]; }
++                        Gn[(size_t)m*(m+1)+m] = gnew[m];
++                        fisch_G.swap(Gn);
++                        fisch_U.push_back(w); fisch_AU.push_back(Aw);
+                     }
+-                    fisch_red_old += (long)fisch_P.size();   // MGS: one reduce per vector
+-                    double nrm=std::sqrt(ip2(w,Aw));
+-                    fisch_red_new += 1; fisch_red_old += 1;  // the norm reduce (both)
+-                    if (nrm>1e-12){
+-                        w*=1.0/nrm; Aw*=1.0/nrm;
+-                        // SLIDING WINDOW: evict the oldest so the basis tracks the
+-                        // current regime.  A frozen (append-only) basis fills with
+-                        // early-QRS modes and is useless during the plateau -- the
+-                        // recent history is the good predictor for a drifting u_e.
+-                        if ((int)fisch_P.size()>=FISCH_MAX){
+-                            fisch_P.erase(fisch_P.begin()); fisch_AP.erase(fisch_AP.begin()); }
+-                        fisch_P.push_back(w); fisch_AP.push_back(Aw); }
+                     ue_prev = ue_h;                   // warm-start seed for next step
+                     fisch_cold+=it2_cold; fisch_warm+=it2_warm; fisch_fis+=it2_fis;
+                     fisch_phys+=it2_phys;
