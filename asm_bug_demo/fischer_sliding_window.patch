@@ -1,8 +1,11 @@
-# Sliding-window fix for the Sys2 Fischer recycler in forward_ecg.cpp.
-# Apply on branch cardiac-sim-fakegeo:   git apply asm_bug_demo/fischer_sliding_window.patch
-# Rationale + measurements: asm_bug_demo/REPORT_fischer_vm_zh.md
+# Sliding-window fix for the time recyclers in forward_ecg.cpp (Sys2 -fischer
+# and Sys3 -fischer3).  Both kept an A-orthonormal basis and evicted its
+# OLDEST VECTOR, which is not the same as forgetting the oldest solution.
+# Apply on branch cardiac-sim-fakegeo:  git apply asm_bug_demo/fischer_sliding_window.patch
+# Rationale + measurements: asm_bug_demo/REPORT_fischer_vm_zh.md,
+#                           asm_bug_demo/REPORT_fischer_sys13_zh.md
 diff --git a/asm_bug_demo/cardiac/forward_ecg.cpp b/asm_bug_demo/cardiac/forward_ecg.cpp
-index 81a933c..5bc6e2f 100644
+index 81a933c..e35f8a7 100644
 --- a/asm_bug_demo/cardiac/forward_ecg.cpp
 +++ b/asm_bug_demo/cardiac/forward_ecg.cpp
 @@ -763,7 +763,19 @@ int main(int argc, char *argv[])
@@ -55,7 +58,21 @@ index 81a933c..5bc6e2f 100644
      // Collective-count bookkeeping: what the batched code actually issues vs what
      // the old unbatched-MGS code would have issued for the same window sizes.
      long fisch_red_new=0, fisch_red_old=0;
-@@ -2559,13 +2593,18 @@ int main(int argc, char *argv[])
+@@ -2236,7 +2270,12 @@ int main(int argc, char *argv[])
+     PetscParMatrix *Kt3p_persist = nullptr;
+     PetscPCGSolver *cg3p = nullptr;
+     HypreParMatrix *Kt3h_persist = nullptr;
+-    std::vector<Vector> f3_P, f3_AP;                 // A-orthonormal history + A*history
++    // Same sliding-window fix as Sys2 above.  Evicting the oldest ORTHONORMAL
++    // vector deletes the direction every remaining vector was orthogonalised
++    // against, so the window stops being "the last m solutions"; keep the
++    // snapshots raw and take the A-optimal coefficients from their Gram matrix.
++    std::vector<Vector> f3_U, f3_AU;                 // raw snapshots + A*them
++    std::vector<double> f3_G;                        // row-major m x m Gram
+     long f3_cold=0, f3_warm=0, f3_phys=0, f3_fis=0, f3_red_new=0, f3_red_old=0;
+     Vector f3_prev; bool f3_have_prev=false;         // previous cold solution (warm/A2)
+     double t3_cold_solve=0.0;                        // wall-clock of the kept cold solve
+@@ -2559,13 +2598,18 @@ int main(int argc, char *argv[])
                      KSPSetInitialGuessNonzero((KSP)cg2, PETSC_TRUE);
                      Vector xwarm(ue_prev);
                      cg2.Mult(b2, xwarm); it2_warm=cg2.GetNumIterations();
@@ -80,7 +97,7 @@ index 81a933c..5bc6e2f 100644
                      cg2.Mult(b2, xf);
                      it2_fis=cg2.GetNumIterations();
                      // (d) PHYSICS initial guess (cross-system, current-step Vm):
-@@ -2579,30 +2618,41 @@ int main(int argc, char *argv[])
+@@ -2579,30 +2623,41 @@ int main(int argc, char *argv[])
                      KSPSetInitialGuessNonzero((KSP)cg2, PETSC_TRUE);
                      cg2.Mult(b2, xphys); it2_phys=cg2.GetNumIterations();
                      KSPSetInitialGuessNonzero((KSP)cg2, PETSC_FALSE);
@@ -143,3 +160,83 @@ index 81a933c..5bc6e2f 100644
                      ue_prev = ue_h;                   // warm-start seed for next step
                      fisch_cold+=it2_cold; fisch_warm+=it2_warm; fisch_fis+=it2_fis;
                      fisch_phys+=it2_phys;
+@@ -2673,37 +2728,55 @@ int main(int argc, char *argv[])
+                       KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_TRUE);
+                       cg3p->Mult(Bt, xp); f3_phys += cg3p->GetNumIterations();
+                       KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE); }
+-                    // (b) Fischer guess x0 = sum <p_i,Bt> p_i (batched; measure only)
++                    // (b) Fischer guess: the A-optimal element of span{last m
++                    //     solutions}, G c = f with f_k = <u^k, Bt> (batched into one
++                    //     Allreduce).  Measure only.
+                     Vector xf3(Xt.Size()); xf3=0.0;
+-                    { std::vector<double> cf(f3_P.size(),0.0);
+-                      for (size_t i=0;i<f3_P.size();++i){ const Vector&p=f3_P[i]; double s=0.0;
+-                          for (int k=0;k<p.Size();++k) s+=p(k)*Bt(k); cf[i]=s; }
+-                      if (!f3_P.empty()) MPI_Allreduce(MPI_IN_PLACE,cf.data(),(int)f3_P.size(),
++                    { std::vector<double> f(f3_U.size(),0.0), cf;
++                      for (size_t i=0;i<f3_U.size();++i){ const Vector&v=f3_U[i]; double s=0.0;
++                          for (int k=0;k<v.Size();++k) s+=v(k)*Bt(k); f[i]=s; }
++                      if (!f3_U.empty()) MPI_Allreduce(MPI_IN_PLACE,f.data(),(int)f3_U.size(),
+                           MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+-                      for (size_t i=0;i<f3_P.size();++i) xf3.Add(cf[i], f3_P[i]);
+-                      f3_red_new += f3_P.empty()?0:1; f3_red_old += (long)f3_P.size(); }
++                      gram_solve(f3_G, f, cf);
++                      for (size_t i=0;i<f3_U.size();++i) xf3.Add(cf[i], f3_U[i]);
++                      f3_red_new += f3_U.empty()?0:1; f3_red_old += (long)f3_U.size(); }
+                     KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_TRUE);
+                     Vector xfs(xf3); cg3p->Mult(Bt, xfs); it3_fis=cg3p->GetNumIterations();
+                     KSPSetInitialGuessNonzero((KSP)*cg3p, PETSC_FALSE);
+-                    // (c) grow basis from cold solution Xt (non-singular: NO mean removal),
+-                    //     CGS2 A-orthonormalize (batched), relative drop, sliding window
++                    // (c) grow the window from the cold solution Xt (non-singular:
++                    //     NO mean removal).  One Kt matvec + ONE Allreduce (the new
++                    //     Gram row, with <u,Au> folded in); eviction drops the oldest
++                    //     SNAPSHOT, and there is no Gram-Schmidt left to lose
++                    //     orthogonality or to threshold.
+                     Vector w(Xt); Vector Aw(w.Size()); Kt.Mult(w, Aw);
+-                    double ref = std::sqrt(ip2(w,Aw));
+-                    for (int pass=0; pass<2 && !f3_P.empty(); ++pass){
+-                        std::vector<double> cf(f3_P.size(),0.0);
+-                        for (size_t i=0;i<f3_P.size();++i){ const Vector&ap=f3_AP[i]; double s=0.0;
+-                            for (int k=0;k<ap.Size();++k) s+=ap(k)*w(k); cf[i]=s; }
+-                        MPI_Allreduce(MPI_IN_PLACE,cf.data(),(int)f3_P.size(),MPI_DOUBLE,MPI_SUM,
+-                            MPI_COMM_WORLD);
+-                        for (size_t i=0;i<f3_P.size();++i){ w.Add(-cf[i],f3_P[i]); Aw.Add(-cf[i],f3_AP[i]); }
+-                        f3_red_new += 1;
++                    {   int m = (int)f3_U.size();
++                        std::vector<double> gnew(m+1, 0.0);
++                        for (int i=0;i<m;++i){ const Vector&v=f3_U[i]; double s=0.0;
++                            for (int k=0;k<v.Size();++k) s += v(k)*Aw(k); gnew[i]=s; }
++                        { double s=0.0; for (int k=0;k<w.Size();++k) s += w(k)*Aw(k);
++                          gnew[m]=s; }
++                        MPI_Allreduce(MPI_IN_PLACE,gnew.data(),m+1,MPI_DOUBLE,MPI_SUM,
++                                      MPI_COMM_WORLD);
++                        f3_red_new += 1; f3_red_old += (long)m + 1;
++                        if (m >= F3MAX){          // slide: drop the OLDEST SNAPSHOT
++                            f3_U.erase(f3_U.begin());
++                            f3_AU.erase(f3_AU.begin());
++                            gnew.erase(gnew.begin());
++                            std::vector<double> Gs((size_t)(m-1)*(m-1));
++                            for (int i=1;i<m;++i) for (int j=1;j<m;++j)
++                                Gs[(size_t)(i-1)*(m-1)+(j-1)] = f3_G[(size_t)i*m+j];
++                            f3_G.swap(Gs); m--;
++                        }
++                        std::vector<double> Gn((size_t)(m+1)*(m+1));
++                        for (int i=0;i<m;++i) for (int j=0;j<m;++j)
++                            Gn[(size_t)i*(m+1)+j] = f3_G[(size_t)i*m+j];
++                        for (int i=0;i<m;++i){
++                            Gn[(size_t)i*(m+1)+m] = gnew[i];
++                            Gn[(size_t)m*(m+1)+i] = gnew[i]; }
++                        Gn[(size_t)m*(m+1)+m] = gnew[m];
++                        f3_G.swap(Gn);
++                        f3_U.push_back(w); f3_AU.push_back(Aw);
+                     }
+-                    f3_red_old += (long)f3_P.size();
+-                    double nrm = std::sqrt(ip2(w,Aw));
+-                    f3_red_new += 1; f3_red_old += 1;
+-                    if (nrm > 1e-3*ref){ w*=1.0/nrm; Aw*=1.0/nrm;
+-                        if ((int)f3_P.size()>=F3MAX){ f3_P.erase(f3_P.begin()); f3_AP.erase(f3_AP.begin()); }
+-                        f3_P.push_back(w); f3_AP.push_back(Aw); }
+                     f3_cold += it3_cold; f3_fis += it3_fis;
+                     f3_prev = Xt; f3_have_prev = true;      // seed warm/A2 for next step
+                     ktf.RecoverFEMSolution(Xt, zero_lf, phi_t);
