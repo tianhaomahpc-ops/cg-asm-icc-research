@@ -32,7 +32,8 @@
  * is what decides whether a window of size m can ever cover it.
  *
  * Build: cc -O2 -o fischer_sys13_test fischer_sys13_test.c -lm
- * Run:   ./fischer_sys13_test [n] [steps] [window] [regime] > out.csv
+ * Run:   ./fischer_sys13_test [n] [steps] [window] [regime] [-log10 gram cut]
+ *                             [slice-dump file] > out.csv
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -318,6 +319,14 @@ static void traj_rank(const double *S,int k,const char*label)
     }
     printf("# rank %-22s over %d snapshots: %d (1e-4)  %d (1e-6)  %d (1e-8)\n",
            label,k,r4,r6,r8);
+    /* normalised Gram spectrum, descending -- the plot script reads this line */
+    { double *ev2=malloc(k*sizeof(double));
+      for (int i=0;i<k;i++) ev2[i]=ev[i];
+      for (int i=0;i<k;i++) for (int j=i+1;j<k;j++)
+          if (ev2[j]>ev2[i]){ double t=ev2[i]; ev2[i]=ev2[j]; ev2[j]=t; }
+      printf("# spec %s :",label);
+      for (int i=0;i<k;i++) printf(" %.4e", lmax>0? ev2[i]/lmax : 0.0);
+      printf("\n"); free(ev2); }
 }
 
 /* ===================================================================== main */
@@ -370,8 +379,16 @@ int main(int argc,char**argv)
 
     /* subsampled solution snapshots, for the trajectory-rank diagnostic */
     const int SUB = (nT/80 > 0)? nT/80 : 1;
-    int nsnap=0; double *snap2=malloc((size_t)MMAX*ND*sizeof(double));
+    int nsnap=0; double *snap1=malloc((size_t)MMAX*ND*sizeof(double));
+    double *snap2=malloc((size_t)MMAX*ND*sizeof(double));
     double *snap3=malloc((size_t)MMAX*ND*sizeof(double));
+
+    /* optional: mid-plane slices of all three solutions, for the field figure */
+    const char *dumpfile = (argc>6)? argv[6] : NULL;
+    FILE *df = dumpfile? fopen(dumpfile,"w") : NULL;
+    const int dsteps[] = {8,15,25,40,60,90,150,250};
+    const int ndsteps = (int)(sizeof(dsteps)/sizeof(dsteps[0]));
+    if (df) fprintf(df,"# n=%d regime=%d\n",N,REGIME);
 
     printf("# n=%d nd=%d steps=%d window=%d big=%d regime=%d C1=%.2f gcut=%.0e\n",
            N,ND,nT,win,WBIG,REGIME,C1,GCUT);
@@ -424,9 +441,23 @@ int main(int argc,char**argv)
         nsteps++;
 
         if (st % SUB == 0 && nsnap < MMAX){
+            copyv(prev[1],snap1+(size_t)nsnap*ND);
             copyv(prev[2],snap2+(size_t)nsnap*ND);
             copyv(prev[3],snap3+(size_t)nsnap*ND);
             nsnap++;
+        }
+        if (df){
+            int hit=0; for (int q=0;q<ndsteps;q++) if (dsteps[q]==st) hit=1;
+            if (hit){
+                const int kk=N/2;
+                for (int sy=1;sy<=3;sy++){
+                    fprintf(df,"SLICE %d %d\n",sy,st);
+                    for (int i=0;i<N;i++){
+                        for (int j=0;j<N;j++) fprintf(df,"%.6e ",prev[sy][IDX(i,j,kk)]);
+                        fprintf(df,"\n");
+                    }
+                }
+            }
         }
         printf("%d,%.0f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",st,t,
                k[1][0],k[1][1],k[1][2],k[1][3],k[1][4],
@@ -449,7 +480,9 @@ int main(int argc,char**argv)
                "sum|c_k|.||u^k||/||x0|| : SW %.1f  SWx4 %.1f\n",
                eA[s][1]/nsteps, eA[s][2]/nsteps, canc[s][1]/nsteps, canc[s][2]/nsteps);
     }
+    traj_rank(snap1,nsnap,"Sys1 solution Vm");
     traj_rank(snap2,nsnap,"Sys2 solution u_e");
     traj_rank(snap3,nsnap,"Sys3 solution u_T");
+    if (df) fclose(df);
     return 0;
 }
