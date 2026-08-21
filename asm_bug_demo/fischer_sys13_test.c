@@ -39,6 +39,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 static int N, ND;
 #define IDX(i,j,k) ((((i)*N)+(j))*N+(k))
@@ -109,6 +110,9 @@ static void build_diags(void)
 }
 
 /* ------------------------------------------------------------- vector ops */
+static double wall(void)
+{ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+  return ts.tv_sec + 1e-9*ts.tv_nsec; }
 static double dot(const double*a,const double*b){ double s=0; for(int i=0;i<ND;i++) s+=a[i]*b[i]; return s; }
 static double nrm2(const double*a){ return sqrt(dot(a,a)); }
 static void   axpy(double a,const double*x,double*y){ for(int i=0;i<ND;i++) y[i]+=a*x[i]; }
@@ -384,10 +388,17 @@ int main(int argc,char**argv)
         double *w=malloc(ND*sizeof(double)), *Aw=malloc(ND*sizeof(double));
         double *tmp=malloc(ND*sizeof(double));
         double *pv[4]; for (int q=1;q<=3;q++){ pv[q]=malloc(ND*sizeof(double)); zerov(pv[q]); }
-        Rec SW[4][8];
-        for (int sy=1;sy<=3;sy++) for (int q=0;q<nM;q++) rec_init(&SW[sy][q],sy,RAW,MS[q]);
-        long tot[4][9], zer[4][9];
-        for (int sy=1;sy<=3;sy++) for (int q=0;q<=nM;q++){ tot[sy][q]=0; zer[sy][q]=0; }
+        Rec SW[4][8], CUR[4];            /* CUR = what forward_ecg.cpp does today */
+        for (int sy=1;sy<=3;sy++){
+            for (int q=0;q<nM;q++) rec_init(&SW[sy][q],sy,RAW,MS[q]);
+            rec_init(&CUR[sy],sy,ORTHO, sy==3? 12 : 16);   /* F3MAX=12, FISCH_MAX=16 */
+        }
+        /* slots: 0..nM-1 = the windows, nM = cold, nM+1 = warm, nM+2 = current impl */
+        enum { NSLOT = 8+3 };
+        long tot[4][NSLOT], zer[4][NSLOT]; double tim[4][NSLOT];
+        for (int sy=1;sy<=3;sy++) for (int q=0;q<NSLOT;q++){ tot[sy][q]=0; zer[sy][q]=0; tim[sy][q]=0; }
+        double *pw=malloc(ND*sizeof(double));      /* warm-start seed per system */
+        /* index nM = cold, nM+1 = warm */
 
         printf("# window sweep: n=%d nd=%d steps=%d regime=%d gcut=%.0e\n",N,ND,nT,REGIME,GCUT);
         printf("step,t");
@@ -408,26 +419,55 @@ int main(int argc,char**argv)
                 double nb=nrm2(b);
                 if (nb < 1e-9){ printf(",0"); for (int q=0;q<nM;q++) printf(",0"); continue; }
                 double atol=1e-8*nb;
+                double t0=wall();
                 zerov(u); int kc=cg(sy,b,u,atol,4000);
+                tim[sy][nM]+=wall()-t0;
                 tot[sy][nM]+=kc; if(!kc) zer[sy][nM]++;
                 printf(",%d",kc);
+                t0=wall();
+                copyv(pv[sy],pw); int kw=cg(sy,b,pw,atol,4000);
+                tim[sy][nM+1]+=wall()-t0;
+                tot[sy][nM+1]+=kw; if(!kw) zer[sy][nM+1]++;
+                t0=wall();
+                rec_guess(&CUR[sy],b,x0);
+                int kcur=cg(sy,b,x0,atol,4000);
+                tim[sy][nM+2]+=wall()-t0;
+                tot[sy][nM+2]+=kcur; if(!kcur) zer[sy][nM+2]++;
                 for (int q=0;q<nM;q++){
+                    /* time the WHOLE recycler: guess + solve + window update */
+                    t0=wall();
                     rec_guess(&SW[sy][q],b,x0);
                     int kk2=cg(sy,b,x0,atol,4000);
+                    tim[sy][q]+=wall()-t0;
                     tot[sy][q]+=kk2; if(!kk2) zer[sy][q]++;
                     printf(",%d",kk2);
                 }
-                for (int q=0;q<nM;q++) rec_update(&SW[sy][q],u,w,Aw,tmp);
+                for (int q=0;q<nM;q++){
+                    t0=wall(); rec_update(&SW[sy][q],u,w,Aw,tmp); tim[sy][q]+=wall()-t0;
+                }
+                t0=wall(); rec_update(&CUR[sy],u,w,Aw,tmp); tim[sy][nM+2]+=wall()-t0;
                 copyv(u,pv[sy]);
             }
             printf("\n");
         }
         printf("#\n# ===== window sweep summary (regime %d) =====\n",REGIME);
+        printf("# times are SERIAL wall clock of the local work only (no MPI):\n"
+               "#   window column = guess + solve + window update, i.e. everything\n");
         for (int sy=1;sy<=3;sy++){
-            printf("# Sys%d cold %ld\n",sy,tot[sy][nM]);
+            printf("# Sys%d  cold %8ld iters  %8.3f s\n",sy,tot[sy][nM],tim[sy][nM]);
+            printf("#    current %8ld iters  %8.3f s  (%+.1f%% iters, %+.1f%% time)  [m=%d, evict oldest vector]\n",
+                   tot[sy][nM+2],tim[sy][nM+2],
+                   -100.0*(1.0-(double)tot[sy][nM+2]/tot[sy][nM]),
+                   -100.0*(1.0-tim[sy][nM+2]/tim[sy][nM]), CUR[sy].mmax);
+            printf("#       warm %8ld iters  %8.3f s  (%+.1f%% iters, %+.1f%% time)\n",
+                   tot[sy][nM+1],tim[sy][nM+1],
+                   -100.0*(1.0-(double)tot[sy][nM+1]/tot[sy][nM]),
+                   -100.0*(1.0-tim[sy][nM+1]/tim[sy][nM]));
             for (int q=0;q<nM;q++)
-                printf("#   m=%-3d %8ld  %7.1f%%  0-iter %ld\n",MS[q],tot[sy][q],
-                       100.0*(1.0-(double)tot[sy][q]/tot[sy][nM]),zer[sy][q]);
+                printf("#   m=%-3d %8ld iters  %8.3f s  (%+.1f%% iters, %+.1f%% time)"
+                       "  0-iter %ld\n",MS[q],tot[sy][q],tim[sy][q],
+                       -100.0*(1.0-(double)tot[sy][q]/tot[sy][nM]),
+                       -100.0*(1.0-tim[sy][q]/tim[sy][nM]),zer[sy][q]);
         }
         return 0;
     }
