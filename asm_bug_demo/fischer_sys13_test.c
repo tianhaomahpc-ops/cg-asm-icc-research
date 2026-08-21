@@ -33,7 +33,7 @@
  *
  * Build: cc -O2 -o fischer_sys13_test fischer_sys13_test.c -lm
  * Run:   ./fischer_sys13_test [n] [steps] [window] [regime] [-log10 gram cut]
- *                             [slice-dump file] > out.csv
+ *                             [slice-dump file] [sweep?] > out.csv
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -201,6 +201,8 @@ enum { ORTHO=0, RAW=1 };
 typedef struct {
     int sys, kind, mmax, m;
     double *P, *AP;      /* ORTHO: A-orthonormal basis; RAW: raw snapshots */
+    double *G;           /* RAW: m x m Gram, maintained incrementally as in the
+                          * patch (one new row per step instead of m^2 dots) */
     long accepted, rejected, evicted;
 } Rec;
 
@@ -209,6 +211,7 @@ static void rec_init(Rec*R,int sys,int kind,int mmax)
     R->sys=sys; R->kind=kind; R->mmax=mmax; R->m=0;
     R->P =calloc((size_t)mmax*ND,sizeof(double));
     R->AP=calloc((size_t)mmax*ND,sizeof(double));
+    R->G =calloc((size_t)mmax*mmax,sizeof(double));
     R->accepted=R->rejected=R->evicted=0;
 }
 static double last_cancel = 1.0;      /* sum_k |c_k| ||u^k|| / ||x0||, RAW only */
@@ -222,10 +225,7 @@ static void rec_guess(const Rec*R,const double*b,double*x0)
         double f[MMAX], c[MMAX];
         for (int i=0;i<R->m;i++){
             f[i]=dot(R->P+(size_t)i*ND,b);
-            for (int j=i;j<R->m;j++){                       /* Gram is symmetric */
-                double g=dot(R->P+(size_t)i*ND,R->AP+(size_t)j*ND);
-                Gbuf[i][j]=g; Gbuf[j][i]=g;
-            }
+            for (int j=0;j<R->m;j++) Gbuf[i][j]=R->G[(size_t)i*R->mmax+j];
         }
         gram_solve(Gbuf,f,c,R->m,GCUT);
         double terms=0;
@@ -251,9 +251,22 @@ static void rec_update(Rec*R,const double*u,double*w,double*Aw,double*tmp)
     if (R->sys==3) zeroD(w);
     applyA(R->sys,w,Aw);
     if (R->kind==RAW){
-        if (R->m>=R->mmax) rec_drop_oldest(R);
-        copyv(w, R->P+(size_t)R->m*ND); copyv(Aw,R->AP+(size_t)R->m*ND);
-        R->m++; R->accepted++;
+        int m = R->m;
+        double gnew[MMAX+1];
+        for (int i=0;i<m;i++) gnew[i]=dot(R->P+(size_t)i*ND,Aw);
+        gnew[m]=dot(w,Aw);
+        if (m>=R->mmax){                       /* drop the oldest SNAPSHOT */
+            rec_drop_oldest(R);
+            for (int i=0;i<m;i++) gnew[i]=gnew[i+1];
+            for (int i=1;i<m;i++) for (int j=1;j<m;j++)
+                R->G[(size_t)(i-1)*R->mmax+(j-1)] = R->G[(size_t)i*R->mmax+j];
+            m--;
+        }
+        for (int i=0;i<m;i++){ R->G[(size_t)i*R->mmax+m]=gnew[i];
+                               R->G[(size_t)m*R->mmax+i]=gnew[i]; }
+        R->G[(size_t)m*R->mmax+m]=gnew[m];
+        copyv(w, R->P+(size_t)m*ND); copyv(Aw,R->AP+(size_t)m*ND);
+        R->m=m+1; R->accepted++;
         return;
     }
     double q0 = dot(w,Aw); double ref = q0>0?sqrt(q0):0.0;     /* ||u||_A */
@@ -359,6 +372,64 @@ int main(int argc,char**argv)
             mode[2*ND+p]=30.0*sin(M_PI*Y)*cos(2*M_PI*Z);
             mode[3*ND+p]=25.0*sin(2*M_PI*X)*sin(M_PI*Z);
         }
+    }
+
+    /* ---------------- window-size sweep (argv[7]): what is the right m for
+     * each system?  Same true sliding window everywhere, only m changes. */
+    if (argc>7 && atoi(argv[7])){
+        const int MS[] = {4,8,12,16,24,32,48,64};
+        const int nM = (int)(sizeof(MS)/sizeof(MS[0]));
+        double *vm=malloc(ND*sizeof(double)), *b=malloc(ND*sizeof(double));
+        double *u=malloc(ND*sizeof(double)), *x0=malloc(ND*sizeof(double));
+        double *w=malloc(ND*sizeof(double)), *Aw=malloc(ND*sizeof(double));
+        double *tmp=malloc(ND*sizeof(double));
+        double *pv[4]; for (int q=1;q<=3;q++){ pv[q]=malloc(ND*sizeof(double)); zerov(pv[q]); }
+        Rec SW[4][8];
+        for (int sy=1;sy<=3;sy++) for (int q=0;q<nM;q++) rec_init(&SW[sy][q],sy,RAW,MS[q]);
+        long tot[4][9], zer[4][9];
+        for (int sy=1;sy<=3;sy++) for (int q=0;q<=nM;q++){ tot[sy][q]=0; zer[sy][q]=0; }
+
+        printf("# window sweep: n=%d nd=%d steps=%d regime=%d gcut=%.0e\n",N,ND,nT,REGIME,GCUT);
+        printf("step,t");
+        for (int sy=1;sy<=3;sy++){ printf(",s%d_cold",sy);
+            for (int q=0;q<nM;q++) printf(",s%d_m%d",sy,MS[q]); }
+        printf("\n");
+
+        for (int st=0; st<nT; ++st){
+            vm_field((double)st,vm);
+            printf("%d,%d",st,st);
+            for (int sy=1;sy<=3;sy++){
+                if (sy==1){ applyA(1,vm,b); }
+                else if (sy==2){ applyK(SI,vm,b,0); scal(-1.0,b); rmmean(b); }
+                else { zerov(b);
+                    for (int j=0;j<N;j++) for (int kk=0;kk<N;kk++)
+                        b[IDX(1,j,kk)] += ST[0]*pv[2][IDX(0,j,kk)];
+                    zeroD(b); }
+                double nb=nrm2(b);
+                if (nb < 1e-9){ printf(",0"); for (int q=0;q<nM;q++) printf(",0"); continue; }
+                double atol=1e-8*nb;
+                zerov(u); int kc=cg(sy,b,u,atol,4000);
+                tot[sy][nM]+=kc; if(!kc) zer[sy][nM]++;
+                printf(",%d",kc);
+                for (int q=0;q<nM;q++){
+                    rec_guess(&SW[sy][q],b,x0);
+                    int kk2=cg(sy,b,x0,atol,4000);
+                    tot[sy][q]+=kk2; if(!kk2) zer[sy][q]++;
+                    printf(",%d",kk2);
+                }
+                for (int q=0;q<nM;q++) rec_update(&SW[sy][q],u,w,Aw,tmp);
+                copyv(u,pv[sy]);
+            }
+            printf("\n");
+        }
+        printf("#\n# ===== window sweep summary (regime %d) =====\n",REGIME);
+        for (int sy=1;sy<=3;sy++){
+            printf("# Sys%d cold %ld\n",sy,tot[sy][nM]);
+            for (int q=0;q<nM;q++)
+                printf("#   m=%-3d %8ld  %7.1f%%  0-iter %ld\n",MS[q],tot[sy][q],
+                       100.0*(1.0-(double)tot[sy][q]/tot[sy][nM]),zer[sy][q]);
+        }
+        return 0;
     }
 
     double *vm=malloc(ND*sizeof(double)), *b=malloc(ND*sizeof(double));
