@@ -216,6 +216,50 @@ Sys3 那边**已经**用了相对阈值和干净的停机判据(`RelTol=0 + AbsT
 
 ---
 
+## 6d. 窗口之后还剩多少?(`fig_deflate_compare.png`)
+
+在修好的滑窗之上再加**两层加性粗空间**(`z = D⁻¹r + Z E⁺ Zᵀr`,与 `TwoLevelNicolaides` 同构),
+两种候选粗空间:**几何**(64 个子域示性函数,局部支撑 ⇒ apply 是 O(N))vs **快照**(窗口里的解,
+全局稠密 ⇒ apply 是 O(kN) 每迭代)。粗空间的 apply 成本全部计入时间。
+
+**regime 0(保守工况)**
+
+| | 不做回收 | 修好的滑窗 | **滑窗+几何粗空间** | 滑窗+快照当粗空间 |
+|---|---|---|---|---|
+| Sys1 | 5616 / 15.4 s* | 2048 / 0.74 s | 2093 / 0.81 s | 2100 / 0.96 s |
+| Sys2 | 57214 / 15.74 s | 24980 / 7.03 s | **10523 / 3.41 s** | 23059 / 8.80 s |
+| Sys3 | 55607 / 15.73 s | 13708 / 4.15 s | **5285 / 1.99 s** | 11604 / 5.79 s |
+| **合计** | 118437 / **33.0 s** | 40736 / **11.9 s**(2.77×) | **17901 / 6.21 s(5.31×)** | 36763 / 15.6 s |
+
+<sub>* Sys1 cold 是 1.54 s(表格排版)。</sub>
+
+**regime 2**:合计 113064 / 32.0 s → 滑窗 5797 / 2.31 s → 滑窗+几何 4263 / 2.04 s
+(窗口已经吃掉绝大部分,粗空间的边际收益很小)。
+
+### 三条结论
+
+1. **粗空间和窗口正交,叠加后再拿一倍**:Sys2 迭代 −56.3% → **−81.6%**、时间 −55.3% → **−78.3%**;
+   Sys3 迭代 −75.3% → **−90.5%**、时间 −73.6% → **−87.3%**。合计从 2.77× 到 **5.31×**。
+   分工很清楚:**窗口把容易的步变成 0 迭代,粗空间把剩下的难步变便宜。**
+2. **把回收快照当粗空间几乎没用**:Sys2 −56.3% → −59.7%(只多 3.4 个点),而**时间反而从 −55.3% 恶化到 −44.1%**。
+   两个原因:(a) 那个子空间已经被当**初值**用过一遍,再 deflate 是重复劳动;(b) 快照是全局稠密向量,
+   apply 是 O(kN),每迭代成本涨 60–130%。
+   > 这给"回收快照当 deflation → 76→15(−77%)"补上了适用条件:那个结论是在**没有同时把快照当初值**时成立的。
+   > 一旦窗口已经在做初值,再把同一批向量当粗空间是重复的 —— 该配的是**几何/代数**粗空间(Nicolaides/GenEO)。
+3. **Sys1 不该配粗空间**:单独用是 −3.6% 迭代 / **+7.3% 时间**(regime 2 里甚至 +7.9% 迭代)。
+   cond 1.4、0 个慢模,没有慢模可治 —— 和你们 `DESIGN_3000core_zh.md` 里"Sys1 不加粗空间/回收"的判断一致
+   (回收还是要的,粗空间不要)。
+
+### 成本说明
+
+- 几何粗空间 setup = 64 次 matvec,**一次性** 0.04 s,被 350 步摊销(真机上被 10³–10⁴ 步摊销,更不值一提)。
+- 几何 apply = 一次分段求和 + 一次 k×k 回代 + 一次散射 ≈ 2N + k²,**约一次 CG 迭代的 10%**。
+  (第一版把 E 的特征分解放进了 apply,导致 +3000% 的时间 —— 真实现是一次分解、每迭代只回代。)
+- **真机提醒**:3000 核上粗解本身是个 collective,你们 `DESIGN_3000core_zh.md` §4 算过分档
+  (m=3000 只有稀疏 Chol 22–43 µs 可行)。所以**时间上的加速会小于这里的 5.31×**,迭代上的 6.6× 才是可搬的部分。
+
+---
+
 ## 7. 诚实边界
 
 - 模型问题:Jacobi 而非 bjacobi+ICC、串行、立方体不是真躯干(**Sys3 的秩很可能被低估**)。绝对数字不能搬。
@@ -229,7 +273,8 @@ Sys3 那边**已经**用了相对阈值和干净的停机判据(`RelTol=0 + AbsT
 1. **apply 补丁**,一次跑两个:`forward_ecg -fischer`(Sys2)和 `-fischer3`(Sys3),看 `[FISCHER]` / `[FISCHER3]` 汇总。
 2. **Sys1**:先把停机判据从 `rtol` 改成 `atol=1e-10‖b‖` + 打开 warm;窗口回收先不做。
 3. 真机上量一次 **Sys3 解快照的谱**(88 个快照的 Gram 特征值衰减),直接回答"54 维"是不是初值的障碍。
-4. 硬步仍然归 deflation / 粗空间。
+4. **硬步归粗空间**(§6d 已实测):滑窗 + 几何粗空间 = 迭代 6.6×、时间 5.31×;
+   但**别把回收快照当粗空间**(和初值重复,而且 apply 是稠密的),也别给 Sys1 配粗空间。
 
 ## 9. 文件
 
@@ -237,5 +282,6 @@ Sys3 那边**已经**用了相对阈值和干净的停机判据(`RelTol=0 + AbsT
 - 数据:`fischer_sys13_regime0.csv`、`fischer_sys13_regime2.csv`
 - 图:`fig_fischer_sys13.png`(`plot_fischer_sys13.py`)、`fig_fields_sys123.png`(`plot_fields_sys123.py`,输入 `fischer_sys13_slices_regime0.txt`)、`fig_window_sweep.png`(`plot_window_sweep.py`)
 - 窗口扫描数据:`fischer_window_sweep_regime0.csv`、`fischer_window_sweep_regime2.csv`
-- 计时数据:`fischer_time_regime0.csv`、`fischer_time_regime2.csv`(图 `fig_time_compare.png`,`plot_time_compare.py`)(`./fischer_sys13_test 24 350 16 <regime> 12 "" 1`)
+- 计时数据:`fischer_time_regime0.csv`、`fischer_time_regime2.csv`(图 `fig_time_compare.png`,`plot_time_compare.py`)
+- 粗空间对比:`fischer_deflate_regime0.csv`、`fischer_deflate_regime2.csv`(图 `fig_deflate_compare.png`,`plot_deflate_compare.py`;`./fischer_sys13_test 24 350 16 <regime> 12 "" 2`)(`./fischer_sys13_test 24 350 16 <regime> 12 "" 1`)
 - 补丁:`fischer_sliding_window.patch`(Sys2 + Sys3)

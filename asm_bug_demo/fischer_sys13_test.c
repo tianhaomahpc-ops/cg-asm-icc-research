@@ -125,6 +125,10 @@ static void   zeroD(double*x){ for(int p=0;p<ND;p++) if (isD[p]) x[p]=0.0; }
 /* CG, Jacobi PC, unpreconditioned residual test done BEFORE the first
  * iteration (a good enough guess costs 0 iterations).  sys==2 is singular, so
  * the constant mode is projected out; sys==3 lives on the interior only. */
+static void coarse_geo_apply(int sys,const double*r,double*z);   /* defined below */
+static int   USE_GEO = 0;                 /* add the geometric coarse correction */
+static void (*SNAP_APPLY)(const double*,double*) = NULL;  /* snapshot coarse corr. */
+
 static int cg(int sys, const double *b, double *x, double atol, int maxit)
 {
     static double *r=NULL,*z=NULL,*p=NULL,*Ap=NULL;
@@ -136,6 +140,8 @@ static int cg(int sys, const double *b, double *x, double atol, int maxit)
     if (sys==3) zeroD(r);
     if (nrm2(r) <= atol) return 0;
     for (int i=0;i<ND;i++) z[i]=r[i]/dg[i];
+    if (USE_GEO)    coarse_geo_apply(sys,r,z);
+    if (SNAP_APPLY) SNAP_APPLY(r,z);
     if (sys==2) rmmean(z);
     if (sys==3) zeroD(z);
     copyv(z,p);
@@ -149,6 +155,8 @@ static int cg(int sys, const double *b, double *x, double atol, int maxit)
         axpy(a,p,x); axpy(-a,Ap,r);
         if (nrm2(r) <= atol) break;
         for (int i=0;i<ND;i++) z[i]=r[i]/dg[i];
+        if (USE_GEO)    coarse_geo_apply(sys,r,z);
+        if (SNAP_APPLY) SNAP_APPLY(r,z);
         if (sys==2) rmmean(z);
         if (sys==3) zeroD(z);
         double rz2 = dot(r,z), beta = rz2/rz; rz = rz2;
@@ -195,6 +203,66 @@ static void gram_solve(double G[MMAX][MMAX],const double*f,double*c,int m,double
         double s = vf/ev[e];
         for (int i=0;i<m;i++) c[i] += s*Vbuf[i][e];
     }
+}
+
+/* ------------------------------------------- two-level additive coarse space
+ * z = D^-1 r + Z E^+ (Z^T r),  E = Z^T A Z  -- the same additive two-level form
+ * as TwoLevelNicolaides in forward_ecg.cpp.  Two kinds of Z:
+ *   GEO   subdomain indicator functions (Nicolaides).  LOCAL SUPPORT, so the
+ *         apply is a segmented sum + a scatter: O(N), independent of k.
+ *   SNAP  the recycled window's raw snapshots.  GLOBAL dense vectors, so the
+ *         apply costs k dots + k axpys = O(kN) EVERY iteration -- the cost
+ *         asymmetry that iteration counts alone hide.
+ * E for GEO is built once per system (k matvecs); E for SNAP is the window's
+ * Gram, already maintained incrementally. */
+static int   NSUB = 0;                 /* number of subdomains = k for GEO */
+static int  *sublab = NULL;            /* subdomain label per dof */
+static double Egeo[4][MMAX][MMAX];
+static double Epinv[4][MMAX][MMAX];        /* E^+ factored ONCE, not per iteration */
+
+/* Pi = G^+ (truncated symmetric pseudo-inverse), so that an apply is a k x k
+ * matvec.  Doing the eigen-decomposition inside the apply, as a first draft did,
+ * costs O(k^3) per CG iteration and is not what a real code does. */
+static void pinv_of(double G[MMAX][MMAX], double Pi[MMAX][MMAX], int m, double cut)
+{
+    static double A[MMAX][MMAX], V[MMAX][MMAX]; double ev[MMAX];
+    for (int i=0;i<m;i++) for (int j=0;j<m;j++){ A[i][j]=G[i][j]; Pi[i][j]=0.0; }
+    sym_eig(A,V,ev,m);
+    double lmax=0; for (int i=0;i<m;i++) if (ev[i]>lmax) lmax=ev[i];
+    for (int e=0;e<m;e++){
+        if (ev[e] <= cut*lmax || ev[e] <= 0) continue;
+        double inv=1.0/ev[e];
+        for (int i=0;i<m;i++) for (int j=0;j<m;j++) Pi[i][j] += inv*V[i][e]*V[j][e];
+    }
+}
+
+static void coarse_geo_build(int sys, double *z, double *az)
+{
+    static double *AZ = NULL;
+    if (!AZ) AZ = malloc((size_t)MMAX*ND*sizeof(double));
+    for (int j=0;j<NSUB;j++){
+        for (int p=0;p<ND;p++) z[p] = (sublab[p]==j)? 1.0 : 0.0;
+        if (sys==3) zeroD(z);
+        applyA(sys,z,az);
+        copyv(az, AZ+(size_t)j*ND);
+    }
+    for (int i=0;i<NSUB;i++) for (int j=i;j<NSUB;j++){
+        double e=0;
+        for (int p=0;p<ND;p++)
+            if (sublab[p]==i && !(sys==3 && isD[p])) e += AZ[(size_t)j*ND+p];
+        Egeo[sys][i][j]=e; Egeo[sys][j][i]=e;
+    }
+    pinv_of(Egeo[sys], Epinv[sys], NSUB, 1e-12);
+}
+static void coarse_geo_apply(int sys,const double*r,double*z)
+{
+    double f[MMAX], c[MMAX];
+    for (int i=0;i<NSUB;i++) f[i]=0.0;
+    for (int p=0;p<ND;p++) f[sublab[p]] += r[p];               /* Z^T r : O(N)  */
+    for (int i=0;i<NSUB;i++){ double t=0;                      /* c = E^+ f     */
+        for (int j=0;j<NSUB;j++) t += Epinv[sys][i][j]*f[j]; c[i]=t; }
+    for (int p=0;p<ND;p++) z[p] += c[sublab[p]];               /* Z c   : O(N)  */
+    if (sys==3) zeroD(z);
 }
 
 /* ------------------------------------------------------------- recyclers ---
@@ -289,6 +357,29 @@ static void rec_update(Rec*R,const double*u,double*w,double*Aw,double*tmp)
     (void)tmp;
 }
 
+/* snapshot coarse correction: z += Z E^+ (Z^T r), Z = the window's snapshots,
+ * E = its Gram (already maintained).  Cost: k dots + k axpys per iteration. */
+static const Rec *SNAP_REC = NULL;
+static double Spinv[MMAX][MMAX]; static int Spinv_m = 0;
+static void snap_prepare(const Rec*R)   /* once per step, NOT once per iteration */
+{
+    static double G[MMAX][MMAX];
+    SNAP_REC = R; Spinv_m = R? R->m : 0;
+    if (!Spinv_m) return;
+    for (int i=0;i<R->m;i++) for (int j=0;j<R->m;j++) G[i][j]=R->G[(size_t)i*R->mmax+j];
+    pinv_of(G, Spinv, R->m, GCUT);
+}
+static void coarse_snap_apply(const double*r,double*z)
+{
+    const Rec*R = SNAP_REC;
+    if (!R || !Spinv_m) return;
+    double f[MMAX], c[MMAX];
+    for (int i=0;i<R->m;i++) f[i]=dot(R->P+(size_t)i*ND, r);    /* k dots  : O(kN) */
+    for (int i=0;i<R->m;i++){ double t=0;
+        for (int j=0;j<R->m;j++) t += Spinv[i][j]*f[j]; c[i]=t; }
+    for (int i=0;i<R->m;i++) axpy(c[i], R->P+(size_t)i*ND, z);  /* k axpys : O(kN) */
+}
+
 /* ------------------------------------------------------------ Vm(x,t) model */
 static double *tact, *apd, *mode;
 static int REGIME;
@@ -376,6 +467,89 @@ int main(int argc,char**argv)
             mode[2*ND+p]=30.0*sin(M_PI*Y)*cos(2*M_PI*Z);
             mode[3*ND+p]=25.0*sin(2*M_PI*X)*sin(M_PI*Z);
         }
+    }
+
+    /* ---------------- deflation comparison (argv[7]==2): how much room is left
+     * once the window has taken the easy steps?  Six variants per system:
+     *   cold / window / geo-deflation / geo+window / snap+window / geo+snap+window
+     * "geo" = Nicolaides subdomain indicators (local support, O(N) apply);
+     * "snap" = the window's own snapshots as the coarse space (O(kN) apply). */
+    if (argc>7 && atoi(argv[7])==2){
+        const int BEST[4] = {0,4,4,8};          /* per-system best m from the sweep */
+        const int ns = 4; NSUB = ns*ns*ns;      /* 64 subdomains */
+        sublab = malloc(ND*sizeof(int));
+        for (int i=0;i<N;i++) for (int j=0;j<N;j++) for (int k=0;k<N;k++){
+            int bi=i*ns/N, bj=j*ns/N, bk=k*ns/N;
+            sublab[IDX(i,j,k)] = (bi*ns+bj)*ns+bk;
+        }
+        double *vm=malloc(ND*sizeof(double)), *b=malloc(ND*sizeof(double));
+        double *u=malloc(ND*sizeof(double)), *x0=malloc(ND*sizeof(double));
+        double *w=malloc(ND*sizeof(double)), *Aw=malloc(ND*sizeof(double));
+        double *tmp=malloc(ND*sizeof(double));
+        double *pv[4]; for (int q=1;q<=3;q++){ pv[q]=malloc(ND*sizeof(double)); zerov(pv[q]); }
+        Rec W[4];
+        double t_setup[4];
+        for (int sy=1;sy<=3;sy++){
+            rec_init(&W[sy],sy,RAW,BEST[sy]);
+            double t0=wall(); coarse_geo_build(sy,w,Aw); t_setup[sy]=wall()-t0;
+        }
+        enum { NV = 6 };
+        const char *vn[NV] = {"cold(不做)","窗口 only","几何粗空间 only",
+                              "几何粗空间+窗口","快照粗空间+窗口","几何+快照+窗口"};
+        long tot[4][NV]; double tim[4][NV]; long zer[4][NV];
+        for (int sy=1;sy<=3;sy++) for (int v=0;v<NV;v++){ tot[sy][v]=0; tim[sy][v]=0; zer[sy][v]=0; }
+
+        printf("# deflation comparison: n=%d nd=%d steps=%d regime=%d nsub=%d "
+               "(m: Sys1 %d Sys2 %d Sys3 %d)\n",N,ND,nT,REGIME,NSUB,BEST[1],BEST[2],BEST[3]);
+        printf("step,t");
+        for (int sy=1;sy<=3;sy++) for (int v=0;v<NV;v++) printf(",s%d_v%d",sy,v);
+        printf("\n");
+
+        for (int st=0; st<nT; ++st){
+            vm_field((double)st,vm);
+            printf("%d,%d",st,st);
+            for (int sy=1;sy<=3;sy++){
+                if (sy==1){ applyA(1,vm,b); }
+                else if (sy==2){ applyK(SI,vm,b,0); scal(-1.0,b); rmmean(b); }
+                else { zerov(b);
+                    for (int j=0;j<N;j++) for (int kk=0;kk<N;kk++)
+                        b[IDX(1,j,kk)] += ST[0]*pv[2][IDX(0,j,kk)];
+                    zeroD(b); }
+                double nb=nrm2(b);
+                if (nb < 1e-9){ for (int v=0;v<NV;v++) printf(",0"); continue; }
+                double atol=1e-8*nb;
+                int kk2; double t0;
+
+                for (int v=0; v<NV; ++v){
+                    USE_GEO = (v==2||v==3||v==5);
+                    SNAP_APPLY = (v==4||v==5)? coarse_snap_apply : NULL;
+                    if (SNAP_APPLY) snap_prepare(&W[sy]);
+                    t0 = wall();
+                    if (v==0||v==2) zerov(x0); else rec_guess(&W[sy],b,x0);
+                    kk2 = cg(sy,b,x0,atol,4000);
+                    tim[sy][v]+=wall()-t0;
+                    tot[sy][v]+=kk2; if(!kk2) zer[sy][v]++;
+                    printf(",%d",kk2);
+                    if (v==0) copyv(x0,u);          /* the cold solve is the kept field */
+                }
+                USE_GEO=0; SNAP_APPLY=NULL;
+                t0=wall(); rec_update(&W[sy],u,w,Aw,tmp);
+                for (int v=1;v<NV;v++) if (v!=2) tim[sy][v]+=(wall()-t0)/(NV-2);
+                copyv(u,pv[sy]);
+            }
+            printf("\n");
+        }
+        printf("#\n# ===== deflation comparison (regime %d) =====\n",REGIME);
+        printf("# 几何粗空间一次性 setup: Sys1 %.3f s  Sys2 %.3f s  Sys3 %.3f s "
+               "(%d 次 matvec,被所有步摊销)\n",t_setup[1],t_setup[2],t_setup[3],NSUB);
+        for (int sy=1;sy<=3;sy++){
+            printf("# --- Sys%d (m=%d) ---\n",sy,BEST[sy]);
+            for (int v=0;v<NV;v++)
+                printf("#   %-22s %8ld iters (%+6.1f%%)  %8.3f s (%+6.1f%%)  0-iter %ld\n",
+                       vn[v],tot[sy][v],-100.0*(1.0-(double)tot[sy][v]/tot[sy][0]),
+                       tim[sy][v],-100.0*(1.0-tim[sy][v]/tim[sy][0]),zer[sy][v]);
+        }
+        return 0;
     }
 
     /* ---------------- window-size sweep (argv[7]): what is the right m for
