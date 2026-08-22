@@ -273,6 +273,8 @@ SELFTEST PASS
 
 ---
 
+> **完整的数学表述(问题 → 方法 → 结果,自洽一份)见 `REPORT_recycling_math_zh.md`。**
+
 ## 8. 文件
 
 - 测试台:`fischer_vm_test.c`(`cc -O2 -o fischer_vm_test fischer_vm_test.c -lm`;`./fischer_vm_test 24 3 16 <regime>`)
