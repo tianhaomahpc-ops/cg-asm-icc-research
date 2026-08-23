@@ -3,7 +3,7 @@
 > 自洽的完整版。把 `REPORT_fischer_vm_zh.md`(Sys2)与 `REPORT_fischer_sys13_zh.md`(Sys1/Sys3、
 > 窗口大小、计时、粗空间)统一成一份数学表述 + 一张结果总表。
 > 代码:`fischer_vm_test.c`、`fischer_sys13_test.c`、`fischer_gram_selftest.cpp`;
-> 补丁:`fischer_sliding_window.patch`(改 `forward_ecg.cpp` 的 Sys2 与 Sys3);
+> 补丁:`fischer_sliding_window.patch`(Sys2 与 Sys3 的滑窗)、`sys1_stopping_test.patch`(Sys1 的停机判据 + warm);
 > 数据:`fischer_*_regime{0,2}.csv`;图:`fig_fischer_vm.png`、`fig_fischer_sys13.png`、
 > `fig_fields_sys123.png`、`fig_window_sweep.png`、`fig_time_compare.png`、`fig_deflate_compare.png`。
 
@@ -345,7 +345,12 @@ Sys3 那边已经有相对阈值和干净的停机判据,只有淘汰规则要�
 ### 5.2 建议顺序
 
 1. **apply 补丁**,跑 `forward_ecg -fischer` 与 `-fischer3`,核对 `[FISCHER]/[FISCHER3]` 汇总;
-2. **Sys1**:`SetRelTol(0)+SetAbsTol(10^{-10}\|b\|)`+`KSP_NORM_UNPRECONDITIONED`+`KSPSetInitialGuessNonzero`,先只开 warm,再考虑 $m{=}4$ 的窗口;**不要**给它加粗空间;
+2. **Sys1**:apply `sys1_stopping_test.patch`(独立于滑窗补丁,两者可任意顺序组合),然后
+   `forward_ecg -sys1warm` —— 它把判据换成 `SetRelTol(0)+SetAbsTol(sys1_tol·\|b\|)`、
+   范数换成 `KSP_NORM_UNPRECONDITIONED`、并显式 `KSPSetInitialGuessNonzero`(warm start 是免费的:
+   `cg1.Mult(rhs, Vm)` 被调用时 `Vm` 里装的正是 $V^n$)。
+   **`sys1_tol` 保持默认 1e-10**,先只量"换判据 + warm"的收益;放松精度是另一笔账,别混。
+   健全性检查:只换判据、不开 warm 时迭代数应该基本不变。之后再考虑 $m{=}4$ 的窗口;**不要**给 Sys1 加粗空间;
 3. **Sys2/Sys3 上粗空间**(Nicolaides / GenEO),这是剩下的那一倍;3000 核上粗解要按 `DESIGN_3000core_zh.md` §4 分档(m=3000 用稀疏 Chol);
 4. **延迟层**:pipelined CG;Sys1 因为 cond 1.4 最适合 Chebyshev(每迭代零点积);
 5. 真机上量一次 **Sys3 解快照的谱**,验证 §4.2 的低通结论(直接回答 `-leadvol` 的"54 维"是不是初值的障碍)。
