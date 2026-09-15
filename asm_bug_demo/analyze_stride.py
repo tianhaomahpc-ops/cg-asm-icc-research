@@ -54,6 +54,15 @@ def load(path):
 
 runs = [r for r in (load(f) for f in sorted(glob.glob(os.path.join(HERE, "*.csv"))))
         if r and 2 in r["sys"]]
+# the same (stride, wstride) can appear twice -- a parallel probe run and the
+# sequential one.  Keep the sequential file: its wall times are uncontended.
+best = {}
+for r in runs:
+    k = (r["stride"], r["wstride"])
+    if k not in best or (not best[k]["file"].startswith("stride_")
+                         and r["file"].startswith("stride_")):
+        best[k] = r
+runs = list(best.values())
 if not runs:
     sys.exit("no finished runs found")
 
@@ -113,7 +122,8 @@ for lab, st, key in (("1. 每 0.01 ms,不回收", 1, COLD),
           f"{it:>10}{tm:>10.2f}")
 
 # ======================================== 3. the window-span law (stride sweep)
-print("\n=== 窗口跨度定律:m=%d 个快照覆盖多长物理时间 ===" % h["win"])
+print("\n=== 解算密度 vs 回收效果(整段 %g ms 平均)===" % h["T"])
+print("解得越密,相邻两次解越相关,窗口越有效 —— 单调,没有甜点。")
 print(f"{'解算间隔':>10}{'窗口跨度':>10}{'Sys2 冷':>9}{'Sys2 窗':>9}{'降幅':>8}"
       f"{'Sys3 冷':>9}{'Sys3 窗':>9}{'降幅':>8}{'0迭代':>8}")
 for r in base:
@@ -130,8 +140,10 @@ for r in base:
 if spaced:
     SP  = [k for k in spaced[0]["sys"][2] if k.startswith("稀疏窗 m")][0]
     SPL = [k for k in spaced[0]["sys"][2] if k.startswith("稀疏窗 +")][0]
-    print("\n=== 稀疏窗口:每步都解,但窗口只收每第 w 次的解 ===")
-    print(f"(跨度 = m·w·dt。对比行 '连续窗' 是同一次运行里的 m 个相邻解,跨度 {h['win']*h['dt']:g} ms)")
+    print("\n=== 稀疏窗口(假设:窗口该覆盖更长物理时间)—— 被证伪 ===")
+    print(f"每步都解,但窗口只收每第 w 次的解,跨度 = m·w·dt。")
+    print(f"'连续窗' 是同一次运行里的 m 个相邻解(跨度只有 {h['win']*h['dt']:g} ms),它最好;")
+    print("拉开窗口单调变差,连把最新解加回来也补不平。起作用的是快照离目标多近,不是覆盖多久。")
     print(f"{'w':>5}{'跨度':>9}{'Sys2 冷':>9}{'连续窗':>8}{'稀疏窗':>8}{'+最新':>8}"
           f"{'  |':>3}{'Sys3 冷':>9}{'连续窗':>8}{'稀疏窗':>8}{'+最新':>8}{'0迭代':>8}")
     for r in spaced:
@@ -169,6 +181,48 @@ if os.path.exists(probe) and os.path.getsize(probe) > 1000:
         rz, mz = f(zoh); rl, ml = f(lin)
         acc.append((st*h["dt"], rz, mz, rl, ml))
         print(f"{st*h['dt']:>8g}ms{rz:>15.2e}{mz:>14.2e}{rl:>15.2e}{ml:>14.2e}")
+
+# ============================================ 5b. phase split (QRS vs plateau)
+print("\n=== 相位拆分:回收的收益全在平台期 ===")
+print("(激动期 = 波前扫过网格的 t < 20 ms;平台期 = 之后)")
+print(f"{'解算间隔':>9}{'相位':>12}{'次数':>7}{'Sys2 冷':>9}{'Sys2 窗':>9}{'降幅':>7}"
+      f"{'Sys3 冷':>9}{'Sys3 窗':>9}{'降幅':>7}{'零迭代':>8}")
+for r in base:
+    path = os.path.join(HERE, r["file"])
+    try:
+        A = np.genfromtxt(path, delimiter=",", names=True, comments="#",
+                          invalid_raise=False)
+    except Exception:
+        continue
+    t = A["t_ms"]
+    ok = ~np.isnan(A["s2_v0"])
+    for lo, hi, lab in ((0, 20, "激动期 QRS"), (20, 1e9, "平台期")):
+        m = ok & (t >= lo) & (t < hi)
+        if m.sum() == 0: continue
+        c2, w2 = A["s2_v0"][m].mean(), A["s2_v2"][m].mean()
+        c3, w3 = A["s3_v0"][m].mean(), A["s3_v2"][m].mean()
+        z = ((A["s2_v2"][m] == 0).sum() + (A["s3_v2"][m] == 0).sum())/(2*m.sum())
+        print(f"{r['stride']*r['dt']:>7g}ms{lab:>12}{m.sum():>7}{c2:>9.1f}{w2:>9.1f}"
+              f"{100*(w2/c2-1):>6.0f}%{c3:>9.1f}{w3:>9.1f}{100*(w3/c3-1):>6.0f}%{100*z:>7.0f}%")
+
+# =================================================== 5c. cost vs accuracy, one table
+if acc:
+    amap = {a[0]: a for a in acc}
+    print("\n=== 成本 vs 精度:同样的 %g ms 物理时长 ===" % h["T"])
+    print(f"{'方案':<34}{'求解次数':>9}{'总迭代':>10}{'相对全率':>10}"
+          f"{'波形 max 误差':>14}")
+    for r in base:
+        iv = r["stride"]*r["dt"]
+        for key, lab in ((COLD, "不回收"), (CONS, "+Fischer 滑窗")):
+            v = [get(r, q, key) for q in (2, 3)]
+            if any(x is None for x in v): continue
+            it = sum(x["iters"] for x in v)
+            ns = sum(r["sys"][q]["nsolve"] for q in (2, 3))
+            e = amap.get(iv)
+            es = f"{e[4]*100:>12.2f}%" if e else f"{'(参考)':>13}"
+            print(f"{('每 %g ms ' % iv)+lab:<34}{ns:>9}{it:>10}"
+                  f"{it/r1[0]:>9.3f}x{es}")
+    print("(波形误差 = 8 个电极道、线性插值重建、相对各道峰峰值的最大偏差)")
 
 # ================================================================== 6. figure
 if len(sys.argv) > 1 and base:
