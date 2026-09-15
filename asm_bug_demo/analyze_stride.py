@@ -186,8 +186,11 @@ if spaced:
 probe = os.path.join(HERE, "stride_probe_ref.csv")
 acc = None
 if os.path.exists(probe) and os.path.getsize(probe) > 1000:
-    D = np.genfromtxt(probe, delimiter=",", names=True)
+  try:                      # the file may be mid-write if a run is in flight
+    D = np.genfromtxt(probe, delimiter=",", names=True, invalid_raise=False)
     t = D["t_ms"]; E = np.vstack([D[f"e{i}"] for i in range(8)]).T
+    keep = np.isfinite(t) & np.all(np.isfinite(E), axis=1)
+    t, E = t[keep], E[keep]
     span = E.max(axis=0) - E.min(axis=0); span[span == 0] = 1.0
     print("\n=== 少解的代价:电极道只在解算时刻有值,中间要补 ===")
     print("(参考 = 每 0.01 ms 全率解;误差按每道峰峰值归一,8 道取最差)")
@@ -203,6 +206,9 @@ if os.path.exists(probe) and os.path.getsize(probe) > 1000:
         rz, mz = f(zoh); rl, ml = f(lin)
         acc.append((st*h["dt"], rz, mz, rl, ml))
         print(f"{st*h['dt']:>8g}ms{rz:>15.2e}{mz:>14.2e}{rl:>15.2e}{ml:>14.2e}")
+  except Exception as e:
+    print("probe trace unreadable (a run may still be writing it):", e)
+    acc = None
 
 # ============================================ 5b. phase split (QRS vs plateau)
 print("\n=== 相位拆分:回收的收益全在平台期 ===")
