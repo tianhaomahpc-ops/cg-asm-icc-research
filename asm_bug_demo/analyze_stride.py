@@ -81,30 +81,52 @@ h = base[0] if base else runs[0]
 print(f"\n网格 {h['n']}^3 = {h['nd']} dof   dt = {h['dt']} ms   "
       f"sASM+IC(0), 4 子域, overlap 1, tol = 1e-8·‖b‖   窗口 m = {h['win']}\n")
 
-# =============================== 1. the three configurations the user asked for
+# ================================ 1. the four configurations, side by side
 by = {r["stride"]: r for r in base}
-print("=== 你问的三个配置 (Sys2 + Sys3 合计) ===")
-print(f"{'':<42}{'求解次数':>9}{'迭代/次':>9}{'总迭代':>10}{'总时间 s':>10}{'0迭代占比':>10}")
-def show(lab, r, key):
-    if r is None: return None
-    s2, s3 = get(r, 2, key), get(r, 3, key)
+CFG = [("1", "每 0.01 ms", 1,   COLD, "不回收"),
+       ("2", "每 1 ms",    100, COLD, "不回收"),
+       ("3", "每 1 ms",    100, CONS, "+Fischer 滑窗"),
+       ("4", "每 0.01 ms", 1,   CONS, "+Fischer 滑窗")]
+
+r1 = None
+print("=== 四个配置并排 (sASM+IC(0)+CG, 同样的 %g ms 物理时长) ===\n" % h["T"])
+print(f"{'':<4}{'解算间隔':<12}{'初值':<16}{'求解次数':>9}"
+      f"{'Sys2 迭代/次':>13}{'Sys3 迭代/次':>13}{'总迭代':>10}{'总时间 s':>10}{'零迭代':>8}")
+rows = []
+for tag, iv, st, key, kn in CFG:
+    r = by.get(st)
+    if not r: continue
+    v2, v3 = get(r, 2, key), get(r, 3, key)
+    if not (v2 and v3): continue
     ns = r["sys"][2]["nsolve"] + r["sys"][3]["nsolve"]
-    it, tm = s2["iters"]+s3["iters"], s2["time"]+s3["time"]
-    z = s2["zero"]+s3["zero"]
-    print(f"{lab:<42}{ns:>9}{it/ns:>9.1f}{it:>10}{tm:>10.2f}{100*z/ns:>9.0f}%")
-    return it, tm, ns
-r1 = show("1. 每 0.01 ms 解,不回收", by.get(1), COLD)
-r2 = show("2. 每 1 ms   解,不回收", by.get(100), COLD)
-r3 = show("3. 每 1 ms   解,+Fischer 滑窗", by.get(100), CONS)
-r4 = show("   (参考) 每 0.01 ms 解,+Fischer 滑窗", by.get(1), CONS)
-if r1 and r2:
-    print(f"\n   2 相对 1:求解次数 {r1[2]/r2[2]:.0f}x 少,总迭代 {r1[0]/r2[0]:.0f}x 少,"
-          f"总时间 {r1[1]/r2[1]:.0f}x 少")
-if r2 and r3:
-    print(f"   3 相对 2:同样 {r3[2]} 次求解,迭代再降 {100*(1-r3[0]/r2[0]):.0f}%,"
-          f"时间再降 {100*(1-r3[1]/r2[1]):.0f}%")
-if r1 and r4:
-    print(f"   4 相对 1:同样 {r4[2]} 次求解,迭代降 {100*(1-r4[0]/r1[0]):.0f}%")
+    it, tm = v2["iters"]+v3["iters"], v2["time"]+v3["time"]
+    z = v2["zero"]+v3["zero"]
+    rows.append((tag, iv, kn, ns, it, tm, v2, v3))
+    print(f"{tag:<4}{iv:<12}{kn:<16}{ns:>9}{v2['per']:>13.1f}{v3['per']:>13.1f}"
+          f"{it:>10}{tm:>10.2f}{100*z/ns:>7.0f}%")
+
+if rows:
+    b = rows[0]                                  # config 1 = the reference
+    print(f"\n{'':<4}{'相对配置 1 (每 0.01 ms 冷启动)':<28}{'迭代':>10}{'时间':>10}")
+    for tag, iv, kn, ns, it, tm, _, _ in rows:
+        print(f"{tag:<4}{iv+' '+kn:<28}{b[4]/it:>9.1f}x{b[5]/tm:>9.1f}x")
+    print("\n两两之间:")
+    d = {r[0]: r for r in rows}
+    if "1" in d and "2" in d:
+        print(f"  少解 100 倍 (1->2):        迭代 {d['1'][4]/d['2'][4]:5.1f}x   "
+              f"时间 {d['1'][5]/d['2'][5]:5.1f}x   "
+              f"—— 每次求解的迭代数没变 ({d['1'][6]['per']:.1f} -> {d['2'][6]['per']:.1f})")
+    if "2" in d and "3" in d:
+        print(f"  在 1 ms 上加回收 (2->3):   迭代 {d['2'][4]/d['3'][4]:5.1f}x   "
+              f"时间 {d['2'][5]/d['3'][5]:5.1f}x")
+    if "1" in d and "4" in d:
+        print(f"  在 0.01 ms 上加回收 (1->4):迭代 {d['1'][4]/d['4'][4]:5.1f}x   "
+              f"时间 {d['1'][5]/d['4'][5]:5.1f}x")
+    if "2" in d and "4" in d:
+        print(f"  回收 vs 降频 (4 vs 2):     配置 4 仍比配置 2 贵 "
+              f"{d['4'][4]/d['2'][4]:.0f}x 迭代 / {d['4'][5]/d['2'][5]:.0f}x 时间"
+              f"  —— 回收补不回频率")
+    r1 = (d["1"][4], d["1"][5], d["1"][3]) if "1" in d else None
 
 # ============================================ 2. the whole pipeline, Sys1 included
 print("\n=== 全流水线 (Sys1 每步都解,不受 stride 影响) ===")
@@ -206,7 +228,7 @@ for r in base:
               f"{100*(w2/c2-1):>6.0f}%{c3:>9.1f}{w3:>9.1f}{100*(w3/c3-1):>6.0f}%{100*z:>7.0f}%")
 
 # =================================================== 5c. cost vs accuracy, one table
-if acc:
+if acc and r1:
     amap = {a[0]: a for a in acc}
     print("\n=== 成本 vs 精度:同样的 %g ms 物理时长 ===" % h["T"])
     print(f"{'方案':<34}{'求解次数':>9}{'总迭代':>10}{'相对全率':>10}"
