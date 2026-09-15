@@ -218,8 +218,11 @@ print(f"{'解算间隔':>9}{'相位':>12}{'次数':>7}{'Sys2 冷':>9}{'Sys2 窗'
 for r in base:
     path = os.path.join(HERE, r["file"])
     try:
+        # line 1 is the "# asm_stride_test ..." banner; with comments="#" it
+        # collapses to an empty line and names=True would read THAT as the
+        # header, so start at the real header row instead.
         A = np.genfromtxt(path, delimiter=",", names=True, comments="#",
-                          invalid_raise=False)
+                          skip_header=1, invalid_raise=False)
     except Exception:
         continue
     t = A["t_ms"]
@@ -266,51 +269,85 @@ if len(sys.argv) > 1 and base:
     sci = FuncFormatter(lambda v, p: "0" if v <= 0 else f"1e{int(round(np.log10(v)))}")
     plain = FuncFormatter(lambda v, p: f"{v:g}")
 
-    fig, ax = plt.subplots(1, 3, figsize=(16.4, 5.4))
+    fig, axx = plt.subplots(2, 2, figsize=(14.6, 10.4))
+    ax = axx.ravel()
     fig.suptitle("胞外恢复 / 躯干求解该多久做一次? —— sASM+IC(0)+CG, "
-                 f"{h['n']}^3={h['nd']} dof, 单域 dt={h['dt']} ms, tol=1e-8‖b‖",
-                 fontsize=13, weight="bold", y=1.04)
+                 f"{h['n']}^3={h['nd']} dof, 单域 dt={h['dt']} ms, tol=1e-8‖b‖, "
+                 f"共 {h['T']:g} ms",
+                 fontsize=13.5, weight="bold", y=0.975)
 
     ms = [r["stride"]*r["dt"] for r in base]
+    # -- (1) iterations per solve.  Only the solve-interval sweep lives here:
+    #    the spaced-window runs are a different run length and belong in (4).
     for sy, mk, nm in ((2, "o", "Sys2 $u_e$"), (3, "s", "Sys3 $u_T$")):
         ax[0].plot(ms, [get(r, sy, COLD)["per"] for r in base], mk+"-",
-                   color="0.45", ms=5, label=f"{nm} 不回收")
+                   color="0.45", ms=5.5, label=f"{nm} 不回收")
         ax[0].plot(ms, [get(r, sy, CONS)["per"] for r in base], mk+"-",
-                   color="#16a085", ms=5, label=f"{nm} +滑窗 m={h['win']}")
-    if spaced:
-        SPL = [k for k in spaced[0]["sys"][2] if k.startswith("稀疏窗 +")][0]
-        ax[0].plot([r["wstride"]*r["dt"] for r in spaced],
-                   [get(r, 2, SPL)["per"] for r in spaced], "*--",
-                   color="#c0392b", ms=11,
-                   label="Sys2 每步都解 + 稀疏窗(横轴=快照间隔)")
+                   color="#16a085", ms=5.5, label=f"{nm} +滑窗 m={h['win']}")
     ax[0].set_xscale("log"); ax[0].set_xlabel("解算间隔 (ms)")
-    ax[0].set_ylabel("每次求解的 CG 迭代数")
-    ax[0].set_title("① 每次求解要多少迭代", fontsize=11, weight="bold")
+    ax[0].set_ylabel("每次求解的 CG 迭代数"); ax[0].set_ylim(0, 65)
+    ax[0].set_title("① 每次求解要多少迭代 —— 冷启动与间隔无关,\n"
+                    "回收则解得越密越有效(单调,没有甜点)", fontsize=11, weight="bold")
     ax[0].xaxis.set_major_formatter(plain)
-    ax[0].grid(alpha=.3, which="both"); ax[0].legend(fontsize=7.6)
+    ax[0].grid(alpha=.3, which="both"); ax[0].legend(fontsize=8.4)
 
+    # -- (2) total cost over the same physical time
     for key, col, lab in ((COLD, "0.45", "不回收"), (CONS, "#16a085", "+滑窗")):
         ax[1].plot(ms, [sum(get(r, s, key)["iters"] for s in (2, 3)) for r in base],
-                   "o-", color=col, ms=5, label=f"Sys2+Sys3 {lab}")
+                   "o-", color=col, ms=5.5, label=f"Sys2+Sys3 {lab}")
         ax[1].plot(ms, [sum(get(r, s, key)["iters"] for s in (1, 2, 3)) for r in base],
-                   "^--", color=col, ms=5, alpha=.6, label=f"含 Sys1 全流水线 {lab}")
+                   "^--", color=col, ms=5.5, alpha=.6, label=f"含 Sys1 全流水线 {lab}")
     ax[1].set_xscale("log"); ax[1].set_yscale("log")
     ax[1].set_xlabel("解算间隔 (ms)"); ax[1].set_ylabel(f"{h['T']:g} ms 内的总迭代数")
     ax[1].xaxis.set_major_formatter(plain); ax[1].yaxis.set_major_formatter(sci)
-    ax[1].set_title("② 同样物理时长下的总成本", fontsize=11, weight="bold")
-    ax[1].grid(alpha=.3, which="both"); ax[1].legend(fontsize=7.6)
+    ax[1].set_title("② 同样物理时长下的总成本 —— 虚线在右侧压平,\n"
+                    "因为剩下的全是每步都要解的单域", fontsize=11, weight="bold")
+    ax[1].grid(alpha=.3, which="both"); ax[1].legend(fontsize=8.4)
 
+    # -- (3) accuracy
     if acc:
         a = np.array(acc)
         ax[2].loglog(a[:, 0], a[:, 1], "o-",  color="#c0392b", label="零阶保持 RMS")
+        ax[2].loglog(a[:, 0], a[:, 2], "o--", color="#c0392b", alpha=.6, label="零阶保持 max")
         ax[2].loglog(a[:, 0], a[:, 3], "s-",  color="#1f6f8b", label="线性插值 RMS")
         ax[2].loglog(a[:, 0], a[:, 4], "s--", color="#1f6f8b", alpha=.6, label="线性插值 max")
         ax[2].axhline(1e-2, color="0.4", lw=.9, ls=":")
-        ax[2].text(a[0, 0], 1.2e-2, "1% 峰峰值", fontsize=8, color="0.35")
+        ax[2].text(a[0, 0], 1.15e-2, "1% 峰峰值", fontsize=8, color="0.35")
         ax[2].xaxis.set_major_formatter(plain); ax[2].yaxis.set_major_formatter(sci)
-        ax[2].legend(fontsize=8)
+        ax[2].legend(fontsize=8.4)
     ax[2].set_xlabel("解算间隔 (ms)"); ax[2].set_ylabel("电极道误差 (归一化)")
-    ax[2].set_title("③ 少解的代价:电极波形误差", fontsize=11, weight="bold")
+    ax[2].set_title("③ 少解的代价 —— 直接沿用上一次的躯干解(红)不可行,\n"
+                    "必须线性插值(蓝);误差几乎全在 QRS 里", fontsize=11, weight="bold")
     ax[2].grid(alpha=.3, which="both")
+
+    # -- (4) the spaced-window hypothesis, against the SAME run's consecutive
+    #    window.  These runs are 25 ms, not 60 ms, so they may not be compared
+    #    with panels (1)-(2); everything here comes from one run per group.
+    if spaced:
+        SP  = [k for k in spaced[0]["sys"][2] if k.startswith("稀疏窗 m")][0]
+        SPL = [k for k in spaced[0]["sys"][2] if k.startswith("稀疏窗 +")][0]
+        x = np.arange(len(spaced)); w = 0.2
+        series = [(COLD, "不回收", "0.62"), (CONS, "连续窗 m=16(跨 0.16 ms)", "#16a085"),
+                  (SP, "稀疏窗(跨 m·w·dt)", "#e67e22"), (SPL, "稀疏窗 + 最新解", "#c0392b")]
+        for vi, (key, lab, col) in enumerate(series):
+            y = [get(r, 2, key)["per"] for r in spaced]
+            ax[3].bar(x + (vi-1.5)*w, y, w, color=col, label=lab)
+            for xi, v in zip(x + (vi-1.5)*w, y):
+                ax[3].text(xi, v+0.8, f"{v:.1f}", ha="center", fontsize=7.6)
+        ax[3].set_xticks(x)
+        ax[3].set_xticklabels([f"w={r['wstride']}\n跨度 {r['win']*r['wstride']*r['dt']:g} ms"
+                               for r in spaced], fontsize=9)
+        ax[3].set_ylabel("Sys2 每次求解的 CG 迭代数"); ax[3].set_ylim(0, 72)
+        ax[3].set_title("④ 假设「窗口该覆盖更长物理时间」—— 被证伪。\n"
+                        "每步都解,窗口只收每第 w 次的解(同一次运行内对照)",
+                        fontsize=11, weight="bold")
+        ax[3].grid(alpha=.25, axis="y")
+        ax[3].legend(fontsize=8.2, ncol=2, loc="upper center",
+                     bbox_to_anchor=(0.5, -0.12), frameon=False)
+        ax[3].text(0.5, -0.30, "连续窗最好,拉开单调变差;加回最新解也补不平。"
+                   "起作用的是快照离目标多近,不是覆盖多久。",
+                   transform=ax[3].transAxes, ha="center", fontsize=8.8, color="#444444")
+
+    fig.tight_layout(rect=[0, 0.015, 1, 0.955])
     fig.savefig(sys.argv[1], dpi=140, bbox_inches="tight")
     print("\nwrote", sys.argv[1])
