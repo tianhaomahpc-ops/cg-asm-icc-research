@@ -5,7 +5,15 @@
 #   make            -> build ./asm_demo
 #   make clean      -> remove object files / binary
 #
-MFEM_DIR := /Users/tianhaoma/spack/opt/spack/darwin-m1/mfem-4.9.0-dhws2hkr7xf7usvafygpgxn7zmgua645
+# The three paths below are the defaults for the original macOS/Spack host and
+# can be overridden from the environment or the command line, e.g. on a plain
+# Linux box with distro PETSc/HYPRE/METIS and a source build of MFEM:
+#
+#   make MFEM_DIR=/path/to/mfem \
+#        PETSC_DIR_DERIVED=/usr/lib/petscdir/petsc3.19/x86_64-linux-gnu-real \
+#        MPICC=mpicc MPICXX=mpicxx
+#
+MFEM_DIR ?= /Users/tianhaoma/spack/opt/spack/darwin-m1/mfem-4.9.0-dhws2hkr7xf7usvafygpgxn7zmgua645
 CONFIG_MK := $(MFEM_DIR)/share/mfem/config.mk
 
 include $(CONFIG_MK)
@@ -21,8 +29,8 @@ REC_SRC    := recoverue_demo.cpp
 
 # Pure-PETSc demo: no MFEM, no Hypre needed.  Pull just the PETSc
 # include and library paths out of MFEM's MFEM_EXT_LIBS.
-PETSC_DIR_DERIVED := /Users/tianhaoma/spack/opt/spack/darwin-m1/petsc-3.24.4-p7obww25tn67gjoykjws5bjdvfwbfpev
-MPICC             := /Users/tianhaoma/spack/opt/spack/darwin-m1/openmpi-5.0.9-oloqi33z4barsfmcrz3c2drcnletrv2p/bin/mpicc
+PETSC_DIR_DERIVED ?= /Users/tianhaoma/spack/opt/spack/darwin-m1/petsc-3.24.4-p7obww25tn67gjoykjws5bjdvfwbfpev
+MPICC             ?= /Users/tianhaoma/spack/opt/spack/darwin-m1/openmpi-5.0.9-oloqi33z4barsfmcrz3c2drcnletrv2p/bin/mpicc
 
 PURE_TARGET := pure_petsc_demo
 PURE_SRC    := pure_petsc_demo.c

@@ -229,7 +229,11 @@ static void BuildCoarse(Mat A, Sub *S, PetscInt nsub, PetscInt N, PetscInt m,
     PetscReal **phi = (PetscReal**)malloc(sizeof(PetscReal*)*nsub);
     BuildPU(S, nsub, N, harmonic, 1, phi);          /* sum_i phi_i = 1 */
     PetscInt ncol = nsub * nvec;
-    Mat R0t; MatCreateSeqAIJ(PETSC_COMM_SELF, N, ncol, 3*nvec, NULL, &R0t);
+    /* a DOF in the overlap can belong to several subdomains (up to ~9 in 2D for
+     * a generous overlap), each contributing nvec columns -- preallocate for
+     * that and let PETSc grow rather than error if a corner needs more. */
+    Mat R0t; MatCreateSeqAIJ(PETSC_COMM_SELF, N, ncol, 9*nvec, NULL, &R0t);
+    MatSetOption(R0t, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_FALSE);
     const PetscReal th = fdeg * M_PI / 180.0, cs = PetscCosReal(th), sn = PetscSinReal(th);
     for (PetscInt i = 0; i < nsub; ++i) {
         PetscReal sm = 0, tm = 0, smax = 1e-12, tmax = 1e-12;
@@ -321,7 +325,7 @@ int main(int argc, char **argv) {
     PetscInt n = 120, P = 6, O = 2;
     PetscReal aniso = 1.0, fdeg = 45.0;
     PetscBool scale = PETSC_FALSE, flg;
-    char cname[32] = "all";
+    char cname[32] = "all", fname[32] = "harm";
     PetscOptionsGetInt (NULL, NULL, "-n",      &n,     NULL);
     PetscOptionsGetInt (NULL, NULL, "-P",      &P,     NULL);
     PetscOptionsGetInt (NULL, NULL, "-O",      &O,     NULL);
@@ -329,6 +333,8 @@ int main(int argc, char **argv) {
     PetscOptionsGetReal(NULL, NULL, "-fiber_deg", &fdeg, NULL);
     PetscOptionsGetBool(NULL, NULL, "-scale",  &scale, NULL);
     PetscOptionsGetString(NULL, NULL, "-coarse", cname, sizeof(cname), &flg);
+    PetscOptionsGetString(NULL, NULL, "-fine",   fname, sizeof(fname), &flg);
+    const int fine_harm = (strcmp(fname, "mult") != 0);   /* -fine mult -> 1/sqrt(m_k) */
 
     /* det-normalised tensor: the CONTRAST is the knob, not the overall scale */
     const PetscReal sl = PetscSqrtReal(aniso), st = 1.0/PetscSqrtReal(aniso);
@@ -345,8 +351,9 @@ int main(int argc, char **argv) {
 
     PetscPrintf(PETSC_COMM_SELF,
         "=== twolevel_aniso: contrast r=%g  fibre=%g deg  (sigma_l=%.4g sigma_t=%.4g)\n"
-        "    fine level = sigma-harmonic sqrt-PU;  O=%d;  ICC(0) sub-solve\n",
-        (double)aniso, (double)fdeg, (double)sl, (double)st, (int)O);
+        "    fine level = %s sqrt-PU;  O=%d;  ICC(0) sub-solve\n",
+        (double)aniso, (double)fdeg, (double)sl, (double)st,
+        fine_harm ? "sigma-harmonic" : "multiplicity 1/sqrt(m_k)", (int)O);
 
     PetscInt Ps[6] = {2,3,4,5,6,0}, npt = scale ? 5 : 1;
     for (PetscInt pi = 0; pi < npt; ++pi) {
@@ -361,7 +368,6 @@ int main(int argc, char **argv) {
                     "method", "CG its", "lambda_min", "lambda_max", "kappa");
         for (int mi = 0; mi < nmode; ++mi) {
             PetscReal lo, hi;
-            int fine_harm = 1;                 /* fine level always sigma-harmonic */
             Ctx c = MakeCtx(A, S, nsub, N, m, fine_harm, modes[mi], fdeg);
             PetscInt it = PCG(A, &c, b, x, 1e-6, 4000, &lo, &hi);
             PetscPrintf(PETSC_COMM_SELF, "  %-26s %8d %12.4e %10.4f %10.1f\n",

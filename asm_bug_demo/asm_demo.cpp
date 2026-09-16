@@ -1415,6 +1415,27 @@ int main(int argc, char *argv[])
         InstallSMRAS(ksp_raw, A_raw, overlap, icc_lev, my_rank, theta);
     }
 
+    // -------- 6b) optional spectral probes --------------------------------
+    // -spectrum      : lambda_min / lambda_max / kappa of M^{-1}A, from the CG
+    //                  Lanczos tridiagonal (KSPComputeExtremeSingularValues).
+    //                  This is what separates the two competing explanations of
+    //                  the overlap anomaly: an over-count penalty on lambda_max
+    //                  vs. an overlap payoff on lambda_min.
+    // -probe_omega   : omega = max_i lambda_max(M_i^{-1} A_i), the inexactness
+    //                  of the ICC sub-solve.  Property of (A_i, ICC) alone, so
+    //                  it is measured on the plain PCASM of scheme 0 and is
+    //                  valid for every outer weighting.
+    bool want_spectrum = false, want_omega = false;
+    PetscInt icc_lev_probe = 0;
+    PetscOptionsGetInt(NULL, NULL, "-sub_pc_factor_levels", &icc_lev_probe, NULL);
+    for (int i = 1; i < argc; ++i)
+    {
+        if (std::string(argv[i]) == "-spectrum")    want_spectrum = true;
+        if (std::string(argv[i]) == "-probe_omega") want_omega    = true;
+    }
+    KSP ksp_probe = static_cast<KSP>(pcg);
+    if (want_spectrum) KSPSetComputeSingularValues(ksp_probe, PETSC_TRUE);
+
     if (warmup)
     {
         // One untimed solve: forces all lazy PCSetUp (ICC factorisation, overlap)
@@ -1424,12 +1445,82 @@ int main(int argc, char *argv[])
         Vector Xtmp(X);
         pcg.Mult(B, Xtmp);
     }
+
     double t0 = MPI_Wtime();
     pcg.Mult(B, X);
     double t1 = MPI_Wtime();
 
     int    iters = pcg.GetNumIterations();
     double rnorm = pcg.GetFinalNorm();
+
+    if (want_spectrum)
+    {
+        PetscReal smax = 0.0, smin = 0.0;
+        KSPComputeExtremeSingularValues(ksp_probe, &smax, &smin);
+        if (my_rank == 0)
+            std::cout << "[SPECTRUM] lmin=" << std::scientific << std::setprecision(4)
+                      << (double)smin << "  lmax=" << (double)smax
+                      << "  kappa=" << (smin > 0 ? (double)(smax/smin) : -1.0) << "\n";
+    }
+
+    if (want_omega)
+    {
+        // omega = max_i lambda_max(M_i^{-1} A_i) for the ICC(L) sub-solve.
+        // Run AFTER the main solve so every lazy PCSetUp has already happened
+        // (scheme 0 never calls pcg.Customize(), so the PC only becomes PCASM
+        // once MFEM's Mult has run KSPSetFromOptions).  A FRESH PCICC is built
+        // on each A_i rather than borrowing the sub-KSP's PC, so resetting the
+        // probe KSP's operators cannot disturb the solver's own factors.
+        PC        pc_probe = nullptr;
+        PetscBool isasm    = PETSC_FALSE;
+        PetscInt  nl = 0, first = 0;
+        KSP      *subs = nullptr;
+        PetscReal om_loc = 0.0, kap_loc = 0.0;
+        KSPGetPC(ksp_probe, &pc_probe);
+        PetscObjectTypeCompare((PetscObject)pc_probe, PCASM, &isasm);
+        if (isasm && !PCASMGetSubKSP(pc_probe, &nl, &first, &subs) && subs)
+        {
+            for (PetscInt i = 0; i < nl; ++i)
+            {
+                Mat Ai = nullptr;
+                KSPGetOperators(subs[i], &Ai, NULL);
+                if (!Ai) continue;
+                KSP kp = nullptr; PC pci = nullptr;
+                KSPCreate(PETSC_COMM_SELF, &kp);
+                KSPSetType(kp, KSPCG);
+                KSPSetOperators(kp, Ai, Ai);
+                KSPGetPC(kp, &pci);
+                PCSetType(pci, PCICC);
+                PCFactorSetLevels(pci, icc_lev_probe);
+                PCFactorSetShiftType(pci, MAT_SHIFT_POSITIVE_DEFINITE);
+                KSPSetComputeSingularValues(kp, PETSC_TRUE);
+                KSPSetNormType(kp, KSP_NORM_PRECONDITIONED);
+                KSPSetTolerances(kp, 1e-12, 1e-50, PETSC_DEFAULT, 60);
+                Vec bi = nullptr, xi = nullptr;
+                MatCreateVecs(Ai, &xi, &bi);
+                PetscRandom rnd = nullptr;
+                PetscRandomCreate(PETSC_COMM_SELF, &rnd);
+                PetscRandomSetType(rnd, PETSCRAND48);
+                PetscRandomSetSeed(rnd, 42); PetscRandomSeed(rnd);
+                VecSetRandom(bi, rnd);
+                KSPSolve(kp, bi, xi);
+                PetscReal hi = 0.0, lo = 0.0;
+                KSPComputeExtremeSingularValues(kp, &hi, &lo);
+                if (hi > om_loc)                   om_loc  = hi;
+                if (lo > 0.0 && hi / lo > kap_loc) kap_loc = hi / lo;
+                PetscRandomDestroy(&rnd);
+                VecDestroy(&bi); VecDestroy(&xi); KSPDestroy(&kp);
+            }
+        }
+        PetscReal om = 0.0, kap = 0.0;
+        MPI_Allreduce(&om_loc,  &om,  1, MPIU_REAL, MPIU_MAX, MPI_COMM_WORLD);
+        MPI_Allreduce(&kap_loc, &kap, 1, MPIU_REAL, MPIU_MAX, MPI_COMM_WORLD);
+        if (my_rank == 0)
+            std::cout << "[OMEGA] omega=" << std::scientific << std::setprecision(4)
+                      << (double)om << "  kappa_sub=" << (double)kap
+                      << (isasm ? "" : "   (WARNING: outer PC is not PCASM)") << "\n";
+    }
+
 
     if (my_rank == 0)
     {
