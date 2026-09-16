@@ -233,6 +233,15 @@ struct SASMCtx
     Vec  tmp;        // scratch
     int  pre;        // apply W before  M_BASIC^{-1}
     int  post;       // apply W after   M_BASIC^{-1}
+    // ---- optional second level (-pucoarse) --------------------------------
+    // M^{-1} = R0^T A0^{-1} R0  +  (weighted one-level ASM)
+    // R0's rows are the SAME partition of unity that weights the fine level,
+    // renormalised to sum_i phi_i = 1 (Nicolaides).  Reusing chi_i costs
+    // nothing: it has already been built.  Symmetric and additive, so CG
+    // stays valid and the memory cost is one vector of length #subdomains.
+    Mat  R0t;        // N x nsub, column i = phi_i   (NULL => one level)
+    KSP  kspc;       // A0 = R0 A R0^T, solved redundantly (dense Cholesky)
+    Vec  cvec, ycvec;
 };
 
 extern "C" PetscErrorCode SASMApply(PC pc, Vec r, Vec z)
@@ -243,6 +252,12 @@ extern "C" PetscErrorCode SASMApply(PC pc, Vec r, Vec z)
     else          { PetscCall(VecCopy(r, ctx->tmp)); }                   // tmp = r
     PetscCall(PCApply(ctx->inner_pc, ctx->tmp, z));                      // z = M_BASIC^{-1} tmp
     if (ctx->post) { PetscCall(VecPointwiseMult(z, ctx->w, z)); }        // z = W z (aliased ok)
+    if (ctx->R0t)                                                        // + coarse
+    {
+        PetscCall(MatMultTranspose(ctx->R0t, r, ctx->cvec));
+        PetscCall(KSPSolve(ctx->kspc, ctx->cvec, ctx->ycvec));
+        PetscCall(MatMultAdd(ctx->R0t, ctx->ycvec, z, z));
+    }
     return PETSC_SUCCESS;
 }
 
@@ -255,6 +270,10 @@ extern "C" PetscErrorCode SASMDestroy(PC pc)
         PetscCall(PCDestroy(&ctx->inner_pc));
         PetscCall(VecDestroy(&ctx->w));
         PetscCall(VecDestroy(&ctx->tmp));
+        PetscCall(MatDestroy(&ctx->R0t));
+        PetscCall(KSPDestroy(&ctx->kspc));
+        PetscCall(VecDestroy(&ctx->cvec));
+        PetscCall(VecDestroy(&ctx->ycvec));
         delete ctx;
     }
     PetscCall(PCShellSetContext(pc, nullptr));
@@ -537,11 +556,18 @@ static void InstallScaledASM(KSP ksp, Mat A,
                              double pu_grade = 0.0, // >0: geometric layer-graded weights
                                                     //   w=q^depth (BFS), exact global renorm;
                                                     //   overrides eps/alpha.  q=1 == sASM.
-                             int pu_shape = 0)      // shape of the graded weight:
+                             int pu_shape = 0,      // shape of the graded weight:
                                                     //   0 = q^depth        (-pugrade, as before)
                                                     //   1 = 1-depth/(O+1)  (-puramp, NEW-A)
                                                     //   2 = sigma-harmonic (-puharm, NEW-B)
+                             int want_coarse = 0)   // 1: add the Nicolaides coarse
+                                                    //    level built from the SAME PU
 {
+    // Coarse-basis staging: filled in by the subdomain loop below with the
+    // linear-normalised partition of unity (sum_i phi_i = 1) of THIS rank's
+    // subdomain.  One coarse basis function per subdomain.
+    std::vector<PetscInt>    phi_idx;
+    std::vector<PetscScalar> phi_val;
     // cheby_deg == 0 : block solve = preonly + ICC(icc_levels)   [scheme 3]
     // cheby_deg >= 1 : block solve = cheby_deg steps of Chebyshev,
     //                  preconditioned by ICC(icc_levels)         [scheme 4]
@@ -751,6 +777,37 @@ static void InstallScaledASM(KSP ksp, Mat A,
                     VecRestoreArray(w, &warr);
                     VecRestoreArrayRead(sloc, &sarr);
                     VecDestroy(&sloc);
+
+                    if (want_coarse)
+                    {
+                        // Same shape, LINEAR renormalisation sum_i phi_i = 1.
+                        // This is the Nicolaides coarse basis, and it is free:
+                        // wun is the chi_i the fine level already needed.
+                        Vec lsum = nullptr;
+                        MatCreateVecs(A, &lsum, NULL);
+                        VecSet(lsum, 0.0);
+                        VecSetValues(lsum, nloc, gidx, wun.data(), ADD_VALUES);
+                        VecAssemblyBegin(lsum); VecAssemblyEnd(lsum);
+                        Vec lloc = nullptr;
+                        VecCreateSeq(PETSC_COMM_SELF, nloc, &lloc);
+                        VecScatter sc3 = nullptr;
+                        VecScatterCreate(lsum, is_with_overlap[i], lloc, NULL, &sc3);
+                        VecScatterBegin(sc3, lsum, lloc, INSERT_VALUES, SCATTER_FORWARD);
+                        VecScatterEnd  (sc3, lsum, lloc, INSERT_VALUES, SCATTER_FORWARD);
+                        VecScatterDestroy(&sc3);
+                        VecDestroy(&lsum);
+                        const PetscScalar *la = nullptr;
+                        VecGetArrayRead(lloc, &la);
+                        phi_idx.assign(gidx, gidx + nloc);
+                        phi_val.resize(nloc);
+                        for (PetscInt l = 0; l < nloc; ++l)
+                        {
+                            const PetscReal d = PetscRealPart(la[l]);
+                            phi_val[l] = (d > 0.0) ? wun[l] / d : 0.0;
+                        }
+                        VecRestoreArrayRead(lloc, &la);
+                        VecDestroy(&lloc);
+                    }
                 }
                 else
                 {
@@ -765,6 +822,28 @@ static void InstallScaledASM(KSP ksp, Mat A,
                                                  0.5*pu_alpha);
                     }
                     VecRestoreArray(w, &warr);
+                    if (want_coarse)
+                    {
+                        // no shaped PU here -> classical Nicolaides 1/m_k basis
+                        const PetscScalar *ma = nullptr;
+                        Vec mloc = nullptr;
+                        VecCreateSeq(PETSC_COMM_SELF, nloc, &mloc);
+                        VecScatter sc4 = nullptr;
+                        VecScatterCreate(mult, is_with_overlap[i], mloc, NULL, &sc4);
+                        VecScatterBegin(sc4, mult, mloc, INSERT_VALUES, SCATTER_FORWARD);
+                        VecScatterEnd  (sc4, mult, mloc, INSERT_VALUES, SCATTER_FORWARD);
+                        VecScatterDestroy(&sc4);
+                        VecGetArrayRead(mloc, &ma);
+                        phi_idx.assign(gidx, gidx + nloc);
+                        phi_val.resize(nloc);
+                        for (PetscInt l = 0; l < nloc; ++l)
+                        {
+                            const PetscReal mk = PetscRealPart(ma[l]);
+                            phi_val[l] = (mk > 0.0) ? 1.0 / mk : 0.0;
+                        }
+                        VecRestoreArrayRead(mloc, &ma);
+                        VecDestroy(&mloc);
+                    }
                 }
                 ISRestoreIndices(is_with_overlap[i], &gidx);
                 LocalPUCtx *c = new LocalPUCtx;
@@ -831,6 +910,61 @@ static void InstallScaledASM(KSP ksp, Mat A,
     VecDestroy(&mult);
     if (my_rank == 0) { std::cout << "ok\n  [sASM step 5] wire PCSHELL... " << std::flush; }
 
+    // 4c. Assemble the coarse level, if asked for.
+    //     One column per subdomain; with one subdomain per rank (the layout
+    //     this scheme already assumes) column j lives on rank j, so the
+    //     Galerkin operator A0 = R0 A R0^T is #ranks x #ranks -- tiny.  It is
+    //     solved redundantly (every rank gets the whole thing and factors it),
+    //     which is exact and costs one Allgather per apply.
+    Mat R0t_g = nullptr; KSP kspc_g = nullptr; Vec cvec_g = nullptr, ycvec_g = nullptr;
+    if (want_coarse)
+    {
+        PetscInt m_loc = 0, N_glob = 0, n_sub = 0;
+        MatGetLocalSize(A, &m_loc, NULL);
+        MatGetSize(A, &N_glob, NULL);
+        MPI_Comm_size(PETSC_COMM_WORLD, (int*)&n_sub);
+        MatCreate(PETSC_COMM_WORLD, &R0t_g);
+        MatSetSizes(R0t_g, m_loc, 1, N_glob, n_sub);
+        MatSetType(R0t_g, MATAIJ);
+        // a row can receive a contribution from every subdomain covering it;
+        // its own rank's column is the diagonal block, the rest are off-diagonal
+        MatMPIAIJSetPreallocation(R0t_g, 1, NULL, 32, NULL);
+        MatSeqAIJSetPreallocation(R0t_g, 32, NULL);
+        MatSetOption(R0t_g, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_FALSE);
+        const PetscInt col = my_rank;
+        for (size_t l = 0; l < phi_idx.size(); ++l)
+            if (PetscRealPart(phi_val[l]) != 0.0)
+                MatSetValues(R0t_g, 1, &phi_idx[l], 1, &col, &phi_val[l], INSERT_VALUES);
+        MatAssemblyBegin(R0t_g, MAT_FINAL_ASSEMBLY);
+        MatAssemblyEnd  (R0t_g, MAT_FINAL_ASSEMBLY);
+
+        Mat A0 = nullptr;
+        MatPtAP(A, R0t_g, MAT_INITIAL_MATRIX, PETSC_DEFAULT, &A0);   // A0 = R0 A R0^T
+        KSPCreate(PETSC_COMM_WORLD, &kspc_g);
+        KSPSetType(kspc_g, KSPPREONLY);
+        KSPSetOperators(kspc_g, A0, A0);
+        PC pc0 = nullptr;
+        KSPGetPC(kspc_g, &pc0);
+        PCSetType(pc0, PCREDUNDANT);
+        PCRedundantSetNumber(pc0, 1);
+        KSPSetUp(kspc_g);
+        {   // the redundant inner solve must tolerate a singular A0 (Sys2)
+            KSP inner = nullptr; PC ipc = nullptr;
+            if (!PCRedundantGetKSP(pc0, &inner) && inner)
+            {
+                KSPGetPC(inner, &ipc);
+                if (ipc) { PCSetType(ipc, PCCHOLESKY);
+                           PCFactorSetShiftType(ipc, MAT_SHIFT_POSITIVE_DEFINITE); }
+                KSPSetUp(inner);
+            }
+        }
+        MatCreateVecs(A0, &ycvec_g, &cvec_g);
+        MatDestroy(&A0);
+        if (my_rank == 0)
+            std::cout << "[COARSE] Nicolaides level from the same PU: "
+                      << n_sub << " basis functions, redundant Cholesky\n";
+    }
+
     // 5. Now wire the outer KSP's PC to a PCSHELL that does the wrap.
     //    The shell owns inner_pc, inv_sqrt and tmp.
     if (my_rank == 0) { std::cout << "[step5] GetPC... " << std::flush; }
@@ -845,6 +979,10 @@ static void InstallScaledASM(KSP ksp, Mat A,
     ctx->w        = inv_sqrt;            // D^{-1/2} (0) / D^{-1} (1,2) / NULL (3)
     ctx->pre      = (weight_mode == 2 || weight_mode == 3) ? 0 : 1;
     ctx->post     = (weight_mode == 3) ? 0 : 1;   // mode 3: outer = pure pass-through
+    ctx->R0t      = R0t_g;
+    ctx->kspc     = kspc_g;
+    ctx->cvec     = cvec_g;
+    ctx->ycvec    = ycvec_g;
     MatCreateVecs(A, &ctx->tmp, NULL);
 
     PCShellSetContext(pc_outer, ctx);
@@ -1375,6 +1513,7 @@ int main(int argc, char *argv[])
                     cheby_deg = std::atoi(argv[i+1]);
         double pu_eps = 0.25, pu_alpha = 1.0, pu_grade = 0.0;
         int    pu_shape = 0;   // 0 q^depth | 1 delta-ramp | 2 sigma-harmonic
+        int    pu_coarse = 0;  // 1: add the Nicolaides coarse level (-pucoarse)
         if (scheme == 7)
             for (int i = 1; i < argc; ++i)
             {
@@ -1386,6 +1525,7 @@ int main(int argc, char *argv[])
                     pu_grade = std::atof(argv[i+1]);
                 if (std::string(argv[i]) == "-puramp")  pu_shape = 1;   // NEW-A
                 if (std::string(argv[i]) == "-puharm")  pu_shape = 2;   // NEW-B
+                if (std::string(argv[i]) == "-pucoarse") pu_coarse = 1; // + 2nd level
             }
         if (my_rank == 0 && pu_shape)
             std::cout << "[PU] shape = "
@@ -1394,7 +1534,7 @@ int main(int argc, char *argv[])
                       << "  (exact global renorm sum_i w_i^2 = 1)\n";
         int weight_mode = (scheme == 5) ? 1 : (scheme == 6) ? 2 : (scheme == 7) ? 3 : 0;
         InstallScaledASM(ksp_raw, A_raw, overlap, icc_lev, my_rank, cheby_deg,
-                         weight_mode, pu_eps, pu_alpha, pu_grade, pu_shape);
+                         weight_mode, pu_eps, pu_alpha, pu_grade, pu_shape, pu_coarse);
     }
     else if (scheme == 8)
     {
