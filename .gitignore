@@ -43,4 +43,3 @@ asm_bug_demo/infoprop
 asm_bug_demo/aniso/libic0.so
 asm_bug_demo/aniso/__pycache__/
 asm_bug_demo/twolevel_aniso
-asm_bug_demo/aniso_nx*_n*.csv
