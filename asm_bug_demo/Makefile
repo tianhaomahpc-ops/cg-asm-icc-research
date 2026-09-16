@@ -30,10 +30,13 @@ PURE_FEM_TGT := pure_petsc_fem
 PURE_FEM_SRC := pure_petsc_fem.c
 PURE_LOAD_TGT := pure_petsc_load
 PURE_LOAD_SRC := pure_petsc_load.c
+# sigma-tensor coarse-space experiment (pure PETSc, sequential)
+TWOA_TGT      := twolevel_aniso
+TWOA_SRC      := twolevel_aniso.c
 PURE_INC    := -I$(PETSC_DIR_DERIVED)/include
 PURE_LIB    := -Wl,-rpath,$(PETSC_DIR_DERIVED)/lib -L$(PETSC_DIR_DERIVED)/lib -lpetsc
 
-all: $(TARGET) $(REC_TGT) $(PURE_TARGET) $(PURE_FEM_TGT) $(PURE_LOAD_TGT)
+all: $(TARGET) $(REC_TGT) $(PURE_TARGET) $(PURE_FEM_TGT) $(PURE_LOAD_TGT) $(TWOA_TGT)
 
 $(TARGET): $(SRC)
 	$(CXX) $(CXXFLAGS) $(SRC) -o $@ $(LDFLAGS)
@@ -50,7 +53,11 @@ $(PURE_FEM_TGT): $(PURE_FEM_SRC)
 $(PURE_LOAD_TGT): $(PURE_LOAD_SRC)
 	$(MPICC) -O3 -std=c11 $(PURE_INC) $(PURE_LOAD_SRC) -o $@ $(PURE_LIB)
 
+$(TWOA_TGT): $(TWOA_SRC)
+	$(MPICC) -O3 -std=c11 $(PURE_INC) $(TWOA_SRC) -o $@ $(PURE_LIB) -lm
+
 clean:
-	$(RM) $(TARGET) $(REC_TGT) $(PURE_TARGET) $(PURE_FEM_TGT) $(PURE_LOAD_TGT) *.o
+	$(RM) $(TARGET) $(REC_TGT) $(PURE_TARGET) $(PURE_FEM_TGT) $(PURE_LOAD_TGT) \
+	      $(TWOA_TGT) *.o
 
 .PHONY: all clean

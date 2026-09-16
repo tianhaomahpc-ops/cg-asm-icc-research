@@ -38,3 +38,9 @@ slides/tex/*.jpg
 # infoprop data dumps (regenerable via ./infoprop)
 asm_bug_demo/infoprop_out/*.txt
 asm_bug_demo/infoprop
+
+# aniso harness build artefacts (regenerable: make -C asm_bug_demo/aniso)
+asm_bug_demo/aniso/libic0.so
+asm_bug_demo/aniso/__pycache__/
+asm_bug_demo/twolevel_aniso
+asm_bug_demo/aniso_nx*_n*.csv

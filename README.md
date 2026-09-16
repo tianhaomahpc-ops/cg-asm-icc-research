@@ -30,6 +30,16 @@ falsified, three sources of MFEM↔PETSc disagreement and how each was
 removed, headline tables, reproduction recipe) is in
 [`INVESTIGATION.md`](./INVESTIGATION.md).
 
+> **New: the conductivity-tensor axis.** Everything above (and every other
+> report here) runs an **isotropic scalar** `sigma`. With an anisotropic
+> tensor the picture changes qualitatively: the overlap anomaly turns out to
+> be a **low-contrast** disease that dies as the fibre contrast grows, and at
+> high contrast the multiplicity scaling `1/sqrt(m_k)` becomes *slower than
+> unweighted BASIC*. Two operator-aware partition-of-unity replacements
+> (`-puramp`, `-puharm`) and a reusable coarse basis fix it.
+> See [`REPORT_aniso_pu_zh.md`](./REPORT_aniso_pu_zh.md) and the
+> self-contained harness in [`asm_bug_demo/aniso/`](./asm_bug_demo/aniso/).
+
 ---
 
 ## Repository layout

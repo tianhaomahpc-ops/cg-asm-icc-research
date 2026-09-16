@@ -41,6 +41,8 @@
 #include <vector>
 #include <string>
 #include <fstream>
+#include <sstream>
+#include <cmath>
 
 using namespace mfem;
 
@@ -442,6 +444,84 @@ static void InstallSMRAS(KSP ksp, Mat A,
                   << ", theta=" << theta << ")\n";
 }
 
+// ---------------------------------------------------------------------------
+// sigma-harmonic partition-of-unity shape (-puharm).
+//
+// WHY.  The stable-decomposition constant that bounds lambda_min from below is
+// governed by  sum_i \int sigma |grad chi_i|^2 .  Every weight shipped so far
+// (1/m_k, flat eps, q^depth) is built from the GRAPH DISTANCE, which is blind
+// to sigma: under an anisotropic tensor it damps too hard along the fibre and
+// too little across it.  The minimiser of that energy functional, for the
+// boundary data "1 on the owned core, 0 at the artificial boundary", is the
+// discrete sigma-harmonic extension.  So: solve for it, once, at setup.
+//
+//   A_i[band,band] chi_band = -A_i[band,core] * 1 ,   chi_core = 1
+//
+// band = the overlap layers (depth > 0); the artificial boundary sits OUTSIDE
+// the subdomain, so its zero value is implicit -- exactly PCASM's Dirichlet.
+// Setup-only cost: one small COMM_SELF CG per subdomain.  Zero per-apply cost.
+// With sigma = I this degenerates to a smooth O(1/delta) ramp, i.e. -puramp.
+static PetscErrorCode BuildHarmonicPU(Mat Ai, const std::vector<PetscInt> &depthv,
+                                      PetscInt nloc, std::vector<PetscScalar> &wun)
+{
+    PetscFunctionBeginUser;
+    std::vector<PetscInt> core, band;
+    core.reserve(nloc); band.reserve(nloc);
+    for (PetscInt l = 0; l < nloc; ++l)
+        (depthv[l] == 0 ? core : band).push_back(l);
+
+    wun.assign(nloc, 0.0);
+    for (PetscInt l : core) wun[l] = 1.0;
+    if (band.empty() || core.empty()) PetscFunctionReturn(PETSC_SUCCESS);
+
+    IS is_b = nullptr, is_c = nullptr;
+    PetscCall(ISCreateGeneral(PETSC_COMM_SELF, (PetscInt)band.size(), band.data(),
+                              PETSC_COPY_VALUES, &is_b));
+    PetscCall(ISCreateGeneral(PETSC_COMM_SELF, (PetscInt)core.size(), core.data(),
+                              PETSC_COPY_VALUES, &is_c));
+    Mat Abb = nullptr, Abc = nullptr;
+    PetscCall(MatCreateSubMatrix(Ai, is_b, is_b, MAT_INITIAL_MATRIX, &Abb));
+    PetscCall(MatCreateSubMatrix(Ai, is_b, is_c, MAT_INITIAL_MATRIX, &Abc));
+
+    Vec ones = nullptr, rhs = nullptr, chi = nullptr;
+    PetscCall(MatCreateVecs(Abc, &ones, &rhs));
+    PetscCall(VecSet(ones, 1.0));
+    PetscCall(MatMult(Abc, ones, rhs));
+    PetscCall(VecScale(rhs, -1.0));
+    PetscCall(VecDuplicate(rhs, &chi));
+
+    // The PU needs no precision -- a loose CG + ICC(0) is plenty and keeps the
+    // setup cost negligible next to the subdomain factorisation itself.
+    KSP kh = nullptr;  PC pch = nullptr;
+    PetscCall(KSPCreate(PETSC_COMM_SELF, &kh));
+    PetscCall(KSPSetType(kh, KSPCG));
+    PetscCall(KSPSetOperators(kh, Abb, Abb));
+    PetscCall(KSPSetTolerances(kh, 1e-8, PETSC_DEFAULT, PETSC_DEFAULT, 500));
+    PetscCall(KSPSetNormType(kh, KSP_NORM_PRECONDITIONED));
+    PetscCall(KSPGetPC(kh, &pch));
+    PetscCall(PCSetType(pch, PCICC));
+    PetscCall(PCFactorSetLevels(pch, 0));
+    PetscCall(PCFactorSetShiftType(pch, MAT_SHIFT_POSITIVE_DEFINITE));
+    PetscCall(KSPSolve(kh, rhs, chi));
+
+    const PetscScalar *ca = nullptr;
+    PetscCall(VecGetArrayRead(chi, &ca));
+    for (size_t j = 0; j < band.size(); ++j)
+    {
+        PetscReal v = PetscRealPart(ca[j]);
+        // a discrete maximum principle gives v in [0,1]; clip for the FEM
+        // tensor case where the stiffness matrix need not be an M-matrix
+        wun[band[j]] = (v < 0.0) ? 0.0 : (v > 1.0 ? 1.0 : v);
+    }
+    PetscCall(VecRestoreArrayRead(chi, &ca));
+
+    PetscCall(KSPDestroy(&kh));
+    PetscCall(VecDestroy(&ones)); PetscCall(VecDestroy(&rhs)); PetscCall(VecDestroy(&chi));
+    PetscCall(MatDestroy(&Abb));  PetscCall(MatDestroy(&Abc));
+    PetscCall(ISDestroy(&is_b));  PetscCall(ISDestroy(&is_c));
+    PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 // Build an inner PCASM_BASIC + ICC, compute its overlap-aware multiplicity
 // vector, then install a PCSHELL on the outer KSP that applies
 // D^{-1/2} * M_BASIC^{-1} * D^{-1/2}.
@@ -454,9 +534,13 @@ static void InstallScaledASM(KSP ksp, Mat A,
                              double pu_eps = 0.25,  // eps for weight_mode 3
                              double pu_alpha = 1.0, // normalizer exponent (outer-G probe):
                                                     //   d_i=[own?1:eps]/(1+(m-1)eps^2)^(alpha/2)
-                             double pu_grade = 0.0) // >0: geometric layer-graded weights
+                             double pu_grade = 0.0, // >0: geometric layer-graded weights
                                                     //   w=q^depth (BFS), exact global renorm;
                                                     //   overrides eps/alpha.  q=1 == sASM.
+                             int pu_shape = 0)      // shape of the graded weight:
+                                                    //   0 = q^depth        (-pugrade, as before)
+                                                    //   1 = 1-depth/(O+1)  (-puramp, NEW-A)
+                                                    //   2 = sigma-harmonic (-puharm, NEW-B)
 {
     // cheby_deg == 0 : block solve = preonly + ICC(icc_levels)   [scheme 3]
     // cheby_deg >= 1 : block solve = cheby_deg steps of Chebyshev,
@@ -576,7 +660,7 @@ static void InstallScaledASM(KSP ksp, Mat A,
                 ISGetIndices(is_with_overlap[i], &gidx);
                 PetscInt rstart = 0, rend = 0;
                 MatGetOwnershipRange(A, &rstart, &rend);
-                if (pu_grade > 0.0)
+                if (pu_grade > 0.0 || pu_shape != 0)
                 {
                     // Layer-graded weights: w_unnorm = q^depth, where depth =
                     // graph distance (BFS on the local overlapped block) from
@@ -614,12 +698,36 @@ static void InstallScaledASM(KSP ksp, Mat A,
                         q1.swap(q2);
                     }
                     std::vector<PetscScalar> wun(nloc), w2(nloc);
-                    for (PetscInt l = 0; l < nloc; ++l)
+                    if (pu_shape == 2)
                     {
-                        const PetscInt d = (depthv[l] < 0) ? lev + 1 : depthv[l];
-                        wun[l] = PetscPowReal(pu_grade, (PetscReal)d);
-                        w2[l]  = wun[l]*wun[l];
+                        // NEW-B: sigma-harmonic ramp -- the minimiser of
+                        // int sigma |grad chi|^2 for these boundary data.
+                        BuildHarmonicPU(Ai, depthv, nloc, wun);
                     }
+                    else
+                    {
+                        for (PetscInt l = 0; l < nloc; ++l)
+                        {
+                            const PetscInt d = (depthv[l] < 0) ? lev + 1 : depthv[l];
+                            if (pu_shape == 1)
+                            {
+                                // NEW-A: delta-normalised ramp.  q^depth has a
+                                // decay rate fixed by q, so |grad chi| ~ (1-q)/h
+                                // NO MATTER how wide the overlap is -- which is
+                                // why iter saturates in O.  This shape instead
+                                // gives |grad chi| ~ 1/delta, the scaling the
+                                // C_0^2 <= C(1 + H/delta) bound actually assumes.
+                                const PetscReal t = 1.0 - (PetscReal)d
+                                                        / (PetscReal)(overlap + 1);
+                                wun[l] = (t > 0.0) ? t : 0.0;
+                            }
+                            else
+                            {
+                                wun[l] = PetscPowReal(pu_grade, (PetscReal)d);
+                            }
+                        }
+                    }
+                    for (PetscInt l = 0; l < nloc; ++l) w2[l] = wun[l]*wun[l];
                     Vec ssum = nullptr;             // global sum of squares
                     MatCreateVecs(A, &ssum, NULL);
                     VecSet(ssum, 0.0);
@@ -926,6 +1034,18 @@ int main(int argc, char *argv[])
                         // >0  : Crank-Nicolson monodomain matrix
                         //       A = (1/dt) M + (1/2) K  (mass-dominated as
                         //       dt -> 0, mirrors the parabolic diffusion step)
+    // Conductivity tensor (the axis this suite was missing).
+    //   -aniso r          longitudinal : transverse contrast  r = sigma_l/sigma_t
+    //                     (r = 1, the default, is the isotropic sigma = I of
+    //                      every earlier experiment)
+    //   -fiber ax,ay,az   fiber direction (normalised internally; default 1,0,0)
+    //   -aniso_raw        keep sigma_t = 1 instead of normalising det(sigma) = 1
+    // Default normalisation fixes det(sigma) = 1 so that the CONTRAST, and not
+    // the overall diffusion scale, is what the sweep varies:
+    //     sigma_l = r^(2/3),  sigma_t = r^(-1/3)   (3D, one fibre + two cross)
+    double aniso_r = 1.0;
+    bool   aniso_raw = false;
+    double fib[3] = {1.0, 0.0, 0.0};
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "-source_type" && i + 1 < argc) {
             source_type = std::atoi(argv[i+1]);
@@ -933,7 +1053,46 @@ int main(int argc, char *argv[])
         if (std::string(argv[i]) == "-dt" && i + 1 < argc) {
             dt = std::atof(argv[i+1]);
         }
+        if (std::string(argv[i]) == "-aniso" && i + 1 < argc) {
+            aniso_r = std::atof(argv[i+1]);
+        }
+        if (std::string(argv[i]) == "-aniso_raw") {
+            aniso_raw = true;
+        }
+        if (std::string(argv[i]) == "-fiber" && i + 1 < argc) {
+            std::string f(argv[i+1]);
+            for (char &c : f) if (c == ',') c = ' ';
+            std::istringstream is(f);
+            is >> fib[0] >> fib[1] >> fib[2];
+        }
     }
+    double fn = std::sqrt(fib[0]*fib[0] + fib[1]*fib[1] + fib[2]*fib[2]);
+    if (fn < 1e-14) { fib[0] = 1.0; fib[1] = fib[2] = 0.0; fn = 1.0; }
+    for (int d = 0; d < 3; ++d) fib[d] /= fn;
+
+    double sig_l, sig_t;
+    if (aniso_raw) { sig_l = aniso_r;                      sig_t = 1.0; }
+    else           { sig_l = std::cbrt(aniso_r*aniso_r);   sig_t = 1.0/std::cbrt(aniso_r); }
+
+    // sigma = sigma_t I + (sigma_l - sigma_t) f f^T
+    DenseMatrix sigma_mat(3, 3);
+    for (int a2 = 0; a2 < 3; ++a2)
+        for (int b2 = 0; b2 < 3; ++b2)
+            sigma_mat(a2, b2) = (a2 == b2 ? sig_t : 0.0)
+                              + (sig_l - sig_t) * fib[a2] * fib[b2];
+    MatrixConstantCoefficient sigma_tensor(sigma_mat);
+
+    // Same tensor scaled by the Crank-Nicolson theta = 1/2, for the dt > 0 path.
+    DenseMatrix sigma_half(sigma_mat);
+    sigma_half *= 0.5;
+    MatrixConstantCoefficient sigma_tensor_half(sigma_half);
+
+    const bool use_tensor = (std::fabs(aniso_r - 1.0) > 1e-12);
+    if (my_rank == 0 && use_tensor)
+        std::cout << "[SIGMA] anisotropic tensor: contrast r=" << aniso_r
+                  << (aniso_raw ? "  (raw, sigma_t=1)" : "  (det-normalised)")
+                  << "  sigma_l=" << sig_l << " sigma_t=" << sig_t
+                  << "  fiber=(" << fib[0] << "," << fib[1] << "," << fib[2] << ")\n";
 
     ConstantCoefficient sigma(1.0);
     ConstantCoefficient one_rhs(1.0);
@@ -952,11 +1111,17 @@ int main(int argc, char *argv[])
         ConstantCoefficient mass_coef(1.0 / dt);   // (1/dt) on the mass term
         ConstantCoefficient diff_coef(0.5);        // theta = 1/2 on stiffness
         a.AddDomainIntegrator(new MassIntegrator(mass_coef));
-        a.AddDomainIntegrator(new DiffusionIntegrator(diff_coef));
+        if (use_tensor)
+            a.AddDomainIntegrator(new DiffusionIntegrator(sigma_tensor_half));
+        else
+            a.AddDomainIntegrator(new DiffusionIntegrator(diff_coef));
     }
     else
     {
-        a.AddDomainIntegrator(new DiffusionIntegrator(sigma));
+        if (use_tensor)
+            a.AddDomainIntegrator(new DiffusionIntegrator(sigma_tensor));
+        else
+            a.AddDomainIntegrator(new DiffusionIntegrator(sigma));
     }
     a.Assemble();
     if (my_rank == 0)
@@ -1209,6 +1374,7 @@ int main(int argc, char *argv[])
                 if (std::string(argv[i]) == "-localcheby" && i + 1 < argc)
                     cheby_deg = std::atoi(argv[i+1]);
         double pu_eps = 0.25, pu_alpha = 1.0, pu_grade = 0.0;
+        int    pu_shape = 0;   // 0 q^depth | 1 delta-ramp | 2 sigma-harmonic
         if (scheme == 7)
             for (int i = 1; i < argc; ++i)
             {
@@ -1218,10 +1384,17 @@ int main(int argc, char *argv[])
                     pu_alpha = std::atof(argv[i+1]);
                 if (std::string(argv[i]) == "-pugrade" && i + 1 < argc)
                     pu_grade = std::atof(argv[i+1]);
+                if (std::string(argv[i]) == "-puramp")  pu_shape = 1;   // NEW-A
+                if (std::string(argv[i]) == "-puharm")  pu_shape = 2;   // NEW-B
             }
+        if (my_rank == 0 && pu_shape)
+            std::cout << "[PU] shape = "
+                      << (pu_shape == 1 ? "delta-ramp  w=1-depth/(O+1)   [-puramp]"
+                                        : "sigma-harmonic local solve    [-puharm]")
+                      << "  (exact global renorm sum_i w_i^2 = 1)\n";
         int weight_mode = (scheme == 5) ? 1 : (scheme == 6) ? 2 : (scheme == 7) ? 3 : 0;
         InstallScaledASM(ksp_raw, A_raw, overlap, icc_lev, my_rank, cheby_deg,
-                         weight_mode, pu_eps, pu_alpha, pu_grade);
+                         weight_mode, pu_eps, pu_alpha, pu_grade, pu_shape);
     }
     else if (scheme == 8)
     {
