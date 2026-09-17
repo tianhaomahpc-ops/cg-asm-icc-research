@@ -37,8 +37,12 @@ removed, headline tables, reproduction recipe) is in
 > high contrast the multiplicity scaling `1/sqrt(m_k)` becomes *slower than
 > unweighted BASIC*. Two operator-aware partition-of-unity replacements
 > (`-puramp`, `-puharm`) and a reusable coarse basis fix it.
-> See [`REPORT_aniso_pu_zh.md`](./REPORT_aniso_pu_zh.md) and the
-> self-contained harness in [`asm_bug_demo/aniso/`](./asm_bug_demo/aniso/).
+> Measured on the real stack (MFEM 4.9 + PETSc + MPI, 3D P1 tet, METIS,
+> up to 16 ranks): **[`REPORT_aniso_mfem_zh.md`](./REPORT_aniso_mfem_zh.md)** —
+> principle, analysis, the new method, and a list of what the earlier 2D
+> harness got wrong. The 2D harness itself is in
+> [`asm_bug_demo/aniso/`](./asm_bug_demo/aniso/), its write-up in
+> [`REPORT_aniso_pu_zh.md`](./REPORT_aniso_pu_zh.md) (superseded).
 
 ---
 

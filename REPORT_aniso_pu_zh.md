@@ -1,5 +1,10 @@
 # σ 张量轴:overlap 反常的对比度依赖,与两个新的单位分解
 
+> **⚠ 结论已被取代。** 本报告的数字来自 2D numpy 谐振器。在真实 MFEM/PETSc/MPI 3D 栈上重测后,
+> 其中六条结论不成立(对比度翻转、sASM 变负担、1.85× 增益、δ-ramp 解饱和、粗空间 3.8×、ω 相关性)。
+> 请以 [`REPORT_aniso_mfem_zh.md`](./REPORT_aniso_mfem_zh.md) 为准 —— 那里有逐条撤回清单(第 6 节)。
+> 本文件保留作为 2D 方法学与谐振器的记录。
+
 本报告补上此前整套实验缺失的一根轴。`asm_demo.cpp` 到上一个提交为止一直是
 `ConstantCoefficient sigma(1.0)`——Sys1/Sys2/Sys3 与全 Dirichlet 四个变体**全部是各向同性标量系数**。
 而心脏组织的 σ 是张量。本报告回答三个问题:
